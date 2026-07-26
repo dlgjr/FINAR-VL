@@ -1,0 +1,2 @@
+import{c as t}from"./KHR_interactivity.DEAVS2UW.js";import{R as r}from"./index.BoI39RQH.js";class n extends t{constructor(){super(...arguments),this.initPriority=-1,this.type="SceneReady"}_executeEvent(e,s){return this._execute(e),!0}_preparePendingTasks(e){}_cancelPendingTasks(e){}getClassName(){return"FlowGraphSceneReadyEventBlock"}}r("FlowGraphSceneReadyEventBlock",n);export{n as FlowGraphSceneReadyEventBlock};
+//# sourceMappingURL=flowGraphSceneReadyEventBlock.D16NDYdp.js.map

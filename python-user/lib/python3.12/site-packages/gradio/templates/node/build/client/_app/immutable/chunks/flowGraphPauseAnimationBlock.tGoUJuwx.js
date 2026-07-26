@@ -1,0 +1,2 @@
+import{b as o}from"./KHR_interactivity.DEAVS2UW.js";import{R as t}from"./declarationMapper.UBCwU7BT.js";import{R as i}from"./index.BoI39RQH.js";class e extends o{constructor(a){super(a),this.animationToPause=this.registerDataInput("animationToPause",t)}_execute(a){this.animationToPause.getValue(a).pause(),this.out._activateSignal(a)}getClassName(){return"FlowGraphPauseAnimationBlock"}}i("FlowGraphPauseAnimationBlock",e);export{e as FlowGraphPauseAnimationBlock};
+//# sourceMappingURL=flowGraphPauseAnimationBlock.tGoUJuwx.js.map

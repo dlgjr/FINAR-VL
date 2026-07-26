@@ -1,0 +1,32 @@
+Metadata-Version: 2.1
+Name: cpm-kernels
+Version: 1.0.11
+Summary: CPM CUDA kernels
+Home-page: UNKNOWN
+License: Apache 2.0
+Keywords: CPM,cuda,AI
+Platform: UNKNOWN
+Classifier: Development Status :: 3 - Alpha
+Classifier: Environment :: GPU :: NVIDIA CUDA :: 10.1
+Classifier: Environment :: GPU :: NVIDIA CUDA :: 10.2
+Classifier: Environment :: GPU :: NVIDIA CUDA :: 11.0
+Classifier: Environment :: GPU :: NVIDIA CUDA :: 11.1
+Classifier: Environment :: GPU :: NVIDIA CUDA :: 11.2
+Classifier: Environment :: GPU :: NVIDIA CUDA :: 11.3
+Classifier: Environment :: GPU :: NVIDIA CUDA :: 11.4
+Classifier: Environment :: GPU :: NVIDIA CUDA :: 11.5
+Classifier: Intended Audience :: Developers
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Natural Language :: English
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Classifier: Topic :: Software Development :: Libraries :: Python Modules
+Description-Content-Type: text/markdown
+License-File: LICENSE
+
+# CPM kernels
+
+CUDA Kernels for cpm.
+

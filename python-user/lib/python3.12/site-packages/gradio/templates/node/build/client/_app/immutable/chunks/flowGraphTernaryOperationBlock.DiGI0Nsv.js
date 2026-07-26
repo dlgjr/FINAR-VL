@@ -1,0 +1,2 @@
+import{F as o}from"./flowGraphCachedOperationBlock.CtP7sxiu.js";class n extends o{constructor(t,a,s,e,r,i,h){super(e,h),this._operation=r,this._className=i,this.a=this.registerDataInput("a",t),this.b=this.registerDataInput("b",a),this.c=this.registerDataInput("c",s)}_doOperation(t){return this._operation(this.a.getValue(t),this.b.getValue(t),this.c.getValue(t))}getClassName(){return this._className}}export{n as F};
+//# sourceMappingURL=flowGraphTernaryOperationBlock.DiGI0Nsv.js.map

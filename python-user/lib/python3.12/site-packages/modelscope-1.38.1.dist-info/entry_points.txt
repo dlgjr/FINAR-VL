@@ -1,0 +1,12 @@
+[console_scripts]
+modelscope = modelscope.cli.cli:run_cmd
+ms = modelscope.cli.cli:run_cmd
+
+[modelscope_hub.cli_plugins]
+llamafile = modelscope.cli.llamafile:LlamafileCMD
+modelcard = modelscope.cli.modelcard:ModelCardCMD
+pipeline = modelscope.cli.pipeline:PipelineCMD
+plugins = modelscope.cli.plugins:PluginsCMD
+server = modelscope.cli.server:ServerCMD
+skills = modelscope.cli.skills:SkillsCMD
+studio = modelscope.cli.studio:StudioCMD

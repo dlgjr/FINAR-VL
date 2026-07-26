@@ -1,0 +1,2 @@
+[console_scripts]
+trl = trl.cli:main

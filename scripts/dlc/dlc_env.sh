@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+
+export QWEN3VL_ROOT="${QWEN3VL_ROOT:-/mnt/nas/bihaoran/qwen3vl}"
+
+export BASE_MODEL="${BASE_MODEL:-$QWEN3VL_ROOT/models/models/Qwen--Qwen3-VL-2B-Instruct/snapshots/master}"
+export SFT_DATA="${SFT_DATA:-$QWEN3VL_ROOT/data/train.jsonl}"
+export GSPO_DATA="${GSPO_DATA:-$QWEN3VL_ROOT/data/gspo_smoke.jsonl}"
+export REWARD_PLUGIN="${REWARD_PLUGIN:-$QWEN3VL_ROOT/scripts/dlc/gspo_smoke_reward.py}"
+
+export OUTPUT_ROOT="${OUTPUT_ROOT:-$QWEN3VL_ROOT/output}"
+export LOG_ROOT="${LOG_ROOT:-$QWEN3VL_ROOT/logs}"
+
+# 第三方 Python 包放到 NAS，但始终使用 /opt/ac2/bin/python。
+export PYTHONUSERBASE="${PYTHONUSERBASE:-$QWEN3VL_ROOT/python-user}"
+export PYTHON_USER_SITE="$PYTHONUSERBASE/lib/python3.12/site-packages"
+export PATH="$PYTHONUSERBASE/bin:/opt/ac2/bin:$PATH"
+export PYTHONPATH="$PYTHON_USER_SITE${PYTHONPATH:+:$PYTHONPATH}"
+unset PYTHONNOUSERSITE
+unset VIRTUAL_ENV
+
+export HF_HOME="${HF_HOME:-$QWEN3VL_ROOT/cache/huggingface}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HF_HOME/datasets}"
+export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HOME/hub}"
+export MODELSCOPE_CACHE="${MODELSCOPE_CACHE:-$QWEN3VL_ROOT/cache/modelscope}"
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$QWEN3VL_ROOT/cache/pip}"
+export TORCH_HOME="${TORCH_HOME:-$QWEN3VL_ROOT/cache/torch}"
+export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-$QWEN3VL_ROOT/cache/torch-extensions}"
+
+export TMPDIR="${TMPDIR:-$QWEN3VL_ROOT/tmp}"
+export TMP="$TMPDIR"
+export TEMP="$TMPDIR"
+
+export NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
+export MASTER_PORT="${MASTER_PORT:-29500}"
+
+if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
+  export CUDA_VISIBLE_DEVICES="$(seq -s, 0 $((NPROC_PER_NODE - 1)))"
+fi
+
+export IMAGE_MAX_TOKEN_NUM="${IMAGE_MAX_TOKEN_NUM:-256}"
+
+export SFT_MAX_STEPS="${SFT_MAX_STEPS:-2}"
+export GSPO_MAX_STEPS="${GSPO_MAX_STEPS:-2}"
+export MAX_LENGTH="${MAX_LENGTH:-1024}"
+export MAX_COMPLETION_LENGTH="${MAX_COMPLETION_LENGTH:-32}"
+
+export SFT_BATCH_SIZE="${SFT_BATCH_SIZE:-1}"
+export SFT_GRAD_ACC="${SFT_GRAD_ACC:-1}"
+export GSPO_BATCH_SIZE="${GSPO_BATCH_SIZE:-1}"
+export GSPO_GRAD_ACC="${GSPO_GRAD_ACC:-2}"
+export NUM_GENERATIONS="${NUM_GENERATIONS:-2}"
+export NUM_ITERATIONS="${NUM_ITERATIONS:-2}"
+
+export USE_VLLM="${USE_VLLM:-true}"
+export VLLM_MODE="${VLLM_MODE:-colocate}"
+export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.25}"
+export VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
+export VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-1024}"
+export VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-2}"
+export VLLM_ENFORCE_EAGER="${VLLM_ENFORCE_EAGER:-true}"
+export VLLM_SLEEP_LEVEL="${VLLM_SLEEP_LEVEL:-1}"
+
+mkdir -p \
+  "$PYTHONUSERBASE" \
+  "$OUTPUT_ROOT" \
+  "$LOG_ROOT" \
+  "$HF_DATASETS_CACHE" \
+  "$HUGGINGFACE_HUB_CACHE" \
+  "$MODELSCOPE_CACHE" \
+  "$PIP_CACHE_DIR" \
+  "$TORCH_HOME" \
+  "$TORCH_EXTENSIONS_DIR" \
+  "$TMPDIR"

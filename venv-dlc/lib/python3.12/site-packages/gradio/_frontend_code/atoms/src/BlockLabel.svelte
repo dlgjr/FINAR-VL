@@ -1,0 +1,90 @@
+<script lang="ts">
+	export let label: string | null = null;
+	export let Icon: any;
+	export let show_label = true;
+	export let disable = false;
+	export let float = true;
+	export let rtl = false;
+</script>
+
+<label
+	for=""
+	class:hide={!show_label}
+	class:sr-only={!show_label}
+	class:float
+	class:hide-label={disable}
+	data-testid="block-label"
+	dir={rtl ? "rtl" : "ltr"}
+>
+	<span>
+		<Icon />
+	</span>
+	{label}
+</label>
+
+<style>
+	label {
+		display: inline-flex;
+		align-items: center;
+		z-index: var(--layer-2);
+		box-shadow: var(--block-label-shadow);
+		border: var(--block-label-border-width) solid
+			var(--block-label-border-color);
+		border-top: none;
+		border-left: none;
+		border-radius: var(--block-label-radius);
+		background: var(--block-label-background-fill);
+		padding: var(--block-label-padding);
+		pointer-events: none;
+		color: var(--block-label-text-color);
+		font-weight: var(--block-label-text-weight);
+		font-size: var(--block-label-text-size);
+		line-height: var(--line-sm);
+	}
+	:global(.gr-group) label {
+		border-top-left-radius: 0;
+	}
+
+	label.float {
+		position: absolute;
+		top: var(--block-label-margin);
+		left: var(--block-label-margin);
+	}
+	label:not(.float) {
+		position: static;
+		margin-top: var(--block-label-margin);
+		margin-left: var(--block-label-margin);
+	}
+
+	.hide {
+		display: none;
+	}
+
+	span {
+		opacity: 0.8;
+		margin-right: var(--size-2);
+		width: calc(var(--block-label-text-size) - 1px);
+		height: calc(var(--block-label-text-size) - 1px);
+	}
+	.hide-label {
+		box-shadow: none;
+		border-width: 0;
+		background: transparent;
+		overflow: visible;
+	}
+
+	label[dir="rtl"] {
+		border: var(--block-label-border-width) solid
+			var(--block-label-border-color);
+		border-top: none;
+		border-right: none;
+		border-bottom-left-radius: var(--block-radius);
+		border-bottom-right-radius: var(--block-label-radius);
+		border-top-left-radius: var(--block-label-radius);
+	}
+
+	label[dir="rtl"] span {
+		margin-left: var(--size-2);
+		margin-right: 0;
+	}
+</style>

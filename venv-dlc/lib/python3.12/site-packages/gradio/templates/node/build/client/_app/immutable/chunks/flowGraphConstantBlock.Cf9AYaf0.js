@@ -1,0 +1,2 @@
+import{F as s,h as e}from"./KHR_interactivity.DEAVS2UW.js";import{k as o}from"./declarationMapper.UBCwU7BT.js";import{R as u}from"./index.BoI39RQH.js";class r extends s{constructor(t){super(t),this.config=t,this.output=this.registerDataOutput("output",o(t.value))}_updateOutputs(t){this.output.setValue(this.config.value,t)}getClassName(){return"FlowGraphConstantBlock"}serialize(t={},a=e){super.serialize(t),a("value",this.config.value,t.config)}}u("FlowGraphConstantBlock",r);export{r as FlowGraphConstantBlock};
+//# sourceMappingURL=flowGraphConstantBlock.Cf9AYaf0.js.map

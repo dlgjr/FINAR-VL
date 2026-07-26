@@ -1,0 +1,1 @@
+{"version":3,"file":"color-BxRWE_zS.js","sources":["../../../../../../js/app/.svelte-kit/adapter-node/chunks/color.js"],"sourcesContent":["import{o}from\"./client.js\";const t=r=>o[r%o.length];export{t as g};\n//# sourceMappingURL=color.js.map\n"],"names":["o"],"mappings":";;AAAgC,MAAC,CAAC,CAAC,CAAC,EAAEA,EAAC,CAAC,CAAC,CAACA,EAAC,CAAC,MAAM;;;;"}

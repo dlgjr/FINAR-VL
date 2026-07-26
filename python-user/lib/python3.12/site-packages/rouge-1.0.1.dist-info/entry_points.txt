@@ -1,0 +1,3 @@
+[console_scripts]
+rouge = bin.rouge_cmd:main
+

@@ -1,0 +1,6 @@
+import { c as create_ssr_component, d as add_attribute } from './ssr-C3HYbsxA.js';
+
+const x=create_ssr_component((A,a,e,O)=>{let {value:c}=a,{display_mode:d}=a,{clear_color:u}=a,{camera_position:s}=a,{zoom_speed:m}=a,{pan_speed:_}=a,p,r;function f(t,o,z){const l=r.camera;t[0]!==null&&(l.alpha=t[0]*Math.PI/180),t[1]!==null&&(l.beta=t[1]*Math.PI/180),t[2]!==null&&(l.radius=t[2]),l.lowerRadiusLimit=.1;const C=()=>{l.wheelPrecision=250/(l.radius*o),l.panningSensibility=1e4*z/l.radius;};C(),l.onAfterCheckInputsObservable.add(C);}function y(){}return a.value===void 0&&e.value&&c!==void 0&&e.value(c),a.display_mode===void 0&&e.display_mode&&d!==void 0&&e.display_mode(d),a.clear_color===void 0&&e.clear_color&&u!==void 0&&e.clear_color(u),a.camera_position===void 0&&e.camera_position&&s!==void 0&&e.camera_position(s),a.zoom_speed===void 0&&e.zoom_speed&&m!==void 0&&e.zoom_speed(m),a.pan_speed===void 0&&e.pan_speed&&_!==void 0&&e.pan_speed(_),a.update_camera===void 0&&e.update_camera&&f!==void 0&&e.update_camera(f),a.reset_camera_position===void 0&&e.reset_camera_position&&y!==void 0&&e.reset_camera_position(y),c.url,`<canvas${add_attribute("this",p,0)}></canvas>`});
+
+export { x as default };
+//# sourceMappingURL=Canvas3D-B_jcxqUB.js.map

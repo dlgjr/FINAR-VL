@@ -1,0 +1,348 @@
+import json
+from collections.abc import Callable
+from contextlib import ExitStack
+from typing import TYPE_CHECKING, Any, TextIO
+
+from .parse_array import parse_array as _parse_array
+from .parse_comment import parse_comment as _parse_comment
+from .parse_number import parse_number as _parse_number
+from .parse_object import parse_object as _parse_object
+from .parse_string import parse_string as _parse_string
+from .parser_parenthesized import parenthesized_is_explicit_tuple, top_level_parenthesized_can_start_value
+from .utils.constants import STRING_DELIMITERS, JSONReturnType
+from .utils.json_context import ContextValues, JsonContext
+from .utils.object_comparer import ObjectComparer
+from .utils.string_file_wrapper import StringFileWrapper
+
+if TYPE_CHECKING:
+    from .schema_repair import SchemaRepairer
+
+
+class JSONParser:
+    # Split the parse methods into separate files because this one was like 3000 lines
+    def parse_array(
+        self,
+        schema: dict[str, Any] | bool | None = None,
+        path: str = "$",
+        closing_delimiter: str = "]",
+    ) -> list[JSONReturnType]:
+        return _parse_array(self, schema, path, closing_delimiter)
+
+    def parse_comment(self) -> JSONReturnType:
+        return _parse_comment(self)
+
+    def parse_number(self) -> JSONReturnType:
+        return _parse_number(self)
+
+    def parse_object(
+        self,
+        schema: dict[str, Any] | bool | None = None,
+        path: str = "$",
+    ) -> JSONReturnType:
+        return _parse_object(self, schema, path)
+
+    def parse_string(self) -> JSONReturnType:
+        return _parse_string(self)
+
+    def __init__(
+        self,
+        json_str: str | StringFileWrapper,
+        json_fd: TextIO | None,
+        logging: bool | None,
+        json_fd_chunk_length: int = 0,
+        stream_stable: bool = False,
+        strict: bool = False,
+        try_valid_json_suffix: bool = False,
+    ) -> None:
+        # The string to parse
+        self.json_str: str | StringFileWrapper = json_str
+        # Alternatively, the file description with a json file in it
+        if json_fd:
+            # This is a trick we do to treat the file wrapper as an array
+            self.json_str = StringFileWrapper(json_fd, json_fd_chunk_length)
+        # Index is our iterator that will keep track of which character we are looking at right now
+        self.index: int = 0
+        # This is used in the object member parsing to manage the special cases of missing quotes in key or value
+        self.context = JsonContext()
+        self.deferred_contexts: list[ContextValues] = []
+        # Use this to log the activity, but only if logging is active
+
+        # This is a trick but a beautiful one. We call self.log in the code over and over even if it's not needed.
+        # We could add a guard in the code for each call but that would make this code unreadable, so here's this neat trick
+        # Replace self.log with a noop
+        self.logging = logging
+        self.logger: list[dict[str, str]] = []
+        if logging:
+            self.log = self._log
+        else:
+            # No-op
+            self.log = lambda *args, **kwargs: None  # noqa: ARG005
+        # When the json to be repaired is the accumulation of streaming json at a certain moment.
+        # e.g. json obtained from llm response.
+        # If this parameter to True will keep the repair results stable. For example:
+        #   case 1:  '{"key": "val\\' => '{"key": "val"}'
+        #   case 2:  '{"key": "val\\n' => '{"key": "val\\n"}'
+        #   case 3:  '{"key": "val\\n123,`key2:value2' => '{"key": "val\\n123,`key2:value2"}'
+        #   case 4:  '{"key": "val\\n123,`key2:value2`"}' => '{"key": "val\\n123,`key2:value2`"}'
+        self.stream_stable = stream_stable
+        # Over time the library got more and more complex heuristics to repair JSON. Some of these heuristics
+        # may not be desirable in some use cases and the user would prefer json_repair to return an exception.
+        # So strict mode was added to disable some of those heuristics.
+        self.strict = strict
+        self.try_valid_json_suffix = try_valid_json_suffix
+        self.has_tried_valid_json_suffix = False
+        self.schema_repairer: SchemaRepairer | None = None
+
+    def parse(
+        self,
+    ) -> JSONReturnType:
+        return self._parse_top_level(self.parse_json)
+
+    def parse_with_schema(
+        self,
+        repairer: "SchemaRepairer",
+        schema: dict[str, Any] | bool,
+    ) -> JSONReturnType:
+        """Parse with schema guidance enabled for all nested values."""
+        self.schema_repairer = repairer
+        return self._parse_top_level(lambda: self.parse_json(schema, "$"))
+
+    # Consolidate top-level parsing so we handle multiple sequential JSON values consistently
+    # (including update semantics and strict-mode validation).
+    def _parse_top_level(self, parse_element: Callable[[], JSONReturnType]) -> JSONReturnType:
+        json = parse_element()
+        if self.index < len(self.json_str):
+            self.log(
+                "The parser returned early, checking if there's more json elements",
+            )
+            json = [json]
+            while self.index < len(self.json_str):
+                self.context.clear()
+                self.deferred_contexts.clear()
+                is_comma_separated = self._next_top_level_value_is_comma_separated()
+                element_start_index = self.index
+                j = parse_element()
+                if self.strict and self.index > element_start_index:
+                    self.log(
+                        "Multiple top-level JSON elements found in strict mode, raising an error",
+                    )
+                    raise ValueError("Multiple top-level JSON elements found in strict mode.")
+                if j:
+                    if not is_comma_separated and ObjectComparer.is_same_object(json[-1], j):
+                        # Treat repeated objects as updates: keep the newest value.
+                        json.pop()
+                    else:
+                        if not json[-1]:
+                            json.pop()
+                    json.append(j)
+                else:
+                    self.index += 1
+            if len(json) == 1:
+                self.log(
+                    "There were no more elements, returning the element without the array",
+                )
+                json = json[0]
+        return json
+
+    def _next_top_level_value_is_comma_separated(self) -> bool:
+        idx = self.scroll_whitespaces()
+        if self.get_char_at(idx) == ",":
+            return True
+
+        idx = self.index - 1
+        while idx >= 0 and self.json_str[idx].isspace():
+            idx -= 1
+        return idx >= 0 and self.json_str[idx] == ","
+
+    def _try_parse_valid_json_value(self) -> tuple[bool, JSONReturnType]:
+        if (
+            not self.try_valid_json_suffix
+            or self.has_tried_valid_json_suffix
+            or not self.context.empty
+            or self.index == 0
+            or not isinstance(self.json_str, str)
+        ):
+            return False, ""
+
+        self.has_tried_valid_json_suffix = True
+        try:
+            value, end_idx = json.JSONDecoder().raw_decode(self.json_str[self.index :])
+        except json.JSONDecodeError:
+            return False, ""
+
+        self.index += end_idx
+        return True, value
+
+    def parse_json(
+        self,
+        schema: dict[str, Any] | bool | None = None,
+        path: str = "$",
+    ) -> JSONReturnType:
+        """Parse the next JSON value and, when configured, enforce schema constraints."""
+        if self.deferred_contexts:
+            deferred_contexts, self.deferred_contexts = self.deferred_contexts, []
+            with ExitStack() as stack:
+                for context_value in deferred_contexts:
+                    stack.enter_context(self.context.enter(context_value))
+                return self.parse_json(schema, path)
+
+        repairer, schema = self._resolve_schema_for_parse(schema)
+
+        while True:
+            char = self.get_char_at()
+            # None means that we are at the end of the string provided
+            if char is None:
+                return ""
+            if self.try_valid_json_suffix and char in ["{", "["]:
+                parsed_suffix, value = self._try_parse_valid_json_value()
+                if parsed_suffix:
+                    return self._finalize_parsed_value(value, repairer, schema, path)
+            # <object> starts with '{'
+            if char == "{":
+                self.index += 1
+                value = self.parse_object(schema, path) if repairer else self.parse_object()
+                return self._finalize_parsed_value(value, repairer, schema, path)
+            # <array> starts with '['
+            if char == "[":
+                self.index += 1
+                value = self.parse_array(schema, path) if repairer else self.parse_array()
+                return self._finalize_parsed_value(value, repairer, schema, path)
+            # Python tuple literals and grouped values start with '('
+            if char == "(":
+                # Keep top-level tuple detection conservative so inline prose like
+                # "note (clarification):" does not hijack later JSON blocks.
+                if not self.context.empty or self.top_level_parenthesized_can_start_value():
+                    value = self.parse_parenthesized(schema, path) if repairer else self.parse_parenthesized()
+                    return self._finalize_parsed_value(value, repairer, schema, path)
+                self.index += 1
+                continue
+            # <string> starts with a quote
+            if not self.context.empty and (char in STRING_DELIMITERS or char.isalpha()):
+                value = self.parse_string()
+                return self._finalize_parsed_value(value, repairer, schema, path)
+            # <number> starts with [0-9] or minus
+            if not self.context.empty and (char.isdigit() or char == "-" or char == "."):
+                value = self.parse_number()
+                return self._finalize_parsed_value(value, repairer, schema, path)
+            if char in ["#", "/"]:
+                value = self.parse_comment()
+                return self._finalize_parsed_value(value, repairer, schema, path)
+            # If everything else fails, we just ignore and move on
+            self.index += 1
+
+    def _resolve_schema_for_parse(
+        self,
+        schema: dict[str, Any] | bool | None,
+    ) -> tuple["SchemaRepairer | None", dict[str, Any] | bool | None]:
+        repairer = self.schema_repairer if self.schema_repairer is not None and schema not in (None, True) else None
+        if repairer is None:
+            return None, schema
+
+        schema = repairer.resolve_schema(schema)
+        if schema is True:
+            return None, schema
+        if schema is False:
+            raise ValueError("Schema does not allow any values.")
+        return repairer, schema
+
+    @staticmethod
+    def _finalize_parsed_value(
+        value: JSONReturnType,
+        repairer: "SchemaRepairer | None",
+        schema: dict[str, Any] | bool | None,
+        path: str,
+    ) -> JSONReturnType:
+        if repairer is None:
+            return value
+        return repairer.repair_value(value, schema, path)
+
+    def get_char_at(self, count: int = 0) -> str | None:
+        # Why not use something simpler? Because try/except in python is a faster alternative to an "if" statement that is often True
+        try:
+            return self.json_str[self.index + count]
+        except IndexError:
+            return None
+
+    def skip_whitespaces(self) -> None:
+        """
+        This function quickly iterates on whitespaces, moving the self.index forward
+        """
+        try:
+            char = self.json_str[self.index]
+            while char.isspace():
+                self.index += 1
+                char = self.json_str[self.index]
+        except IndexError:
+            pass
+
+    def scroll_whitespaces(self, idx: int = 0) -> int:
+        """
+        This function quickly iterates on whitespaces. Doesn't move the self.index and returns the offset from self.index
+        """
+        try:
+            char = self.json_str[self.index + idx]
+            while char.isspace():
+                idx += 1
+                char = self.json_str[self.index + idx]
+        except IndexError:
+            pass
+        return idx
+
+    def skip_to_character(self, character: str | list[str], idx: int = 0) -> int:
+        """
+        Advance from (self.index + idx) until we hit an *unescaped* target character.
+        Returns the offset (idx) from self.index to that position, or the distance to the end if not found.
+        """
+        targets = set(character) if isinstance(character, list) else {character}
+        i = self.index + idx
+        n = len(self.json_str)
+        backslashes = 0  # count of consecutive '\' immediately before current char
+
+        while i < n:
+            ch = self.json_str[i]
+
+            if ch == "\\":
+                backslashes += 1
+                i += 1
+                continue
+
+            # ch is not a backslash; if it's a target and not escaped (even backslashes), we're done
+            if ch in targets and (backslashes % 2 == 0):
+                return i - self.index
+
+            # reset backslash run when we see a non-backslash
+            backslashes = 0
+            i += 1
+
+        # not found; return distance to end
+        return n - self.index
+
+    def parenthesized_is_explicit_tuple(self) -> bool:
+        return parenthesized_is_explicit_tuple(self)
+
+    def top_level_parenthesized_can_start_value(self) -> bool:
+        return top_level_parenthesized_can_start_value(self)
+
+    def parse_parenthesized(
+        self,
+        schema: dict[str, Any] | bool | None = None,
+        path: str = "$",
+    ) -> JSONReturnType:
+        explicit_tuple = self.parenthesized_is_explicit_tuple()
+        self.index += 1
+        values = self.parse_array(schema, path, closing_delimiter=")")
+        if explicit_tuple or len(values) != 1:
+            return values
+        return values[0]
+
+    def _log(self, text: str) -> None:
+        window: int = 10
+        start: int = max(self.index - window, 0)
+        end: int = min(self.index + window, len(self.json_str))
+        context: str = self.json_str[start:end]
+        self.logger.append(
+            {
+                "text": text,
+                "context": context,
+            }
+        )

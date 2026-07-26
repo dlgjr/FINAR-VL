@@ -1,0 +1,6 @@
+#!/opt/ac2/bin/python
+import sys
+from swift.cli.main import cli_main
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(cli_main())
