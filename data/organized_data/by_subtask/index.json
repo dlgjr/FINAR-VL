@@ -1,0 +1,406 @@
+{
+  "version": 1,
+  "source_manifests": [
+    "organized_data/multimodal/manifest.jsonl",
+    "organized_data/text_only/manifest.jsonl"
+  ],
+  "record_count": 29847,
+  "classification_model": {
+    "primary_subtask": "exactly_one",
+    "subtask_tags": "one_or_more",
+    "families": {
+      "A": "视觉感知与结构化抽取",
+      "B": "基础量化与时序推理",
+      "C": "综合金融分析与复杂推理",
+      "D": "检索、交互与智能体"
+    },
+    "subtasks": {
+      "P01_OCR": {
+        "name": "金融 OCR 与专用元素识别",
+        "family": "A",
+        "folder": "01_financial_ocr_elements",
+        "definition": "识别金融页面中的文字、数字、实体、证券代码、印章和公式。",
+        "primary_count": 1188,
+        "tagged_count": 1188,
+        "source_counts": {
+          "mme_finance": 769,
+          "openfindata": 220,
+          "visfineval": 199
+        },
+        "modality_counts": {
+          "multimodal": 968,
+          "text_only": 220
+        },
+        "completeness_counts": {
+          "usable": 1188
+        }
+      },
+      "P02_DETECTION": {
+        "name": "金融目标检测与视觉定位",
+        "family": "A",
+        "folder": "02_financial_detection_localization",
+        "definition": "判断或定位印章、标记、文本块、表格字段和其他视觉目标。",
+        "primary_count": 2395,
+        "tagged_count": 2395,
+        "source_counts": {
+          "mme_finance": 2395
+        },
+        "modality_counts": {
+          "multimodal": 2395
+        },
+        "completeness_counts": {
+          "usable": 2395
+        }
+      },
+      "P03_TABLE": {
+        "name": "金融表格识别与结构解析",
+        "family": "A",
+        "folder": "03_financial_table_parsing",
+        "definition": "理解表格行列、表头、合并关系、单位及结构化内容。",
+        "primary_count": 84,
+        "tagged_count": 84,
+        "source_counts": {
+          "mme_finance": 84
+        },
+        "modality_counts": {
+          "multimodal": 84
+        },
+        "completeness_counts": {
+          "usable": 84
+        }
+      },
+      "P04_CHART": {
+        "name": "金融图表数据提取",
+        "family": "A",
+        "folder": "04_financial_chart_extraction",
+        "definition": "从柱状图、折线图、饼图和组合图读取数值、标签与趋势。",
+        "primary_count": 1369,
+        "tagged_count": 1369,
+        "source_counts": {
+          "mme_finance": 76,
+          "unifineval": 369,
+          "visfineval": 924
+        },
+        "modality_counts": {
+          "multimodal": 1369
+        },
+        "completeness_counts": {
+          "incomplete": 276,
+          "usable": 1093
+        }
+      },
+      "P05_RELATION": {
+        "name": "金融关系图与股权结构解析",
+        "family": "A",
+        "folder": "05_financial_relation_graph",
+        "definition": "理解股权、组织、业务流程及实体之间的图关系。",
+        "primary_count": 919,
+        "tagged_count": 919,
+        "source_counts": {
+          "visfineval": 919
+        },
+        "modality_counts": {
+          "multimodal": 919
+        },
+        "completeness_counts": {
+          "usable": 919
+        }
+      },
+      "P06_ARITHMETIC": {
+        "name": "金融基础算术与指标计算",
+        "family": "B",
+        "folder": "06_financial_arithmetic_metrics",
+        "definition": "完成加减乘除、增长率、利润率、收益率和估值指标计算。",
+        "primary_count": 2897,
+        "tagged_count": 9934,
+        "source_counts": {
+          "mme_finance": 74,
+          "openfindata": 70,
+          "unifineval": 597,
+          "visfineval": 2156
+        },
+        "modality_counts": {
+          "multimodal": 2827,
+          "text_only": 70
+        },
+        "completeness_counts": {
+          "incomplete": 423,
+          "usable": 2474
+        }
+      },
+      "P07_STATISTICS": {
+        "name": "金融统计与比较排序推理",
+        "family": "B",
+        "folder": "07_financial_statistics_comparison",
+        "definition": "完成统计量、实体比较、排序、极值、波动和相关性判断。",
+        "primary_count": 5872,
+        "tagged_count": 5872,
+        "source_counts": {
+          "unifineval": 339,
+          "visfineval": 5533
+        },
+        "modality_counts": {
+          "multimodal": 5872
+        },
+        "completeness_counts": {
+          "incomplete": 282,
+          "usable": 5590
+        }
+      },
+      "P08_KLINE": {
+        "name": "K线与金融时序分析",
+        "family": "B",
+        "folder": "08_kline_time_series",
+        "definition": "理解 K 线、技术指标、量价关系和金融时间序列阶段变化。",
+        "primary_count": 1206,
+        "tagged_count": 1206,
+        "source_counts": {
+          "mme_finance": 82,
+          "visfineval": 1124
+        },
+        "modality_counts": {
+          "multimodal": 1206
+        },
+        "completeness_counts": {
+          "usable": 1206
+        }
+      },
+      "P09_KNOWLEDGE": {
+        "name": "多模态金融知识问答",
+        "family": "C",
+        "folder": "09_multimodal_financial_knowledge",
+        "definition": "结合材料回答金融概念、制度、术语、产品和业务知识问题。",
+        "primary_count": 483,
+        "tagged_count": 483,
+        "source_counts": {
+          "mme_finance": 291,
+          "openfindata": 150,
+          "unifineval": 42
+        },
+        "modality_counts": {
+          "multimodal": 333,
+          "text_only": 150
+        },
+        "completeness_counts": {
+          "incomplete": 25,
+          "usable": 458
+        }
+      },
+      "P10_CAUSAL": {
+        "name": "金融解释、异常与因果分析",
+        "family": "C",
+        "folder": "10_financial_explanation_causal",
+        "definition": "解释指标变化、事件影响和异常现象，并区分相关与因果。",
+        "primary_count": 2378,
+        "tagged_count": 2378,
+        "source_counts": {
+          "mme_finance": 31,
+          "openfindata": 225,
+          "unifineval": 82,
+          "visfineval": 2040
+        },
+        "modality_counts": {
+          "multimodal": 2153,
+          "text_only": 225
+        },
+        "completeness_counts": {
+          "incomplete": 37,
+          "usable": 2341
+        }
+      },
+      "P11_AUDIT": {
+        "name": "财报审计与公司基本面分析",
+        "family": "C",
+        "folder": "11_financial_audit_fundamentals",
+        "definition": "检查财务一致性并分析盈利、偿债、成长和经营质量。",
+        "primary_count": 145,
+        "tagged_count": 991,
+        "source_counts": {
+          "openfindata": 60,
+          "unifineval": 85
+        },
+        "modality_counts": {
+          "multimodal": 85,
+          "text_only": 60
+        },
+        "completeness_counts": {
+          "incomplete": 58,
+          "usable": 87
+        }
+      },
+      "P12_INDUSTRY": {
+        "name": "行业趋势分析与推断",
+        "family": "C",
+        "folder": "12_industry_trend_inference",
+        "definition": "综合行业规模、供需、价格、竞争与政策材料判断行业趋势。",
+        "primary_count": 3081,
+        "tagged_count": 3399,
+        "source_counts": {
+          "openfindata": 125,
+          "unifineval": 80,
+          "visfineval": 2876
+        },
+        "modality_counts": {
+          "multimodal": 2956,
+          "text_only": 125
+        },
+        "completeness_counts": {
+          "incomplete": 49,
+          "usable": 3032
+        }
+      },
+      "P13_RISK": {
+        "name": "金融风险、情感与政策分析",
+        "family": "C",
+        "folder": "13_financial_risk_sentiment_policy",
+        "definition": "识别风险、市场情绪和政策方向并分析其影响。",
+        "primary_count": 940,
+        "tagged_count": 1597,
+        "source_counts": {
+          "mme_finance": 59,
+          "openfindata": 225,
+          "unifineval": 139,
+          "visfineval": 517
+        },
+        "modality_counts": {
+          "multimodal": 715,
+          "text_only": 225
+        },
+        "completeness_counts": {
+          "incomplete": 86,
+          "usable": 854
+        }
+      },
+      "P14_INVESTMENT": {
+        "name": "投资分析、策略回测与资产配置",
+        "family": "C",
+        "folder": "14_investment_backtest_allocation",
+        "definition": "执行标的分析、筛选、回测、组合构建、策略和资产配置。",
+        "primary_count": 4581,
+        "tagged_count": 5063,
+        "source_counts": {
+          "mme_finance": 144,
+          "openfindata": 350,
+          "unifineval": 117,
+          "visfineval": 3970
+        },
+        "modality_counts": {
+          "multimodal": 4231,
+          "text_only": 350
+        },
+        "completeness_counts": {
+          "incomplete": 61,
+          "usable": 4520
+        }
+      },
+      "P15_MULTI_NUMERIC": {
+        "name": "多步精确金融数值推理",
+        "family": "C",
+        "folder": "15_multistep_precise_numeric",
+        "definition": "从多个证据提取变量并完成多步、可复算的精确数值推理。",
+        "primary_count": 699,
+        "tagged_count": 1899,
+        "source_counts": {
+          "mme_finance": 259,
+          "unifineval": 440
+        },
+        "modality_counts": {
+          "multimodal": 699
+        },
+        "completeness_counts": {
+          "incomplete": 292,
+          "usable": 407
+        }
+      },
+      "P16_CROSS_MODAL": {
+        "name": "跨模态多跳推理",
+        "family": "C",
+        "folder": "16_cross_modal_multihop",
+        "definition": "联合正文、表格、图表、图片或视频完成多跳推理。",
+        "primary_count": 287,
+        "tagged_count": 1709,
+        "source_counts": {
+          "mme_finance": 10,
+          "unifineval": 277
+        },
+        "modality_counts": {
+          "multimodal": 287
+        },
+        "completeness_counts": {
+          "incomplete": 270,
+          "usable": 17
+        }
+      },
+      "P17_LONG_DOCUMENT": {
+        "name": "长文档与跨页金融推理",
+        "family": "C",
+        "folder": "17_long_document_cross_page",
+        "definition": "在完整财报或研报的多个页面中定位并综合证据。",
+        "primary_count": 1200,
+        "tagged_count": 1200,
+        "source_counts": {
+          "finmmdocr": 1200
+        },
+        "modality_counts": {
+          "multimodal": 1200
+        },
+        "completeness_counts": {
+          "incomplete": 1200
+        }
+      },
+      "P18_RAG": {
+        "name": "金融多模态 RAG 与证据引用",
+        "family": "D",
+        "folder": "18_multimodal_rag_evidence",
+        "definition": "从大量页面检索相关证据，回答问题并引用页或区域。",
+        "primary_count": 0,
+        "tagged_count": 1200,
+        "source_counts": {},
+        "modality_counts": {},
+        "completeness_counts": {}
+      },
+      "P19_DIALOGUE": {
+        "name": "多轮多模态金融对话",
+        "family": "D",
+        "folder": "19_multiturn_multimodal_dialogue",
+        "definition": "处理依赖历史图像、答案、计算结果或约束的多轮对话。",
+        "primary_count": 48,
+        "tagged_count": 7222,
+        "source_counts": {
+          "mme_finance": 48
+        },
+        "modality_counts": {
+          "multimodal": 48
+        },
+        "completeness_counts": {
+          "usable": 48
+        }
+      },
+      "P20_AGENT": {
+        "name": "金融智能体规划与工具调用",
+        "family": "D",
+        "folder": "20_financial_agent_tool_use",
+        "definition": "识别意图、选择工具、规划查询步骤并综合工具结果。",
+        "primary_count": 75,
+        "tagged_count": 75,
+        "source_counts": {
+          "openfindata": 75
+        },
+        "modality_counts": {
+          "text_only": 75
+        },
+        "completeness_counts": {
+          "usable": 75
+        }
+      }
+    },
+    "method_counts": {
+      "benchmark_design": 1200,
+      "content_rule_plus_source_scenario": 2567,
+      "source_file_rule": 2000,
+      "source_fintype_exact": 20258,
+      "source_label_exact": 3472,
+      "source_label_plus_image_type": 350
+    }
+  }
+}
