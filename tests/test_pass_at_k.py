@@ -75,6 +75,8 @@ class PassAtKTests(unittest.TestCase):
         ):
             script = (root / relative_path).read_text(encoding="utf-8")
             self.assertIn("export VLLM_WORKER_MULTIPROC_METHOD=spawn", script)
+            self.assertIn("PASS_AT_K_MAX_IMAGES_PER_PROMPT", script)
+            self.assertIn("--max-images-per-prompt", script)
             self.assertNotIn("set -euo pipefail", script)
 
     def test_launchers_merge_even_when_worker_returns_nonzero(self):
@@ -193,6 +195,53 @@ class PassAtKTests(unittest.TestCase):
         self.assertNotIn("<image>", serialized)
         self.assertIn("问题", serialized)
 
+    def test_build_prompt_input_maps_multiple_images_in_marker_order(self):
+        from scripts.pass_at_k import build_prompt_input
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_path = root / "first.png"
+            second_path = root / "second.png"
+            Image.new("RGB", (4, 4), "red").save(first_path)
+            Image.new("RGB", (4, 4), "blue").save(second_path)
+            row = {
+                "messages": [
+                    {"role": "system", "content": "system"},
+                    {
+                        "role": "user",
+                        "content": "比较<image>第一张和<image>第二张图。",
+                    },
+                    {"role": "assistant", "content": "参考答案"},
+                ],
+                "images": ["first.png", "second.png"],
+            }
+            processor = FakeProcessor()
+            prompt_input = build_prompt_input(row, processor, root)
+
+        user_content = processor.messages[1]["content"]
+        self.assertEqual(
+            [item["type"] for item in user_content],
+            ["text", "image", "text", "image", "text"],
+        )
+        images = prompt_input["multi_modal_data"]["image"]
+        self.assertEqual(len(images), 2)
+        self.assertEqual(images[0].getpixel((0, 0)), (255, 0, 0))
+        self.assertEqual(images[1].getpixel((0, 0)), (0, 0, 255))
+
+    def test_build_prompt_input_rejects_image_marker_count_mismatch(self):
+        from scripts.pass_at_k import build_prompt_input
+
+        row = {
+            "messages": [
+                {"role": "user", "content": "<image>只有一个图片占位符"},
+                {"role": "assistant", "content": "参考答案"},
+            ],
+            "images": ["first.png", "second.png"],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "image count/marker count mismatch"):
+                build_prompt_input(row, FakeProcessor(), Path(tmp))
+
     def test_build_judge_input_includes_question_answers_and_image(self):
         from scripts.pass_at_k import build_judge_input
 
@@ -227,6 +276,44 @@ class PassAtKTests(unittest.TestCase):
             judge_input["multi_modal_data"]["image"][0],
             image,
         )
+
+    def test_build_judge_input_maps_all_images(self):
+        from scripts.pass_at_k import build_judge_input
+
+        processor = FakeProcessor()
+        images = [
+            Image.new("RGB", (4, 4), "red"),
+            Image.new("RGB", (4, 4), "blue"),
+        ]
+        row = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "<image>比较<image>两张图中的财务指标。",
+                },
+                {"role": "assistant", "content": "第一张更高。"},
+            ],
+            "images": ["first.png", "second.png"],
+        }
+        prompt_input = {
+            "prompt": "unused",
+            "multi_modal_data": {"image": images},
+        }
+        judge_input = build_judge_input(
+            row,
+            "第一张更高。",
+            "图一高于图二。",
+            processor,
+            prompt_input,
+        )
+
+        content = processor.messages[-1]["content"]
+        self.assertEqual(
+            [item["type"] for item in content],
+            ["image", "image", "text"],
+        )
+        self.assertNotIn("<image>", content[-1]["text"])
+        self.assertIs(judge_input["multi_modal_data"]["image"], images)
 
     def test_process_dataset_writes_only_zero_through_k_minus_two_buckets(self):
         from scripts.pass_at_k import process_dataset
@@ -646,6 +733,7 @@ class PassAtKTests(unittest.TestCase):
         self.assertEqual(args.k, 8)
         self.assertEqual(args.model, "/mnt/nas/bihaoran/qwen3vl/models/qwen4")
         self.assertEqual(args.max_model_len, 131072)
+        self.assertEqual(args.max_images_per_prompt, 8)
         self.assertEqual(args.batch_size_multi, 4)
         self.assertEqual(args.batch_size_text, 8)
 

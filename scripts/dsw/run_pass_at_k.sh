@@ -7,6 +7,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
 OUTPUT_DIR="${PASS_AT_K_OUTPUT_DIR:-$ROOT/output/pass_at_k/qwen4_k8_dsw_smoke}"
 MAX_RECORDS_PER_RANK="${MAX_RECORDS_PER_RANK:-2}"
+MAX_IMAGES_PER_PROMPT="${PASS_AT_K_MAX_IMAGES_PER_PROMPT:-8}"
 LOG_DIR="$ROOT/logs/pass_at_k/dsw"
 
 mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
@@ -33,6 +34,7 @@ for ((local_rank = 0; local_rank < NPROC_PER_NODE; local_rank++)); do
       --output-dir "$OUTPUT_DIR" \
       --rank "$local_rank" \
       --world-size "$NPROC_PER_NODE" \
+      --max-images-per-prompt "$MAX_IMAGES_PER_PROMPT" \
       "${worker_extra_args[@]}"
   ) >"$rank_log" 2>&1 &
   pids+=("$!")

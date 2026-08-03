@@ -217,51 +217,101 @@ def _prompt_messages(row: dict[str, Any]) -> list[dict[str, Any]]:
     return messages
 
 
+def _normalize_image_content(messages: list[dict[str, Any]]) -> int:
+    """Convert image markers to chat-template image items and count image slots."""
+    image_slot_count = 0
+    for message in messages:
+        content = message["content"]
+        if isinstance(content, str):
+            marker_count = content.count("<image>")
+            if marker_count == 0:
+                continue
+            if message["role"] != "user":
+                raise ValueError("<image> markers are only supported in user messages")
+            rich_content: list[dict[str, str]] = []
+            for index, text in enumerate(content.split("<image>")):
+                if index:
+                    rich_content.append({"type": "image"})
+                if text:
+                    rich_content.append({"type": "text", "text": text})
+            message["content"] = rich_content
+            image_slot_count += marker_count
+            continue
+        if isinstance(content, list):
+            message_image_count = sum(
+                1
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "image"
+            )
+            if message_image_count and message["role"] != "user":
+                raise ValueError("image content is only supported in user messages")
+            image_slot_count += message_image_count
+    return image_slot_count
+
+
+def _message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content.replace("<image>", "")
+    if isinstance(content, list):
+        return "".join(
+            str(item.get("text", ""))
+            for item in content
+            if isinstance(item, dict) and item.get("type") == "text"
+        )
+    return str(content)
+
+
+def _judge_question(row: dict[str, Any]) -> str:
+    parts = [
+        _message_text(message["content"]).strip()
+        for message in row["messages"][:-1]
+        if message.get("role") == "user"
+    ]
+    question = "\n\n".join(part for part in parts if part)
+    if not question:
+        raise ValueError("record must contain a non-empty user question")
+    return question
+
+
 def build_prompt_input(
     row: dict[str, Any],
     processor: Any,
     root: Path,
 ) -> dict[str, Any]:
     messages = _prompt_messages(row)
-    images = row.get("images")
-    image_data = None
+    raw_images = row.get("images")
+    if raw_images is None:
+        images = []
+    elif isinstance(raw_images, (str, bytes)):
+        raise TypeError("images must be a sequence of paths, not a string")
+    else:
+        images = list(raw_images)
 
-    if images is not None:
-        if len(images) != 1:
-            raise ValueError(f"expected exactly one image, got {len(images)}")
-        target = None
-        marker_count = 0
-        for message in messages:
-            if message["role"] != "user" or not isinstance(message["content"], str):
-                continue
-            count = message["content"].count("<image>")
-            if count:
-                marker_count += count
-                target = message
-        if marker_count != 1 or target is None:
-            raise ValueError(f"expected exactly one <image> marker, got {marker_count}")
-        text = target["content"].replace("<image>", "", 1)
-        target["content"] = [
-            {"type": "image"},
-            {"type": "text", "text": text},
-        ]
+    image_slot_count = _normalize_image_content(messages)
+    if image_slot_count != len(images):
+        raise ValueError(
+            "image count/marker count mismatch: "
+            f"{len(images)} image paths, {image_slot_count} image slots"
+        )
 
-        image_path = Path(images[0])
-        if not image_path.is_absolute():
-            image_path = root / image_path
+    image_data = []
+    if images:
         from PIL import Image
 
-        with Image.open(image_path) as image:
-            image_data = image.convert("RGB").copy()
-
+        for image_value in images:
+            image_path = Path(image_value)
+            if not image_path.is_absolute():
+                image_path = root / image_path
+            with Image.open(image_path) as image:
+                image_data.append(image.convert("RGB").copy())
     prompt = processor.apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=True,
     )
     result: dict[str, Any] = {"prompt": prompt}
-    if image_data is not None:
-        result["multi_modal_data"] = {"image": [image_data]}
+    if image_data:
+        result["multi_modal_data"] = {"image": image_data}
     return result
 
 
@@ -272,10 +322,8 @@ def build_judge_input(
     processor: Any,
     prompt_input: dict[str, Any],
 ) -> dict[str, Any]:
-    question = str(row["messages"][0]["content"])
-    has_image = "multi_modal_data" in prompt_input
-    if has_image:
-        question = question.replace("<image>", "", 1)
+    question = _judge_question(row)
+    images = prompt_input.get("multi_modal_data", {}).get("image", [])
     judge_text = (
         "请结合原问题，判断模型答案与标准答案的结论是否一致。"
         "允许表述不同，但不能遗漏关键条件、数值或单位。"
@@ -285,9 +333,9 @@ def build_judge_input(
         f"模型答案：\n{candidate}"
     )
     content: Any = judge_text
-    if has_image:
+    if images:
         content = [
-            {"type": "image"},
+            *({"type": "image"} for _ in images),
             {"type": "text", "text": judge_text},
         ]
     messages = [
@@ -304,7 +352,7 @@ def build_judge_input(
             add_generation_prompt=True,
         )
     }
-    if has_image:
+    if images:
         result["multi_modal_data"] = prompt_input["multi_modal_data"]
     return result
 
@@ -870,7 +918,10 @@ class VLLMGenerator:
         max_model_len: int,
         max_num_seqs: int,
         gpu_memory_utilization: float,
+        max_images_per_prompt: int = 8,
     ) -> None:
+        if max_images_per_prompt < 1:
+            raise ValueError("max_images_per_prompt must be at least 1")
         configure_vllm_multiprocessing()
         validate_runtime_dependencies()
 
@@ -890,7 +941,7 @@ class VLLMGenerator:
             max_model_len=max_model_len,
             max_num_seqs=max_num_seqs,
             gpu_memory_utilization=gpu_memory_utilization,
-            limit_mm_per_prompt={"image": 1, "video": 0},
+            limit_mm_per_prompt={"image": max_images_per_prompt, "video": 0},
             mm_processor_cache_gb=0,
             generation_config="vllm",
         )
@@ -948,6 +999,7 @@ def _shared_config(args: argparse.Namespace) -> dict[str, Any]:
         "seed": args.seed,
         "max_model_len": args.max_model_len,
         "max_num_seqs": args.max_num_seqs,
+        "max_images_per_prompt": args.max_images_per_prompt,
         "gpu_memory_utilization": args.gpu_memory_utilization,
         "batch_size_multi": args.batch_size_multi,
         "batch_size_text": args.batch_size_text,
@@ -1002,6 +1054,7 @@ def run_worker(args: argparse.Namespace) -> dict[str, dict[str, int]]:
             max_model_len=args.max_model_len,
             max_num_seqs=args.max_num_seqs,
             gpu_memory_utilization=args.gpu_memory_utilization,
+            max_images_per_prompt=args.max_images_per_prompt,
         )
         counters: dict[str, dict[str, int]] = {}
         for dataset in args.datasets:
@@ -1104,6 +1157,7 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--seed", type=int, default=42)
     worker.add_argument("--max-model-len", type=int, default=131072)
     worker.add_argument("--max-num-seqs", type=int, default=64)
+    worker.add_argument("--max-images-per-prompt", type=int, default=8)
     worker.add_argument("--gpu-memory-utilization", type=float, default=0.90)
     worker.add_argument("--batch-size-multi", type=int, default=4)
     worker.add_argument("--batch-size-text", type=int, default=8)

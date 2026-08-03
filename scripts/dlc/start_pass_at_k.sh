@@ -18,6 +18,7 @@ OUTPUT_DIR="${PASS_AT_K_OUTPUT_DIR:-$ROOT/output/pass_at_k/qwen4_k8}"
 WAIT_TIMEOUT="${PASS_AT_K_WAIT_TIMEOUT:-0}"
 STARTUP_TIMEOUT="${PASS_AT_K_STARTUP_TIMEOUT:-600}"
 STALE_TIMEOUT="${PASS_AT_K_STALE_TIMEOUT:-7200}"
+MAX_IMAGES_PER_PROMPT="${PASS_AT_K_MAX_IMAGES_PER_PROMPT:-8}"
 LOG_DIR="$ROOT/logs/pass_at_k/dlc"
 
 mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
@@ -39,7 +40,8 @@ for ((local_rank = 0; local_rank < GPUS_PER_NODE; local_rank++)); do
       --train-text "$ROOT/data/train_text/all.jsonl" \
       --output-dir "$OUTPUT_DIR" \
       --rank "$global_rank" \
-      --world-size "$GLOBAL_WORLD_SIZE"
+      --world-size "$GLOBAL_WORLD_SIZE" \
+      --max-images-per-prompt "$MAX_IMAGES_PER_PROMPT"
   ) >"$rank_log" 2>&1 &
   pids+=("$!")
 done
