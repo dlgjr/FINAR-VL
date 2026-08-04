@@ -17,9 +17,11 @@ export NNODES="$NODE_WORLD_SIZE"
 export NODE_RANK="$NODE_RANK"
 export SFT_EVAL_STEPS=500
 export SFT_EVAL_AT_ZERO=true
+export SFT_PASS_AT_1_TEMPERATURE="${SFT_PASS_AT_1_TEMPERATURE:-0.3}"
+export SFT_PASS_AT_8_TEMPERATURE="${SFT_PASS_AT_8_TEMPERATURE:-1.0}"
 export SFT_TRACE_STEPS="${SFT_TRACE_STEPS:-1049,1050,1051}"
 export SFT_FREEZE_VIT="${SFT_FREEZE_VIT:-true}"
-export SFT_FREEZE_ALIGNER="${SFT_FREEZE_ALIGNER:-false}"
+export SFT_FREEZE_ALIGNER="${SFT_FREEZE_ALIGNER:-true}"
 export SFT_FREEZE_LLM="${SFT_FREEZE_LLM:-false}"
 export SFT_VIT_GRADIENT_CHECKPOINTING="${SFT_VIT_GRADIENT_CHECKPOINTING:-false}"
 export SFT_GLOBAL_BATCH_SIZE=$((NPROC_PER_NODE * NODE_WORLD_SIZE / 2))
@@ -176,6 +178,7 @@ if (( NODE_RANK == 0 )); then
   echo "epochs=5 max_length=49152 global_batch=12 per_device_batch=1"
   echo "learning_rate=1e-6 scheduler=cosine warmup_ratio=0.03"
   echo "eval_step0=true eval_steps=500 save_steps=5000"
+  echo "pass_at_1_temperature=$SFT_PASS_AT_1_TEMPERATURE pass_at_8_temperature=$SFT_PASS_AT_8_TEMPERATURE"
   echo "training_gpus_per_node=6 judge_gpus_per_node=2 nodes=$NODE_WORLD_SIZE"
   echo "training_topology=sequence_parallel:2,data_parallel:12 deepspeed=zero2"
   echo "freeze_vit=$SFT_FREEZE_VIT freeze_aligner=$SFT_FREEZE_ALIGNER freeze_llm=$SFT_FREEZE_LLM vit_gradient_checkpointing=$SFT_VIT_GRADIENT_CHECKPOINTING"
@@ -222,7 +225,7 @@ done
 export SFT_JUDGE_URL=http://127.0.0.1:8001
 export WANDB_DIR="$LOG_ROOT/wandb"
 export WANDB_NAME="$RUN_ID"
-export IMAGE_MAX_TOKEN_NUM=256
+export IMAGE_MAX_TOKEN_NUM=512
 
 
 "${SWIFT_CMD[@]}" sft \

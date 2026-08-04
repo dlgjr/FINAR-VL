@@ -1,9 +1,9 @@
-"""SFT 期间运行的多图 Pass@8 评估基础组件。"""
+"""SFT 期间运行的多图 Pass@1/Pass@8 评估基础组件。"""
 
 from __future__ import annotations
 
+import importlib.util
 import json
-import math
 import os
 import re
 import time
@@ -12,20 +12,33 @@ import urllib.request
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 
-_ANSWER_RE = re.compile(r"(?:答案|answer)\s*[:：]\s*", re.IGNORECASE)
+PASS_AT_1_TEMPERATURE = float(os.environ.get("SFT_PASS_AT_1_TEMPERATURE", "0.3"))
+PASS_AT_8_TEMPERATURE = float(os.environ.get("SFT_PASS_AT_8_TEMPERATURE", "1.0"))
+
+
+def _load_pass_at_k_module() -> ModuleType:
+    """加载仓库现有 pass_at_k.py，避免两套答案解析逻辑继续分叉。"""
+    module_path = Path(__file__).resolve().parents[1] / "pass_at_k.py"
+    spec = importlib.util.spec_from_file_location("finar_pass_at_k_shared", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load shared answer logic: {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_PASS_AT_K = _load_pass_at_k_module()
+# 复用仓库已有的完整答案提取逻辑：\boxed{}、<answer>、答案/Answer 标记。
+extract_answer = _PASS_AT_K.extract_answer
+
 _CHOICE_RE = re.compile(r"^\s*([A-H])(?:\s*[.、:：)]|\s|$)", re.IGNORECASE)
-_NUMBER_RE = re.compile(r"^\s*[-+]?\d+(?:,\d{3})*(?:\.\d+)?%?\s*$")
+_NUMBER_RE = re.compile(r"^\s*[$￥¥€£]?\s*[-+]?\d+(?:,\d{3})*(?:\.\d+)?%?\s*$")
 _DATE_RE = re.compile(r"^(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?$")
 _PAGE_RE = re.compile(r"第\s*(\d+)\s*页|page\s*(\d+)", re.IGNORECASE)
-
-
-def extract_answer(value: Any) -> str:
-    text = str(value).strip()
-    matches = list(_ANSWER_RE.finditer(text))
-    return text[matches[-1].end():].strip() if matches else text
 
 
 def _normalize_text(value: str) -> str:
@@ -37,7 +50,7 @@ def _normalize_text(value: str) -> str:
 def _number(value: str) -> tuple[Decimal, bool] | None:
     if not _NUMBER_RE.fullmatch(value):
         return None
-    normalized = value.strip().replace(",", "")
+    normalized = value.strip().lstrip("$￥¥€£").strip().replace(",", "")
     percent = normalized.endswith("%")
     if percent:
         normalized = normalized[:-1]
@@ -78,7 +91,7 @@ def _json_value(value: str) -> Any | None:
 
 
 def programmatic_judge(reference: Any, candidate: Any) -> bool | None:
-    """返回程序判分结论；开放式答案返回 ``None`` 交由模型裁判。"""
+    """复用共享答案提取，并保留 SFT 的数值容差、日期、页码与 JSON 判分。"""
     expected = extract_answer(reference)
     actual = extract_answer(candidate)
     expected_choice = _CHOICE_RE.match(expected)
@@ -247,13 +260,26 @@ def _make_messages(row: dict[str, Any]) -> list[dict[str, Any]]:
     return [{"role": "user", "content": content}]
 
 
-def _generate_candidates(model: Any, processor: Any, row: dict[str, Any], seed: int) -> list[str]:
+def _generate_candidates(
+    model: Any,
+    processor: Any,
+    row: dict[str, Any],
+    *,
+    seed: int,
+    temperature: float,
+    num_return_sequences: int,
+) -> list[str]:
     import torch
+
+    if temperature <= 0:
+        raise ValueError(f"temperature must be positive, got {temperature}")
+    if num_return_sequences < 1:
+        raise ValueError(f"num_return_sequences must be positive, got {num_return_sequences}")
 
     try:
         from qwen_vl_utils import process_vision_info
     except ImportError as error:
-        raise RuntimeError("qwen-vl-utils is required for Pass@8 evaluation") from error
+        raise RuntimeError("qwen-vl-utils is required for Pass@1/Pass@8 evaluation") from error
 
     messages = _make_messages(row)
     prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -274,9 +300,9 @@ def _generate_candidates(model: Any, processor: Any, row: dict[str, Any], seed: 
     generated = model.generate(
         **inputs,
         do_sample=True,
-        temperature=1.0,
+        temperature=temperature,
         top_p=1.0,
-        num_return_sequences=8,
+        num_return_sequences=num_return_sequences,
         max_new_tokens=2048,
         use_cache=True,
     )
@@ -314,35 +340,62 @@ def _judge_with_server(judge_url: str, row: dict[str, Any], reference: str, cand
     raise ValueError(f"invalid judge verdict: {verdict!r}")
 
 
+def _judge_generation(
+    judge_url: str,
+    row: dict[str, Any],
+    reference: str,
+    candidate: str,
+) -> dict[str, Any]:
+    correct = programmatic_judge(reference, candidate)
+    route = "programmatic"
+    if correct is None:
+        route = "model"
+        correct = _judge_with_server(judge_url, row, reference, candidate)
+    return {
+        "text": candidate,
+        "extracted_answer": extract_answer(candidate),
+        "correct": bool(correct),
+        "judge": route,
+    }
+
+
 def _evaluate_row(model: Any, processor: Any, judge_url: str, row: dict[str, Any], step: int) -> dict[str, Any]:
+    del step  # checkpoint 之间固定采样种子，避免把采样噪声混入训练趋势。
     index = int(row["sample_id"].rsplit(":", 1)[1])
-    candidates = _generate_candidates(model, processor, row, 42 + step * 1_000_003 + index * 101)
+    base_seed = 42 + index * 101
+    pass_at_1_candidate = _generate_candidates(
+        model,
+        processor,
+        row,
+        seed=base_seed,
+        temperature=PASS_AT_1_TEMPERATURE,
+        num_return_sequences=1,
+    )[0]
+    pass_at_8_candidates = _generate_candidates(
+        model,
+        processor,
+        row,
+        seed=base_seed + 1,
+        temperature=PASS_AT_8_TEMPERATURE,
+        num_return_sequences=8,
+    )
     reference = str(row["messages"][-1]["content"])
-    judged_by_model = 0
-    generations = []
-    for candidate in candidates:
-        correct = programmatic_judge(reference, candidate)
-        route = "programmatic"
-        if correct is None:
-            route = "model"
-            judged_by_model += 1
-            correct = _judge_with_server(judge_url, row, reference, candidate)
-        generations.append(
-            {
-                "text": candidate,
-                "extracted_answer": extract_answer(candidate),
-                "correct": bool(correct),
-                "judge": route,
-            }
-        )
+    pass_at_1_generation = _judge_generation(judge_url, row, reference, pass_at_1_candidate)
+    generations = [
+        _judge_generation(judge_url, row, reference, candidate)
+        for candidate in pass_at_8_candidates
+    ]
+    all_generations = [pass_at_1_generation, *generations]
+    model_judged_count = sum(item["judge"] == "model" for item in all_generations)
     return {
         "sample_id": row["sample_id"],
         "task": row["task"],
         "reference_answer": extract_answer(reference),
         "correct_count": sum(item["correct"] for item in generations),
-        "first_correct": bool(generations[0]["correct"]),
-        "programmatic_count": 8 - judged_by_model,
-        "model_judged_count": judged_by_model,
+        "first_correct": bool(pass_at_1_generation["correct"]),
+        "pass_at_1_generation": pass_at_1_generation,
+        "programmatic_count": len(all_generations) - model_judged_count,
+        "model_judged_count": model_judged_count,
         "generations": generations,
     }
 
@@ -401,7 +454,21 @@ def run_distributed_evaluation(
         EvaluationQueue(queue_dir, tasks).initialize()
         (step_dir / "run_config.json").parent.mkdir(parents=True, exist_ok=True)
         (step_dir / "run_config.json").write_text(
-            json.dumps({"step": step, "total": len(rows), "max_samples": max_samples}, ensure_ascii=False, indent=2) + "\n",
+            json.dumps(
+                {
+                    "step": step,
+                    "total": len(rows),
+                    "max_samples": max_samples,
+                    "pass_at_1_temperature": PASS_AT_1_TEMPERATURE,
+                    "pass_at_8_temperature": PASS_AT_8_TEMPERATURE,
+                    "pass_at_1_samples": 1,
+                    "pass_at_8_samples": 8,
+                    "fixed_seed_across_checkpoints": True,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
             encoding="utf-8",
         )
     _barrier(dist)
