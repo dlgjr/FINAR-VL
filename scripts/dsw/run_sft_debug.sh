@@ -7,6 +7,8 @@ export CUDA_VISIBLE_DEVICES=0,1
 source "$ROOT/scripts/dlc/dlc_env.sh"
 
 export BASE_MODEL="$ROOT/models/qwen4"
+export TRAIN_MULTI="${TRAIN_MULTI:-$ROOT/data/train_multi/train_multi_sft_minhash_dedup.jsonl}"
+export TRAIN_TEXT="${TRAIN_TEXT:-$ROOT/data/train_text/train_text_sft_minhash_dedup.jsonl}"
 export SFT_BENCHMARK="$ROOT/data/benchmark/my_benchmark/all.jsonl"
 export SFT_EVAL_MAX_SAMPLES=1
 export SFT_EVAL_STEPS=5
@@ -58,6 +60,7 @@ fi
 test -x "$SWIFT_BIN" || { echo "swift 不存在：$SWIFT_BIN" >&2; exit 1; }
 "$PYTHON_BIN" - "$ROOT" "$DEBUG_DATA" <<'PY'
 import json
+import os
 import sys
 from itertools import zip_longest
 from pathlib import Path
@@ -70,10 +73,7 @@ sys.path.insert(0, str(root))
 from scripts.sft.debug_sample_selection import select_representative_rows
 
 tokenizer = AutoTokenizer.from_pretrained(root / 'models/qwen4', trust_remote_code=True)
-paths = [
-    root / 'data/train_multi/train_multi_sft_minhash_dedup.jsonl',
-    root / 'data/train_text/train_text_sft_minhash_dedup.jsonl',
-]
+paths = [Path(os.environ['TRAIN_MULTI']), Path(os.environ['TRAIN_TEXT'])]
 
 
 def candidate_rows():

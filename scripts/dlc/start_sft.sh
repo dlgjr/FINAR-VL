@@ -17,6 +17,7 @@ export NNODES="$NODE_WORLD_SIZE"
 export NODE_RANK="$NODE_RANK"
 export SFT_EVAL_STEPS=500
 export SFT_EVAL_AT_ZERO=true
+export SFT_SAVE_STEPS="${SFT_SAVE_STEPS:-5000}"
 export SFT_PASS_AT_1_TEMPERATURE="${SFT_PASS_AT_1_TEMPERATURE:-0.3}"
 export SFT_PASS_AT_8_TEMPERATURE="${SFT_PASS_AT_8_TEMPERATURE:-1.0}"
 export SFT_TRACE_STEPS="${SFT_TRACE_STEPS:-1049,1050,1051}"
@@ -175,9 +176,9 @@ if (( NODE_RANK == 0 )); then
   echo "train_multi=$TRAIN_MULTI"
   echo "train_text=$TRAIN_TEXT"
   echo "benchmark=$SFT_BENCHMARK"
-  echo "epochs=5 max_length=49152 global_batch=12 per_device_batch=1"
+  echo "epochs=1 multi_repeat=5 max_length=49152 global_batch=12 per_device_batch=1"
   echo "learning_rate=1e-6 scheduler=cosine warmup_ratio=0.03"
-  echo "eval_step0=true eval_steps=500 save_steps=5000"
+  echo "eval_step0=true eval_steps=500 save_steps=$SFT_SAVE_STEPS"
   echo "pass_at_1_temperature=$SFT_PASS_AT_1_TEMPERATURE pass_at_8_temperature=$SFT_PASS_AT_8_TEMPERATURE"
   echo "training_gpus_per_node=6 judge_gpus_per_node=2 nodes=$NODE_WORLD_SIZE"
   echo "training_topology=sequence_parallel:2,data_parallel:12 deepspeed=zero2"
@@ -231,9 +232,9 @@ export IMAGE_MAX_TOKEN_NUM=512
 "${SWIFT_CMD[@]}" sft \
   --model "$BASE_MODEL" \
   --model_type qwen3_vl \
-  --dataset "$TRAIN_MULTI" "$TRAIN_TEXT" \
+  --dataset "$TRAIN_MULTI" "$TRAIN_MULTI" "$TRAIN_MULTI" "$TRAIN_MULTI" "$TRAIN_MULTI" "$TRAIN_TEXT" \
   --split_dataset_ratio 0 \
-  --dataset_shuffle false \
+  --dataset_shuffle true \
   --strict false \
   --tuner_type full \
   --freeze_vit "$SFT_FREEZE_VIT" \
@@ -250,14 +251,14 @@ export IMAGE_MAX_TOKEN_NUM=512
   --ddp_timeout 86400 \
   --max_length 49152 \
   --truncation_strategy delete \
-  --num_train_epochs 5 \
+  --num_train_epochs 1 \
   --learning_rate 1e-6 \
   --lr_scheduler_type cosine \
   --warmup_ratio 0.03 \
   --logging_steps 1 \
   --eval_strategy no \
   --save_strategy steps \
-  --save_steps 5000 \
+  --save_steps "$SFT_SAVE_STEPS" \
   --save_total_limit 100 \
   --save_only_model true \
   --report_to wandb \

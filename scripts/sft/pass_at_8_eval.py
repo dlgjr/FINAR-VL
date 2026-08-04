@@ -539,6 +539,10 @@ def run_distributed_evaluation(
         summary["elapsed_seconds"] = round(time.monotonic() - started_at, 3)
         (step_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         metrics = {key: summary[key] for key in ("pass_at_1", "pass_at_8", "coverage", "error_count", "programmatic_count", "model_judged_count", "elapsed_seconds")}
+        for task, task_metrics in summary["tasks"].items():
+            metrics[f"task_{task}_pass_at_1"] = task_metrics["pass_at_1"]
+            metrics[f"task_{task}_pass_at_8"] = task_metrics["pass_at_8"]
+            metrics[f"task_{task}_completed"] = task_metrics["completed"]
         print(
             "INFO     | >> eval "
             f"step={step} pass_at_1={summary['pass_at_1']:.4f} pass_at_8={summary['pass_at_8']:.4f} coverage={summary['coverage']:.4f} "

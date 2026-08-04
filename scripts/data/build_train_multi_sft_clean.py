@@ -34,6 +34,7 @@ OUTPUT = TRAIN_MULTI / "train_multi_sft_clean.json"
 DOCMATIX_PREFIX = "data/train_multi/docmatix/images/"
 CAULDRON_PREFIX = "data/train_multi/cauldron/images/"
 CAULDRON_SUBDIRS = (("chartqa_", "chartqa"), ("figureqa_", "figureqa"), ("tabmwp_", "tabmwp"))
+SFT_COLUMNS = ("messages", "source", "split", "images", "task")
 
 
 def training_key(record: dict[str, Any]) -> str:
@@ -110,6 +111,7 @@ def main() -> None:
                     record = json.loads(raw)
                     file_read += 1
                     record["images"] = [rewrite_image(image) for image in record.get("images") or []]
+                    record = {column: record[column] for column in SFT_COLUMNS}
                     key = training_key(record)
                     if key in seen:
                         file_dups += 1
