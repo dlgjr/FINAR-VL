@@ -16,7 +16,6 @@ from types import ModuleType
 from typing import Any
 
 
-PASS_AT_1_TEMPERATURE = float(os.environ.get("SFT_PASS_AT_1_TEMPERATURE", "0.3"))
 PASS_AT_8_TEMPERATURE = float(os.environ.get("SFT_PASS_AT_8_TEMPERATURE", "1.0"))
 
 
@@ -266,13 +265,14 @@ def _generate_candidates(
     row: dict[str, Any],
     *,
     seed: int,
-    temperature: float,
+    do_sample: bool,
+    temperature: float | None,
     num_return_sequences: int,
 ) -> list[str]:
     import torch
 
-    if temperature <= 0:
-        raise ValueError(f"temperature must be positive, got {temperature}")
+    if do_sample and (temperature is None or temperature <= 0):
+        raise ValueError(f"temperature must be positive when do_sample=True, got {temperature}")
     if num_return_sequences < 1:
         raise ValueError(f"num_return_sequences must be positive, got {num_return_sequences}")
 
@@ -297,14 +297,18 @@ def _generate_candidates(
     inputs = {key: value.to(device) if hasattr(value, "to") else value for key, value in inputs.items()}
     prompt_length = int(inputs["input_ids"].shape[1])
     torch.manual_seed(seed)
+    generation_kwargs: dict[str, Any] = {
+        "num_return_sequences": num_return_sequences,
+        "max_new_tokens": 2048,
+        "use_cache": True,
+    }
+    if do_sample:
+        generation_kwargs["temperature"] = temperature
+        generation_kwargs["top_p"] = 1.0
     generated = model.generate(
         **inputs,
-        do_sample=True,
-        temperature=temperature,
-        top_p=1.0,
-        num_return_sequences=num_return_sequences,
-        max_new_tokens=2048,
-        use_cache=True,
+        do_sample=do_sample,
+        **generation_kwargs,
     )
     return processor.batch_decode(generated[:, prompt_length:], skip_special_tokens=True)
 
@@ -368,7 +372,8 @@ def _evaluate_row(model: Any, processor: Any, judge_url: str, row: dict[str, Any
         processor,
         row,
         seed=base_seed,
-        temperature=PASS_AT_1_TEMPERATURE,
+        do_sample=False,
+        temperature=None,
         num_return_sequences=1,
     )[0]
     pass_at_8_candidates = _generate_candidates(
@@ -376,6 +381,7 @@ def _evaluate_row(model: Any, processor: Any, judge_url: str, row: dict[str, Any
         processor,
         row,
         seed=base_seed + 1,
+        do_sample=True,
         temperature=PASS_AT_8_TEMPERATURE,
         num_return_sequences=8,
     )
@@ -459,7 +465,7 @@ def run_distributed_evaluation(
                     "step": step,
                     "total": len(rows),
                     "max_samples": max_samples,
-                    "pass_at_1_temperature": PASS_AT_1_TEMPERATURE,
+                    "pass_at_1_greedy": True,
                     "pass_at_8_temperature": PASS_AT_8_TEMPERATURE,
                     "pass_at_1_samples": 1,
                     "pass_at_8_samples": 8,

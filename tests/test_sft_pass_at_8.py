@@ -86,3 +86,18 @@ def test_generate_candidates_uses_supported_generation_seed_path():
     )
     assert "torch.manual_seed(seed)" in source
     assert "generator=generator" not in source
+
+
+def test_pass_at_1_uses_greedy_decoding_and_pass_at_8_stays_sampling():
+    source = (Path(__file__).resolve().parents[1] / "scripts/sft/pass_at_8_eval.py").read_text(
+        encoding="utf-8"
+    )
+    pass_at_1_call = source.split("pass_at_1_candidate = _generate_candidates", 1)[1].split(")[0]", 1)[0]
+    pass_at_8_call = source.split("pass_at_8_candidates = _generate_candidates", 1)[1].split(")", 1)[0]
+    assert "do_sample=False" in pass_at_1_call
+    assert "num_return_sequences=1" in pass_at_1_call
+    assert "do_sample=True" in pass_at_8_call
+    assert "PASS_AT_8_TEMPERATURE" in pass_at_8_call
+    assert "num_return_sequences=8" in pass_at_8_call
+    assert "PASS_AT_1_TEMPERATURE" not in source
+    assert '"pass_at_1_greedy": True' in source

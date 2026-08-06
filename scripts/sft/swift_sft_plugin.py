@@ -568,6 +568,170 @@ class FinarPassAt8Callback(TrainerCallback):
         return control
 
 
+try:
+    import torch
+
+    _SAMPLER_BASE = torch.utils.data.Sampler
+except ImportError:  # 纯 Python 单元测试不依赖 torch
+    _SAMPLER_BASE = object  # type: ignore[assignment,misc]
+
+
+class PlanSampler(_SAMPLER_BASE):
+    """按全局采样计划确定性分片，不引入任何随机性。
+
+    计划条目按微步组织，每微步 dp_world_size 个位置；rank r 只消费
+    position_in_micro_step == r 的条目。索引映射：multi -> 原索引，
+    text -> N_multi + 索引（对应 ms-swift concat 后的 dataset 顺序）。
+    """
+
+    def __init__(self, *, plan_dir: Path, rank: int, dataset_len: int) -> None:
+        self.plan_dir = Path(plan_dir)
+        self.rank = rank
+        self.dataset_len = dataset_len
+        meta_path = self.plan_dir / "meta.json"
+        if not meta_path.is_file():
+            raise RuntimeError(f"sample plan meta not found: {meta_path}")
+        self.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        self.n_multi = int(self.meta["N_multi"])
+        self.total_blocks = int(self.meta["total_blocks"])
+        self.per_device_batch = int(self.meta.get("per_device_batch", 1))
+        self.grad_acc = int(self.meta["grad_acc"])
+
+    def _length(self) -> int:
+        return (
+            sum(int(block["steps"]) * self.grad_acc for block in self.meta["blocks"])
+            * self.per_device_batch
+        )
+
+    def _dataset_index(self, modality: str, index: int) -> int:
+        dataset_index = index if modality == "multi" else self.n_multi + index
+        if dataset_index >= self.dataset_len:
+            raise IndexError(
+                f"plan index {dataset_index} (modality={modality}, index={index}) "
+                f"out of range for dataset length {self.dataset_len}"
+            )
+        return dataset_index
+
+    def __iter__(self):
+        for block_id in range(self.total_blocks):
+            block_path = self.plan_dir / f"block_{block_id:04d}.jsonl"
+            with block_path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    entry = json.loads(line)
+                    position = int(entry["position_in_micro_step"])
+                    if not (
+                        self.rank * self.per_device_batch
+                        <= position
+                        < (self.rank + 1) * self.per_device_batch
+                    ):
+                        continue
+                    yield self._dataset_index(str(entry["modality"]), int(entry["index"]))
+
+    def __len__(self) -> int:
+        return self._length()
+
+
+def _dp_rank() -> tuple[int, int]:
+    try:
+        from swift.sequence_parallel import sequence_parallel
+
+        if getattr(sequence_parallel, "dp_world_size", None):
+            return int(sequence_parallel.dp_rank), int(sequence_parallel.dp_world_size)
+    except (ImportError, AttributeError):
+        pass
+    try:
+        import torch.distributed as dist
+
+        if dist.is_available() and dist.is_initialized():
+            return int(dist.get_rank()), int(dist.get_world_size())
+    except (ImportError, AttributeError):
+        pass
+    return 0, 1
+
+
+def _install_plan_dataloader(trainer) -> bool:
+    plan_dir = os.environ.get("SFT_PLAN_DIR", "")
+    if not plan_dir or not (Path(plan_dir) / "meta.json").is_file():
+        return False
+    try:
+        from swift.dataloader import DataLoaderShard
+    except ImportError:
+        return False
+
+    import types
+
+    def planned_get_train_dataloader(self, skip_batches=0):
+        rank, _ = _dp_rank()
+        dataset = self.train_dataset
+        sampler = PlanSampler(
+            plan_dir=Path(plan_dir),
+            rank=rank,
+            dataset_len=len(dataset),
+        )
+        dataloader_params = {
+            "batch_size": self._train_batch_size,
+            "collate_fn": self.data_collator,
+            "num_workers": self.args.dataloader_num_workers,
+            "pin_memory": self.args.dataloader_pin_memory,
+            "persistent_workers": self.args.dataloader_persistent_workers,
+            "sampler": sampler,
+            "drop_last": self.args.dataloader_drop_last,
+        }
+        if skip_batches > 0:
+            from accelerate.data_loader import SkipBatchSampler
+
+            sampler = SkipBatchSampler(sampler, skip_batches=skip_batches * self._train_batch_size)
+            dataloader_params["sampler"] = sampler
+        return DataLoaderShard(dataset, device=self.accelerator.device, **dataloader_params)
+
+    trainer.get_train_dataloader = types.MethodType(planned_get_train_dataloader, trainer)
+    return True
+
+
+class FinarPlanCallback(TrainerCallback):
+    """启用全局采样计划：替换训练 dataloader 并在 block 边界打印配额统计。"""
+
+    def __init__(self, args, trainer):
+        super().__init__(args, trainer)
+        plan_dir = os.environ.get("SFT_PLAN_DIR", "")
+        self.enabled = bool(plan_dir) and (Path(plan_dir) / "meta.json").is_file()
+        self.last_logged_block: int | None = None
+        self._blocks: list[dict[str, Any]] = []
+        self._steps_per_block = 500
+        if self.enabled:
+            meta = json.loads((Path(plan_dir) / "meta.json").read_text(encoding="utf-8"))
+            self._blocks = meta.get("blocks", [])
+            self._steps_per_block = int(meta.get("steps_per_block", 500))
+            _install_plan_dataloader(trainer)
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        if not self.enabled or not state.is_world_process_zero:
+            return control
+        step = int(state.global_step)
+        block_id = step // self._steps_per_block
+        if block_id >= len(self._blocks) or block_id == self.last_logged_block:
+            return control
+        self.last_logged_block = block_id
+        block = self._blocks[block_id]
+        print(
+            "INFO     | >> sample_plan "
+            f"block={block['block_id']} start_step={block['start_step']} "
+            f"steps={block['steps']} alpha={block['alpha']:.2f}",
+            flush=True,
+        )
+        for modality, quotas in block["quotas"].items():
+            top = sorted(quotas.items(), key=lambda item: (-int(item[1]), item[0]))[:8]
+            summary = " ".join(f"{task}={count}" for task, count in top)
+            print(
+                f"             {modality} quota={sum(int(q) for q in quotas.values())} "
+                f"top_tasks={summary}",
+                flush=True,
+            )
+        return control
+
+
 def args_output_dir(args) -> str:
     return str(getattr(args, "output_dir"))
 
@@ -575,3 +739,4 @@ def args_output_dir(args) -> str:
 callbacks_map["finar_log"] = FinarLogCallback
 callbacks_map["finar_numerics"] = FinarNumericsCallback
 callbacks_map["finar_pass_at_8"] = FinarPassAt8Callback
+callbacks_map["finar_plan"] = FinarPlanCallback

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash "$0" "$@"
+fi
 set -euo pipefail
 
 ROOT="${QWEN3VL_ROOT:-/mnt/nas/bihaoran/qwen3vl}"
@@ -10,22 +13,23 @@ export BASE_MODEL="$ROOT/models/qwen4"
 export TRAIN_MULTI="${TRAIN_MULTI:-$ROOT/data/train_multi/train_multi_sft_minhash_dedup.jsonl}"
 export TRAIN_TEXT="${TRAIN_TEXT:-$ROOT/data/train_text/train_text_sft_minhash_dedup.jsonl}"
 export SFT_BENCHMARK="${SFT_BENCHMARK:-$ROOT/data/benchmark/my_benchmark/all.jsonl}"
-export NPROC_PER_NODE=6
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
-export SFT_JUDGE_GPUS=6,7
+export NPROC_PER_NODE=7
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6
+export SFT_JUDGE_GPUS=7
 export NNODES="$NODE_WORLD_SIZE"
 export NODE_RANK="$NODE_RANK"
 export SFT_EVAL_STEPS=500
 export SFT_EVAL_AT_ZERO=true
-export SFT_SAVE_STEPS="${SFT_SAVE_STEPS:-5000}"
-export SFT_PASS_AT_1_TEMPERATURE="${SFT_PASS_AT_1_TEMPERATURE:-0.3}"
+export SFT_SAVE_STEPS="${SFT_SAVE_STEPS:-500}"
 export SFT_PASS_AT_8_TEMPERATURE="${SFT_PASS_AT_8_TEMPERATURE:-1.0}"
 export SFT_TRACE_STEPS="${SFT_TRACE_STEPS:-1049,1050,1051}"
 export SFT_FREEZE_VIT="${SFT_FREEZE_VIT:-true}"
 export SFT_FREEZE_ALIGNER="${SFT_FREEZE_ALIGNER:-true}"
 export SFT_FREEZE_LLM="${SFT_FREEZE_LLM:-false}"
 export SFT_VIT_GRADIENT_CHECKPOINTING="${SFT_VIT_GRADIENT_CHECKPOINTING:-false}"
-export SFT_GLOBAL_BATCH_SIZE=$((NPROC_PER_NODE * NODE_WORLD_SIZE / 2))
+export SFT_GLOBAL_BATCH_SIZE=$((NPROC_PER_NODE * NODE_WORLD_SIZE * 1 * 2))  # dp_world_size(14) * per_device_batch(1) * grad_acc(2)
+export SFT_PLAN_SEED="${SFT_PLAN_SEED:-42}"
+export SFT_EPOCHS="${SFT_EPOCHS:-1}"
 export WANDB_PROJECT="${WANDB_PROJECT:-FINAR-VL-SFT}"
 export WANDB_VERSION="0.28.1"
 export WANDB_MODE=offline
@@ -68,8 +72,8 @@ export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
 export MODELSCOPE_CACHE="$LOCAL_CACHE_ROOT/modelscope"
 export TRITON_CACHE_DIR="$LOCAL_CACHE_ROOT/triton"
 
-if [[ "$NODE_WORLD_SIZE" != "4" ]]; then
-  echo "expected 4 DLC nodes, got $NODE_WORLD_SIZE" >&2
+if [[ "$NODE_WORLD_SIZE" != "2" ]]; then
+  echo "expected 2 DLC nodes, got $NODE_WORLD_SIZE" >&2
   exit 1
 fi
 for required in "$BASE_MODEL/config.json" "$TRAIN_MULTI" "$TRAIN_TEXT" "$SFT_BENCHMARK" "$ROOT/scripts/sft/swift_sft_plugin.py"; do
@@ -176,12 +180,13 @@ if (( NODE_RANK == 0 )); then
   echo "train_multi=$TRAIN_MULTI"
   echo "train_text=$TRAIN_TEXT"
   echo "benchmark=$SFT_BENCHMARK"
-  echo "epochs=1 multi_repeat=5 max_length=49152 global_batch=12 per_device_batch=1"
-  echo "learning_rate=1e-6 scheduler=cosine warmup_ratio=0.03"
+  echo "max_steps=from_sample_plan max_length=49152 global_batch=28 per_device_batch=1 grad_accum=2"
+  echo "tuner=lora rank=16 alpha=32 dropout=0.05 target_modules=all-linear"
+  echo "learning_rate=1e-5 scheduler=cosine warmup_ratio=0.05 max_grad_norm=1.0"
   echo "eval_step0=true eval_steps=500 save_steps=$SFT_SAVE_STEPS"
-  echo "pass_at_1_temperature=$SFT_PASS_AT_1_TEMPERATURE pass_at_8_temperature=$SFT_PASS_AT_8_TEMPERATURE"
-  echo "training_gpus_per_node=6 judge_gpus_per_node=2 nodes=$NODE_WORLD_SIZE"
-  echo "training_topology=sequence_parallel:2,data_parallel:12 deepspeed=zero2"
+  echo "pass_at_1=greedy pass_at_8_temperature=$SFT_PASS_AT_8_TEMPERATURE"
+  echo "training_gpus_per_node=7 judge_gpus_per_node=1 nodes=$NODE_WORLD_SIZE"
+  echo "training_topology=sequence_parallel:1,data_parallel:14 deepspeed=zero2"
   echo "freeze_vit=$SFT_FREEZE_VIT freeze_aligner=$SFT_FREEZE_ALIGNER freeze_llm=$SFT_FREEZE_LLM vit_gradient_checkpointing=$SFT_VIT_GRADIENT_CHECKPOINTING"
   echo "wandb_project=$WANDB_PROJECT run_dir=$RUN_DIR"
   echo "local_cache_root=$LOCAL_CACHE_ROOT"
@@ -204,7 +209,7 @@ fi
     --port 8001 \
     --dtype bfloat16 \
     --max-model-len 8192 \
-    --tensor-parallel-size 2 \
+    --tensor-parallel-size 1 \
     --gpu-memory-utilization 0.5 \
     --max-num-seqs 8
 ) >"$JUDGE_LOG" 2>&1 &
@@ -228,33 +233,67 @@ export WANDB_DIR="$LOG_ROOT/wandb"
 export WANDB_NAME="$RUN_ID"
 export IMAGE_MAX_TOKEN_NUM=512
 
+SFT_PLAN_DIR="$RUN_DIR/sample_plans"
+export SFT_PLAN_DIR
+if (( NODE_RANK == 0 )); then
+  "$PYTHON_BIN" "$ROOT/scripts/sft/sample_plan.py" \
+    --train-multi "$TRAIN_MULTI" \
+    --train-text "$TRAIN_TEXT" \
+    --output-dir "$SFT_PLAN_DIR" \
+    --global-batch-size "$SFT_GLOBAL_BATCH_SIZE" \
+    --dp-world-size 14 \
+    --per-device-batch 1 \
+    --grad-acc 2 \
+    --seed "$SFT_PLAN_SEED" \
+    --epochs "$SFT_EPOCHS"
+else
+  for attempt in $(seq 1 900); do
+    if [[ -f "$SFT_PLAN_DIR/meta.json" ]]; then
+      break
+    fi
+    sleep 2
+  done
+  test -f "$SFT_PLAN_DIR/meta.json" || {
+    echo "sample plan did not become ready within 1800 seconds" >&2
+    exit 1
+  }
+fi
+SFT_MAX_STEPS="$("$PYTHON_BIN" -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["max_steps"])' "$SFT_PLAN_DIR/meta.json")"
+echo "sample_plan_dir=$SFT_PLAN_DIR epochs=$SFT_EPOCHS max_steps=$SFT_MAX_STEPS"
+
 
 "${SWIFT_CMD[@]}" sft \
   --model "$BASE_MODEL" \
   --model_type qwen3_vl \
-  --dataset "$TRAIN_MULTI" "$TRAIN_MULTI" "$TRAIN_MULTI" "$TRAIN_MULTI" "$TRAIN_MULTI" "$TRAIN_TEXT" \
+  --dataset "$TRAIN_MULTI" "$TRAIN_TEXT" \
   --split_dataset_ratio 0 \
-  --dataset_shuffle true \
+  --dataset_shuffle false \
+  --train_dataloader_shuffle false \
   --strict false \
-  --tuner_type full \
+  --tuner_type lora \
   --freeze_vit "$SFT_FREEZE_VIT" \
   --freeze_aligner "$SFT_FREEZE_ALIGNER" \
   --freeze_llm "$SFT_FREEZE_LLM" \
+  --target_modules all-linear \
+  --lora_rank 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
   --torch_dtype bfloat16 \
   --attn_impl flash_attn \
   --deepspeed zero2 \
   --per_device_train_batch_size 1 \
-  --gradient_accumulation_steps 1 \
+  --gradient_accumulation_steps 2 \
   --gradient_checkpointing true \
   --vit_gradient_checkpointing "$SFT_VIT_GRADIENT_CHECKPOINTING" \
-  --sequence_parallel_size 2 \
+  --sequence_parallel_size 1 \
   --ddp_timeout 86400 \
   --max_length 49152 \
   --truncation_strategy delete \
-  --num_train_epochs 1 \
-  --learning_rate 1e-6 \
+  --max_steps "$SFT_MAX_STEPS" \
+  --learning_rate 1e-5 \
   --lr_scheduler_type cosine \
-  --warmup_ratio 0.03 \
+  --warmup_ratio 0.05 \
+  --max_grad_norm 1.0 \
   --logging_steps 1 \
   --eval_strategy no \
   --save_strategy steps \
@@ -264,7 +303,7 @@ export IMAGE_MAX_TOKEN_NUM=512
   --report_to wandb \
   --run_name "$RUN_ID" \
   --external_plugins "$ROOT/scripts/sft/swift_sft_plugin.py" \
-  --callbacks finar_log finar_numerics finar_pass_at_8 \
+  --callbacks finar_log finar_numerics finar_pass_at_8 finar_plan \
   --dataset_num_proc 1 \
   --dataloader_num_workers 1 \
   --output_dir "$RUN_DIR"

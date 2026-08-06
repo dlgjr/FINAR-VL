@@ -28,7 +28,9 @@ def _length(row: dict[str, Any], length_fn=None) -> tuple[int, str]:
 
 
 def inspect_steps(*, train_multi: Path, train_text: Path, steps: list[int], seed: int = 42,
-                  dp_world_size: int = 12, length_fn=None) -> dict[str, Any]:
+                  dp_world_size: int = 12, grad_acc: int = 1, length_fn=None) -> dict[str, Any]:
+    if grad_acc < 1:
+        raise ValueError(f"grad_acc must be positive: {grad_acc}")
     rows = _read_rows(train_multi, "train_multi") + _read_rows(train_text, "train_text")
     import torch
 
@@ -38,7 +40,7 @@ def inspect_steps(*, train_multi: Path, train_text: Path, steps: list[int], seed
     for step in steps:
         if step < 1:
             raise ValueError(f"step must be positive: {step}")
-        start = (step - 1) * dp_world_size
+        start = (step - 1) * grad_acc * dp_world_size
         indices = permutation[start:start + dp_world_size]
         if not indices:
             raise ValueError(f"step {step} is outside epoch range")
@@ -50,7 +52,7 @@ def inspect_steps(*, train_multi: Path, train_text: Path, steps: list[int], seed
             samples.append({"source": rows[index]["source"], "index": rows[index]["index"],
                             "length": length, "length_kind": length_kind})
         reports.append({"step": step, "samples": samples})
-    return {"seed": seed, "dp_world_size": dp_world_size, "steps": reports}
+    return {"seed": seed, "dp_world_size": dp_world_size, "grad_acc": grad_acc, "steps": reports}
 
 
 def main() -> None:
@@ -60,6 +62,7 @@ def main() -> None:
     parser.add_argument("--step", type=int, action="append", required=True)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dp-world-size", type=int, default=12)
+    parser.add_argument("--grad-acc", type=int, default=1)
     parser.add_argument("--model", type=str, default=None,
                         help="可选 Hugging Face processor，用编码长度替代字符估计")
     parser.add_argument("--image-max-token-num", type=int, default=256)
@@ -78,6 +81,7 @@ def main() -> None:
     print(json.dumps(inspect_steps(train_multi=args.train_multi, train_text=args.train_text,
                                    steps=args.step, seed=args.seed,
                                    dp_world_size=args.dp_world_size,
+                                   grad_acc=args.grad_acc,
                                    length_fn=length_fn), ensure_ascii=False, indent=2))
 
 

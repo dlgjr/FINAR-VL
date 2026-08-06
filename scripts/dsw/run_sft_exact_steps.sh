@@ -30,6 +30,23 @@ if [[ "$SFT_ATTN_IMPL" == "flash_attn" ]]; then
 fi
 
 IFS=',' read -r -a STEPS <<< "$SFT_DEBUG_STEPS"
+SFT_PLAN_MAX_STEPS=0
+for STEP in "${STEPS[@]}"; do
+  if (( STEP > SFT_PLAN_MAX_STEPS )); then
+    SFT_PLAN_MAX_STEPS=$STEP
+  fi
+done
+SFT_PLAN_DIR="$SFT_OUTPUT_ROOT/sample_plans"
+"$PYTHON_BIN" "$QWEN3VL_ROOT/scripts/sft/sample_plan.py" \
+  --train-multi "$TRAIN_MULTI" \
+  --train-text "$TRAIN_TEXT" \
+  --output-dir "$SFT_PLAN_DIR" \
+  --global-batch-size 28 \
+  --dp-world-size 14 \
+  --per-device-batch 1 \
+  --grad-acc 2 \
+  --seed 42 \
+  --max-steps "$SFT_PLAN_MAX_STEPS"
 OVERALL_EXIT_CODE=0
 for STEP in "${STEPS[@]}"; do
   RUN_DIR="$SFT_OUTPUT_ROOT/step_${STEP}"
@@ -38,11 +55,12 @@ for STEP in "${STEPS[@]}"; do
   echo "独立任务 step=$STEP：从 BASE_MODEL=$BASE_MODEL 启动，仅执行一次 forward/backward/optimizer update"
 
   "$PYTHON_BIN" "$QWEN3VL_ROOT/scripts/sft/extract_sequence_parallel_sample.py" \
+    --plan-dir "$SFT_PLAN_DIR" \
     --train-multi "$TRAIN_MULTI" \
     --train-text "$TRAIN_TEXT" \
     --step "$STEP" \
-    --seed 42 \
-    --dp-world-size 12 \
+    --grad-acc 2 \
+    --per-device-batch 1 \
     --output "$DEBUG_DATA"
 
   export SFT_TRACE_STEPS=1
@@ -52,22 +70,31 @@ for STEP in "${STEPS[@]}"; do
     --model_type qwen3_vl \
     --dataset "$DEBUG_DATA" \
     --split_dataset_ratio 0 \
+    --dataset_shuffle false \
+    --train_dataloader_shuffle false \
     --strict false \
-    --tuner_type full \
-    --freeze_vit false \
-    --freeze_aligner false \
+    --tuner_type lora \
+    --freeze_vit true \
+    --freeze_aligner true \
     --freeze_llm false \
+    --target_modules all-linear \
+    --lora_rank 16 \
+    --lora_alpha 32 \
+    --lora_dropout 0.05 \
     --torch_dtype bfloat16 \
     --attn_impl "$SFT_ATTN_IMPL" \
     --per_device_train_batch_size 1 \
-    --gradient_accumulation_steps 1 \
+    --gradient_accumulation_steps 2 \
     --gradient_checkpointing true \
     --vit_gradient_checkpointing true \
     --deepspeed zero2 \
-    --sequence_parallel_size 2 \
+    --sequence_parallel_size 1 \
     --max_length "$SFT_DEBUG_MAX_LENGTH" \
     --max_steps 1 \
-    --learning_rate 1e-6 \
+    --learning_rate 1e-5 \
+    --lr_scheduler_type cosine \
+    --warmup_ratio 0.05 \
+    --max_grad_norm 1.0 \
     --logging_steps 1 \
     --logging_nan_inf_filter false \
     --eval_strategy no \

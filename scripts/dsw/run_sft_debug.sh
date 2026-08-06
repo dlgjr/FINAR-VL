@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT="${QWEN3VL_ROOT:-/mnt/nas/bihaoran/qwen3vl}"
-export NPROC_PER_NODE=2
-export CUDA_VISIBLE_DEVICES=0,1
+export NPROC_PER_NODE=1
+export CUDA_VISIBLE_DEVICES=0
 source "$ROOT/scripts/dlc/dlc_env.sh"
 
 export BASE_MODEL="$ROOT/models/qwen4"
@@ -13,7 +13,7 @@ export SFT_BENCHMARK="$ROOT/data/benchmark/my_benchmark/all.jsonl"
 export SFT_EVAL_MAX_SAMPLES=1
 export SFT_EVAL_STEPS=5
 export SFT_EVAL_AT_ZERO=false
-export SFT_GLOBAL_BATCH_SIZE=1
+export SFT_GLOBAL_BATCH_SIZE=2
 export SFT_JUDGE_URL="${SFT_JUDGE_URL:-http://127.0.0.1:8001}"
 export WANDB_DISABLED=true
 export WANDB_MODE=disabled
@@ -28,7 +28,6 @@ PYTHON_BIN="${PYTHON_BIN:-/opt/ac2/bin/python}"
 SWIFT_BIN="${SWIFT_BIN:-$PYTHONUSERBASE/bin/swift}"
 RUN_ID="${SFT_DSW_RUN_ID:-sft_dsw_$(date +%Y%m%d_%H%M%S)}"
 RUN_DIR="${SFT_DSW_OUTPUT_DIR:-$ROOT/output/sft_dsw/$RUN_ID}"
-DEBUG_DATA="$RUN_DIR/debug_train.jsonl"
 
 mkdir -p "$RUN_DIR"
 test -f "$BASE_MODEL/config.json" || { echo "模型不存在：$BASE_MODEL" >&2; exit 1; }
@@ -58,74 +57,56 @@ then
     peft
 fi
 test -x "$SWIFT_BIN" || { echo "swift 不存在：$SWIFT_BIN" >&2; exit 1; }
-"$PYTHON_BIN" - "$ROOT" "$DEBUG_DATA" <<'PY'
-import json
-import os
-import sys
-from itertools import zip_longest
-from pathlib import Path
 
-from transformers import AutoTokenizer
-
-root = Path(sys.argv[1])
-output = Path(sys.argv[2])
-sys.path.insert(0, str(root))
-from scripts.sft.debug_sample_selection import select_representative_rows
-
-tokenizer = AutoTokenizer.from_pretrained(root / 'models/qwen4', trust_remote_code=True)
-paths = [Path(os.environ['TRAIN_MULTI']), Path(os.environ['TRAIN_TEXT'])]
-
-
-def candidate_rows():
-    with paths[0].open(encoding='utf-8') as multi, paths[1].open(encoding='utf-8') as text:
-        for pair in zip_longest(multi, text):
-            for line in pair:
-                if line is None:
-                    continue
-                row = json.loads(line)
-                chars = sum(len(str(message['content'])) for message in row['messages'])
-                if chars <= 7000 or 9000 <= chars <= 28000 or 33000 <= chars <= 48000 or chars >= 55000:
-                    yield row
-
-
-def estimated_tokens(row):
-    token_ids = tokenizer.apply_chat_template(row['messages'], tokenize=True, add_generation_prompt=False)
-    return len(token_ids) + len(row.get('images', [])) * 255
-
-
-selected = select_representative_rows(candidate_rows(), length_fn=estimated_tokens)
-with output.open('w', encoding='utf-8') as handle:
-    for row in selected:
-        handle.write(json.dumps(row, ensure_ascii=False) + '\n')
-PY
+SFT_PLAN_DIR="$RUN_DIR/sample_plans"
+export SFT_PLAN_DIR
+"$PYTHON_BIN" "$ROOT/scripts/sft/sample_plan.py" \
+  --train-multi "$TRAIN_MULTI" \
+  --train-text "$TRAIN_TEXT" \
+  --output-dir "$SFT_PLAN_DIR" \
+  --global-batch-size "$SFT_GLOBAL_BATCH_SIZE" \
+  --dp-world-size 1 \
+  --per-device-batch 1 \
+  --grad-acc 2 \
+  --seed "${SFT_PLAN_SEED:-42}" \
+  --max-steps 5
 
 echo "===== SFT DSW DEBUG CONFIG ====="
-echo "model=$BASE_MODEL debug_data=$DEBUG_DATA benchmark=$SFT_BENCHMARK"
-echo "max_steps=5 max_length=$SFT_DEBUG_MAX_LENGTH gpus=0,1 sequence_parallel=2 deepspeed=zero2 fixed_batch=1 eval_samples=1 candidates=8"
+echo "model=$BASE_MODEL benchmark=$SFT_BENCHMARK"
+echo "max_steps=5 max_length=$SFT_DEBUG_MAX_LENGTH gpus=0 sequence_parallel=1 deepspeed=zero2 fixed_batch=1 grad_accum=2 eval_samples=1"
+echo "tuner=lora rank=16 alpha=32 dropout=0.05 target_modules=all-linear learning_rate=1e-5 warmup_ratio=0.05 max_grad_norm=1.0"
+echo "sample_plan_dir=$SFT_PLAN_DIR"
 
 exec "$SWIFT_BIN" sft \
   --model "$BASE_MODEL" \
   --model_type qwen3_vl \
-  --dataset "$DEBUG_DATA" \
+  --dataset "$TRAIN_MULTI" "$TRAIN_TEXT" \
   --split_dataset_ratio 0 \
+  --dataset_shuffle false \
+  --train_dataloader_shuffle false \
   --strict false \
-  --tuner_type full \
-  --freeze_vit false \
-  --freeze_aligner false \
+  --tuner_type lora \
+  --freeze_vit true \
+  --freeze_aligner true \
   --freeze_llm false \
+  --target_modules all-linear \
+  --lora_rank 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
   --torch_dtype bfloat16 \
   --attn_impl "$SFT_ATTN_IMPL" \
   --per_device_train_batch_size 1 \
-  --gradient_accumulation_steps 1 \
+  --gradient_accumulation_steps 2 \
   --gradient_checkpointing true \
   --vit_gradient_checkpointing true \
   --deepspeed zero2 \
-  --sequence_parallel_size 2 \
+  --sequence_parallel_size 1 \
   --max_length "$SFT_DEBUG_MAX_LENGTH" \
   --max_steps 5 \
-  --learning_rate 1e-6 \
+  --learning_rate 1e-5 \
   --lr_scheduler_type cosine \
-  --warmup_ratio 0.03 \
+  --warmup_ratio 0.05 \
+  --max_grad_norm 1.0 \
   --logging_steps 1 \
   --logging_nan_inf_filter false \
   --eval_strategy no \
@@ -134,5 +115,5 @@ exec "$SWIFT_BIN" sft \
   --save_only_model true \
   --report_to none \
   --external_plugins "$ROOT/scripts/sft/swift_sft_plugin.py" \
-  --callbacks finar_log finar_numerics finar_pass_at_8 \
+  --callbacks finar_log finar_numerics finar_pass_at_8 finar_plan \
   --output_dir "$RUN_DIR"
