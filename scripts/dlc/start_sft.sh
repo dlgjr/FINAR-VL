@@ -27,8 +27,11 @@ export SFT_FREEZE_VIT="${SFT_FREEZE_VIT:-true}"
 export SFT_FREEZE_ALIGNER="${SFT_FREEZE_ALIGNER:-true}"
 export SFT_FREEZE_LLM="${SFT_FREEZE_LLM:-false}"
 export SFT_VIT_GRADIENT_CHECKPOINTING="${SFT_VIT_GRADIENT_CHECKPOINTING:-false}"
-export SFT_GLOBAL_BATCH_SIZE=$((NPROC_PER_NODE * NODE_WORLD_SIZE * 1 * 2))  # dp_world_size(14) * per_device_batch(1) * grad_acc(2)
+export SFT_GRAD_ACC="${SFT_GRAD_ACC:-2}"
+export SFT_DP_WORLD_SIZE=$((NPROC_PER_NODE * NODE_WORLD_SIZE))
+export SFT_GLOBAL_BATCH_SIZE=$((SFT_DP_WORLD_SIZE * 1 * SFT_GRAD_ACC))
 export SFT_PLAN_SEED="${SFT_PLAN_SEED:-42}"
+export SFT_MULTI_RATIO="${SFT_MULTI_RATIO:-0.45}"
 export SFT_EPOCHS="${SFT_EPOCHS:-1}"
 export WANDB_PROJECT="${WANDB_PROJECT:-FINAR-VL-SFT}"
 export WANDB_VERSION="0.28.1"
@@ -72,10 +75,6 @@ export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
 export MODELSCOPE_CACHE="$LOCAL_CACHE_ROOT/modelscope"
 export TRITON_CACHE_DIR="$LOCAL_CACHE_ROOT/triton"
 
-if [[ "$NODE_WORLD_SIZE" != "2" ]]; then
-  echo "expected 2 DLC nodes, got $NODE_WORLD_SIZE" >&2
-  exit 1
-fi
 for required in "$BASE_MODEL/config.json" "$TRAIN_MULTI" "$TRAIN_TEXT" "$SFT_BENCHMARK" "$ROOT/scripts/sft/swift_sft_plugin.py"; do
   test -f "$required" || { echo "missing required file: $required" >&2; exit 1; }
 done
@@ -180,13 +179,13 @@ if (( NODE_RANK == 0 )); then
   echo "train_multi=$TRAIN_MULTI"
   echo "train_text=$TRAIN_TEXT"
   echo "benchmark=$SFT_BENCHMARK"
-  echo "max_steps=from_sample_plan max_length=49152 global_batch=28 per_device_batch=1 grad_accum=2"
+  echo "max_steps=from_sample_plan max_length=49152 global_batch=$SFT_GLOBAL_BATCH_SIZE per_device_batch=1 grad_accum=$SFT_GRAD_ACC"
   echo "tuner=lora rank=16 alpha=32 dropout=0.05 target_modules=all-linear"
   echo "learning_rate=1e-5 scheduler=cosine warmup_ratio=0.05 max_grad_norm=1.0"
   echo "eval_step0=true eval_steps=500 save_steps=$SFT_SAVE_STEPS"
   echo "pass_at_1=greedy pass_at_8_temperature=$SFT_PASS_AT_8_TEMPERATURE"
   echo "training_gpus_per_node=7 judge_gpus_per_node=1 nodes=$NODE_WORLD_SIZE"
-  echo "training_topology=sequence_parallel:1,data_parallel:14 deepspeed=zero2"
+  echo "training_topology=sequence_parallel:1,data_parallel:$SFT_DP_WORLD_SIZE deepspeed=zero2"
   echo "freeze_vit=$SFT_FREEZE_VIT freeze_aligner=$SFT_FREEZE_ALIGNER freeze_llm=$SFT_FREEZE_LLM vit_gradient_checkpointing=$SFT_VIT_GRADIENT_CHECKPOINTING"
   echo "wandb_project=$WANDB_PROJECT run_dir=$RUN_DIR"
   echo "local_cache_root=$LOCAL_CACHE_ROOT"
@@ -241,10 +240,11 @@ if (( NODE_RANK == 0 )); then
     --train-text "$TRAIN_TEXT" \
     --output-dir "$SFT_PLAN_DIR" \
     --global-batch-size "$SFT_GLOBAL_BATCH_SIZE" \
-    --dp-world-size 14 \
+    --dp-world-size "$SFT_DP_WORLD_SIZE" \
     --per-device-batch 1 \
-    --grad-acc 2 \
+    --grad-acc "$SFT_GRAD_ACC" \
     --seed "$SFT_PLAN_SEED" \
+    --multi-ratio "$SFT_MULTI_RATIO" \
     --epochs "$SFT_EPOCHS"
 else
   for attempt in $(seq 1 900); do
@@ -282,10 +282,11 @@ echo "sample_plan_dir=$SFT_PLAN_DIR epochs=$SFT_EPOCHS max_steps=$SFT_MAX_STEPS"
   --attn_impl flash_attn \
   --deepspeed zero2 \
   --per_device_train_batch_size 1 \
-  --gradient_accumulation_steps 2 \
+  --gradient_accumulation_steps "$SFT_GRAD_ACC" \
   --gradient_checkpointing true \
   --vit_gradient_checkpointing "$SFT_VIT_GRADIENT_CHECKPOINTING" \
   --sequence_parallel_size 1 \
+  --use_logits_to_keep true \
   --ddp_timeout 86400 \
   --max_length 49152 \
   --truncation_strategy delete \
