@@ -17,11 +17,11 @@ export SFT_GLOBAL_BATCH_SIZE=2
 export SFT_JUDGE_URL="${SFT_JUDGE_URL:-http://127.0.0.1:8001}"
 export WANDB_DISABLED=true
 export WANDB_MODE=disabled
-export IMAGE_MAX_TOKEN_NUM=256
+export IMAGE_MAX_TOKEN_NUM=512
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 export SFT_ATTN_IMPL="${SFT_ATTN_IMPL:-sdpa}"
 export SFT_CELOSS_PARALLEL_SIZE="${SFT_CELOSS_PARALLEL_SIZE:-4096}"
-export SFT_DEBUG_MAX_LENGTH="${SFT_DEBUG_MAX_LENGTH:-81920}"
+export SFT_DEBUG_MAX_LENGTH="${SFT_DEBUG_MAX_LENGTH:-49152}"
 export CELOSS_PARALLEL_SIZE="$SFT_CELOSS_PARALLEL_SIZE"
 
 PYTHON_BIN="${PYTHON_BIN:-/opt/ac2/bin/python}"
@@ -69,6 +69,9 @@ export SFT_PLAN_DIR
   --per-device-batch 1 \
   --grad-acc 2 \
   --seed "${SFT_PLAN_SEED:-42}" \
+  --model "$BASE_MODEL" \
+  --model-type qwen3_vl \
+  --max-length "$SFT_DEBUG_MAX_LENGTH" \
   --max-steps 5
 
 echo "===== SFT DSW DEBUG CONFIG ====="

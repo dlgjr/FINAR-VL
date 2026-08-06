@@ -596,6 +596,8 @@ class PlanSampler(_SAMPLER_BASE):
         self.total_blocks = int(self.meta["total_blocks"])
         self.per_device_batch = int(self.meta.get("per_device_batch", 1))
         self.grad_acc = int(self.meta["grad_acc"])
+        if self.per_device_batch != 1:
+            raise AssertionError("sample plan actual accounting requires per_device_batch=1")
 
     def _length(self) -> int:
         return (
@@ -651,6 +653,147 @@ def _dp_rank() -> tuple[int, int]:
     return 0, 1
 
 
+def _distributed_barrier() -> None:
+    try:
+        import torch.distributed as dist
+
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+    except (ImportError, AttributeError):
+        return
+
+
+def _empty_distribution() -> dict[str, Any]:
+    return {
+        "samples": 0,
+        "assistant_tokens": 0,
+        "sample_ratio": 0.0,
+        "token_ratio": 0.0,
+        "tasks": {},
+        "families": {},
+    }
+
+
+def _add_distribution(target: dict[str, Any], entry: dict[str, Any], token_count: int) -> None:
+    task = str(entry["task"])
+    family = str(entry.get("family", task))
+    target["samples"] += 1
+    target["assistant_tokens"] += int(token_count)
+    for group, name in (("tasks", task), ("families", family)):
+        values = target[group].setdefault(name, {"samples": 0, "assistant_tokens": 0})
+        values["samples"] += 1
+        values["assistant_tokens"] += int(token_count)
+
+
+def _finalize_distribution(distribution: dict[str, Any]) -> dict[str, Any]:
+    total_samples = int(distribution["samples"])
+    total_tokens = int(distribution["assistant_tokens"])
+    distribution["sample_ratio"] = 1.0 if total_samples else 0.0
+    distribution["token_ratio"] = 1.0 if total_tokens else 0.0
+    for grouped in (distribution["tasks"], distribution["families"]):
+        for values in grouped.values():
+            values["sample_ratio"] = values["samples"] / total_samples if total_samples else 0.0
+            values["token_ratio"] = values["assistant_tokens"] / total_tokens if total_tokens else 0.0
+    return distribution
+
+
+def _distribution_difference(planned: dict[str, Any], actual: dict[str, Any]) -> dict[str, Any]:
+    difference = _empty_distribution()
+    for key in ("samples", "assistant_tokens"):
+        difference[key] = int(actual[key]) - int(planned[key])
+    for group in ("tasks", "families"):
+        names = set(planned[group]) | set(actual[group])
+        for name in sorted(names):
+            planned_values = planned[group].get(name, {})
+            actual_values = actual[group].get(name, {})
+            difference[group][name] = {
+                "samples": int(actual_values.get("samples", 0)) - int(planned_values.get("samples", 0)),
+                "assistant_tokens": int(actual_values.get("assistant_tokens", 0)) - int(planned_values.get("assistant_tokens", 0)),
+            }
+    return difference
+
+
+class _PlanRuntimeTracker:
+    def __init__(self, plan_dir: str, trainer) -> None:
+        self.plan_dir = Path(plan_dir)
+        self.output_dir = Path(trainer.args.output_dir) / "sample_distribution"
+        self.rank = _global_rank()
+        self.dp_rank, self.dp_world = _dp_rank()
+        self.meta = json.loads((self.plan_dir / "meta.json").read_text(encoding="utf-8"))
+        self.entries: list[dict[str, Any]] = []
+        self.planned: dict[int, dict[str, Any]] = {}
+        self.actual: dict[int, dict[str, Any]] = {}
+        self.cursor = 0
+        self.flushed: set[int] = set()
+        per_device_batch = int(self.meta.get("per_device_batch", 1))
+        if per_device_batch != 1:
+            raise AssertionError("sample plan actual accounting requires per_device_batch=1")
+        for block_id in range(int(self.meta["total_blocks"])):
+            path = self.plan_dir / f"block_{block_id:04d}.jsonl"
+            planned = _empty_distribution()
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    entry = json.loads(line)
+                    position = int(entry["position_in_micro_step"])
+                    if self.dp_rank <= position < self.dp_rank + 1:
+                        self.entries.append(entry)
+                        _add_distribution(planned, entry, int(entry.get("assistant_token_count", 0)))
+            self.planned[block_id] = planned
+            self.actual[block_id] = _empty_distribution()
+
+    def set_skip_batches(self, skip_batches: int) -> None:
+        self.cursor = int(skip_batches)
+
+    def consume(self, labels) -> None:
+        if labels is None:
+            raise AssertionError("planned SFT batch must contain labels")
+        if getattr(labels, "ndim", None) != 2 or int(labels.shape[0]) != 1:
+            raise AssertionError("sample plan actual accounting requires batch dimension 1")
+        if self.cursor >= len(self.entries):
+            raise AssertionError("rank-local plan cursor exhausted before training ended")
+        entry = self.entries[self.cursor]
+        token_count = int(labels.ne(-100).sum().item())
+        _add_distribution(self.actual[int(entry["block"])], entry, token_count)
+        self.cursor += 1
+
+    def write_rank_block(self, block_id: int) -> None:
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        planned = _finalize_distribution(self.planned[block_id])
+        actual = _finalize_distribution(self.actual[block_id])
+        payload = {
+            "block_id": block_id,
+            "rank": self.rank,
+            "planned": planned,
+            "actual": actual,
+            "difference": _distribution_difference(planned, actual),
+        }
+        path = self.output_dir / f"block_{block_id:04d}.rank_{self.rank:04d}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def merge_block(self, block_id: int) -> None:
+        merged = {"block_id": block_id, "planned": _empty_distribution(), "actual": _empty_distribution()}
+        for rank in range(self.dp_world):
+            path = self.output_dir / f"block_{block_id:04d}.rank_{rank:04d}.json"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            for key in ("planned", "actual"):
+                source = payload[key]
+                target = merged[key]
+                target["samples"] += int(source["samples"])
+                target["assistant_tokens"] += int(source["assistant_tokens"])
+                for group in ("tasks", "families"):
+                    for name, values in source[group].items():
+                        target[group].setdefault(name, {"samples": 0, "assistant_tokens": 0})
+                        target[group][name]["samples"] += int(values["samples"])
+                        target[group][name]["assistant_tokens"] += int(values["assistant_tokens"])
+        merged["planned"] = _finalize_distribution(merged["planned"])
+        merged["actual"] = _finalize_distribution(merged["actual"])
+        merged["difference"] = _distribution_difference(merged["planned"], merged["actual"])
+        path = self.output_dir / f"block_{block_id:04d}.json"
+        path.write_text(json.dumps(merged, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def _install_plan_dataloader(trainer) -> bool:
     plan_dir = os.environ.get("SFT_PLAN_DIR", "")
     if not plan_dir or not (Path(plan_dir) / "meta.json").is_file():
@@ -664,6 +807,8 @@ def _install_plan_dataloader(trainer) -> bool:
 
     def planned_get_train_dataloader(self, skip_batches=0):
         rank, _ = _dp_rank()
+        if int(getattr(self.args, "per_device_train_batch_size", 1)) != 1:
+            raise AssertionError("sample plan actual accounting requires per_device_train_batch_size=1")
         dataset = self.train_dataset
         sampler = PlanSampler(
             plan_dir=Path(plan_dir),
@@ -684,6 +829,9 @@ def _install_plan_dataloader(trainer) -> bool:
 
             sampler = SkipBatchSampler(sampler, skip_batches=skip_batches * self._train_batch_size)
             dataloader_params["sampler"] = sampler
+        tracker = getattr(self, "_finar_plan_tracker", None)
+        if tracker is not None:
+            tracker.set_skip_batches(int(skip_batches))
         return DataLoaderShard(dataset, device=self.accelerator.device, **dataloader_params)
 
     trainer.get_train_dataloader = types.MethodType(planned_get_train_dataloader, trainer)
@@ -702,9 +850,27 @@ class FinarPlanCallback(TrainerCallback):
         self._steps_per_block = 500
         if self.enabled:
             meta = json.loads((Path(plan_dir) / "meta.json").read_text(encoding="utf-8"))
+            if int(getattr(args, "per_device_train_batch_size", 1)) != 1:
+                raise AssertionError("sample plan actual accounting requires per_device_train_batch_size=1")
+            if int(meta.get("per_device_batch", 1)) != 1:
+                raise AssertionError("sample plan actual accounting requires per_device_batch=1")
             self._blocks = meta.get("blocks", [])
             self._steps_per_block = int(meta.get("steps_per_block", 500))
             _install_plan_dataloader(trainer)
+            self._tracker = _PlanRuntimeTracker(plan_dir, trainer)
+            trainer._finar_plan_tracker = self._tracker
+            original_compute_loss = trainer.compute_loss
+
+            def tracked_compute_loss(model, inputs, *compute_args, **compute_kwargs):
+                labels = inputs.get("labels")
+                result = original_compute_loss(model, inputs, *compute_args, **compute_kwargs)
+                loss = result[0] if isinstance(result, tuple) else result
+                if not math.isfinite(float(loss.item())):
+                    return result
+                self._tracker.consume(labels)
+                return result
+
+            trainer.compute_loss = tracked_compute_loss
 
     def on_step_begin(self, args, state, control, **kwargs):
         if not self.enabled or not state.is_world_process_zero:
@@ -729,6 +895,31 @@ class FinarPlanCallback(TrainerCallback):
                 f"top_tasks={summary}",
                 flush=True,
             )
+        return control
+
+    def _flush_block(self, block_id: int) -> None:
+        if block_id in self._tracker.flushed:
+            return
+        self._tracker.write_rank_block(block_id)
+        _distributed_barrier()
+        if _global_rank() == 0:
+            self._tracker.merge_block(block_id)
+        self._tracker.flushed.add(block_id)
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if not self.enabled:
+            return control
+        step = int(getattr(state, "global_step", 0))
+        if step > 0 and step % self._steps_per_block == 0:
+            self._flush_block(step // self._steps_per_block - 1)
+        return control
+
+    def on_train_end(self, args, state, control, **kwargs):
+        if not self.enabled:
+            return control
+        final_step = int(getattr(state, "global_step", 0))
+        if final_step > 0:
+            self._flush_block(min(len(self._blocks) - 1, (final_step - 1) // self._steps_per_block))
         return control
 
 

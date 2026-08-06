@@ -244,6 +244,9 @@ if (( NODE_RANK == 0 )); then
     --per-device-batch 1 \
     --grad-acc "$SFT_GRAD_ACC" \
     --seed "$SFT_PLAN_SEED" \
+    --model "$BASE_MODEL" \
+    --model-type qwen3_vl \
+    --max-length 49152 \
     --multi-ratio "$SFT_MULTI_RATIO" \
     --epochs "$SFT_EPOCHS"
 else
