@@ -10,77 +10,305 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_MULTI_RATIO = 0.45
-ALPHA_SCHEDULE = ((0, 1000, 0.45), (1000, 3000, 0.40), (3000, float("inf"), 0.35))
-HEAD_DOWNWEIGHT = {
-    "chart_qa": 0.30,
-    "table_math_qa": 0.35,
-    "financial_multiple_choice": 0.25,
-    "financial_headline_classification": 0.40,
-    "financial_event_extraction": 0.60,
-    "stock_movement_prediction": 0.40,
-    "general_dialogue": 0.35,
-}
-BENCHMARK_UPWEIGHT = {
-    "basic_arithmetic_metrics": 1.3,
-    "candlestick_trend_analysis": 1.5,
-    "candlestick_ohlc_analysis": 1.6,
-    "financial_chart_qa": 1.8,
-    "document_ocr_qa": 1.3,
-    "ocr_qa": 1.2,
-    "entity_extraction_classification": 1.5,
-    "evidence_retrieval": 2.5,
-    "long_document_cross_page_qa": 2.5,
-    "long_document_cross_page": 2.5,
-    "financial_multipage_qa": 2.0,
-    "document_finance_numeric_qa": 2.0,
-    "table_math_reasoning": 2.2,
-    "financial_numerical_reasoning": 2.2,
-    "multi_table_reasoning": 2.5,
-    "single_table_qa": 1.5,
-    "table_statistics_and_comparison": 1.8,
-    "compliance_safety_suitability": 1.6,
-    "risk_sentiment_policy": 1.8,
-    "investment_advice_strategy": 1.6,
-    "portfolio_and_risk_management": 1.6,
-    "financial_audit_and_controls": 1.6,
-    "multimodal_financial_knowledge": 1.8,
-    "financial_causal_event_reasoning": 1.8,
-    "financial_causal_explanation": 1.8,
-    "financial_relation_extraction": 2.2,
-}
-TASK_TO_FAMILY = {
-    "chart_qa": "chart_understanding",
-    "financial_chart_qa": "chart_understanding",
-    "figure_qa": "chart_understanding",
-    "candlestick_trend_analysis": "candlestick",
-    "candlestick_ohlc_analysis": "candlestick",
-    "table_math_qa": "single_table_reasoning",
-    "table_math_reasoning": "single_table_reasoning",
-    "single_table_qa": "single_table_reasoning",
-    "hierarchical_table_qa": "single_table_reasoning",
-    "table_statistics_and_comparison": "single_table_reasoning",
-    "multi_table_reasoning": "multi_table_reasoning",
-    "document_ocr_qa": "ocr",
-    "ocr_qa": "ocr",
-    "span_extraction": "ocr",
-    "multi_span_extraction": "ocr",
-    "table_structure_detection": "ocr",
-    "long_document_cross_page_qa": "cross_page",
-    "financial_multipage_qa": "cross_page",
-    "long_document_cross_page": "cross_page",
-    "evidence_retrieval": "evidence_retrieval",
-}
-FAMILY_CAP = {
-    "chart_understanding": 0.12,
-    "candlestick": 0.08,
-    "single_table_reasoning": 0.12,
-    "multi_table_reasoning": 0.04,
-    "ocr": 0.10,
-    "cross_page": 0.08,
-    "evidence_retrieval": 0.08,
-}
-MAX_TASK_RATIO = 0.08
+DEFAULT_MULTI_RATIO = 0.40
+ALPHA_SCHEDULE = ((0, 1000, 0.60), (1000, 3000, 0.50), (3000, float("inf"), 0.45))
+TOKEN_LENGTH_BETA = 0.5
+MIN_ASSISTANT_TOKENS_FOR_WEIGHT = 8
+MAX_MULTI_EFFECTIVE_TOKEN_RATIO = 0.60
+HEAD_DOWNWEIGHT = {'basic_arithmetic_metrics': 0.7,
+ 'document_fact_extraction': 0.7,
+ 'financial_event_extraction': 0.6,
+ 'financial_headline_classification': 0.45,
+ 'financial_sentiment_analysis': 0.6,
+ 'general_dialogue': 0.5,
+ 'statistics_comparison_ranking': 0.7,
+ 'stock_movement_prediction': 0.4,
+ 'table_counting': 0.7}
+BENCHMARK_UPWEIGHT = {'basic_arithmetic_metrics': 1.3,
+ 'candlestick_time_series': 1.6,
+ 'chart_data_extraction': 1.5,
+ 'compliance_safety_suitability': 1.6,
+ 'cross_modal_multi_hop': 1.8,
+ 'entity_extraction_classification': 1.3,
+ 'esg_issue_identification': 1.4,
+ 'evidence_retrieval': 1.8,
+ 'explanation_anomaly_causality': 1.7,
+ 'financial_audit_fundamentals': 1.5,
+ 'financial_causal_event_reasoning': 1.7,
+ 'financial_certification_exam_qa': 1.4,
+ 'financial_counterfactual_inference': 1.7,
+ 'financial_data_description': 1.3,
+ 'financial_entity_extraction': 1.4,
+ 'financial_event_extraction': 1.4,
+ 'financial_headline_classification': 1.3,
+ 'financial_multi_turn_perception': 1.5,
+ 'financial_numeric_labeling': 1.3,
+ 'financial_ocr': 1.4,
+ 'financial_relation_extraction': 1.5,
+ 'financial_semantic_role_labeling': 1.3,
+ 'financial_sentiment_analysis': 1.3,
+ 'financial_summarization': 1.4,
+ 'financial_topic_classification': 1.3,
+ 'image_caption': 1.3,
+ 'industry_trend_inference': 1.6,
+ 'investment_advice_strategy': 1.6,
+ 'long_document_cross_page': 1.8,
+ 'merger_acquisition_completeness_classification': 1.4,
+ 'monetary_policy_stance_classification': 1.4,
+ 'multi_step_numerical_reasoning': 1.7,
+ 'multi_table_reasoning': 1.8,
+ 'multimodal_financial_knowledge': 1.6,
+ 'portfolio_allocation_risk_return': 1.6,
+ 'relationship_equity_structure': 1.5,
+ 'risk_sentiment_policy': 1.6,
+ 'single_table_qa': 1.5,
+ 'spatial_localization': 1.3,
+ 'statistics_comparison_ranking': 1.4,
+ 'stock_movement_prediction': 1.4,
+ 'summary_announcement': 1.3}
+TASK_TO_FAMILY = {'accounting_cost_reasoning': 'accounting_valuation',
+ 'administrative_law_reasoning': 'risk_policy_advice',
+ 'anomaly_information_tracing': 'retrieval_grounding',
+ 'asset_pricing_model_calculation': 'accounting_valuation',
+ 'bank_customer_service_intent_classification': 'classification_sentiment',
+ 'bank_reserve_requirement_calculation': 'accounting_valuation',
+ 'basic_arithmetic_metrics': 'numerical_statistics',
+ 'business_strategy_analysis': 'generation_dialogue',
+ 'candlestick_time_series': 'chart_reasoning',
+ 'capital_budgeting_calculation': 'accounting_valuation',
+ 'cash_management_calculation': 'accounting_valuation',
+ 'chart_arithmetic_reasoning': 'chart_reasoning',
+ 'chart_counting': 'chart_reasoning',
+ 'chart_data_extraction': 'chart_reasoning',
+ 'chart_legend_identification': 'chart_reasoning',
+ 'chart_statement_verification': 'chart_reasoning',
+ 'chart_trend_inference': 'chart_reasoning',
+ 'chart_visual_property_reasoning': 'chart_reasoning',
+ 'climate_transition_inference': 'risk_policy_advice',
+ 'commercial_bank_finance': 'financial_knowledge',
+ 'compliance_safety_suitability': 'risk_policy_advice',
+ 'compositional_reasoning': 'numerical_statistics',
+ 'corporate_finance_and_deals': 'accounting_valuation',
+ 'corporate_strategy_inference': 'generation_dialogue',
+ 'cost_accounting_calculation': 'accounting_valuation',
+ 'cost_accounting_variance_reasoning': 'accounting_valuation',
+ 'cost_volume_profit_calculation': 'accounting_valuation',
+ 'counterfactual_reasoning': 'market_macro_reasoning',
+ 'criminal_law_reasoning': 'risk_policy_advice',
+ 'cross_modal_multi_hop': 'multipage_financial_reasoning',
+ 'derivatives_analysis': 'accounting_valuation',
+ 'descriptive_statistics_calculation': 'numerical_statistics',
+ 'digital_asset_analysis': 'financial_knowledge',
+ 'div_policies': 'financial_knowledge',
+ 'document_arithmetic_reasoning': 'numerical_statistics',
+ 'document_comparative_explanation': 'generation_dialogue',
+ 'document_comparison': 'generation_dialogue',
+ 'document_counting': 'document_perception',
+ 'document_explanation': 'generation_dialogue',
+ 'document_fact_extraction': 'information_extraction',
+ 'document_function_extraction': 'information_extraction',
+ 'document_inference': 'generation_dialogue',
+ 'document_multi_span_extraction': 'information_extraction',
+ 'document_numeric_extraction': 'information_extraction',
+ 'document_opinion_interpretation': 'generation_dialogue',
+ 'document_policy_explanation': 'generation_dialogue',
+ 'document_policy_extraction': 'information_extraction',
+ 'document_procedure_extraction': 'information_extraction',
+ 'document_program_explanation': 'generation_dialogue',
+ 'document_structure_interpretation': 'document_perception',
+ 'document_summarization': 'generation_dialogue',
+ 'document_technical_explanation': 'generation_dialogue',
+ 'economic_law': 'financial_knowledge',
+ 'economics_and_monetary_policy': 'market_macro_reasoning',
+ 'entity_extraction_classification': 'information_extraction',
+ 'equity_price_driver_inference': 'market_macro_reasoning',
+ 'equity_valuation_interpretation': 'accounting_valuation',
+ 'esg_investment_reasoning': 'risk_policy_advice',
+ 'esg_issue_identification': 'risk_policy_advice',
+ 'ethical_decision_reasoning': 'risk_policy_advice',
+ 'evidence_retrieval': 'retrieval_grounding',
+ 'explanation_anomaly_causality': 'market_macro_reasoning',
+ 'finance': 'financial_knowledge',
+ 'financial_accounting': 'accounting_valuation',
+ 'financial_asset_management': 'financial_knowledge',
+ 'financial_asset_valuation': 'accounting_valuation',
+ 'financial_audit_and_controls': 'accounting_valuation',
+ 'financial_audit_fundamentals': 'accounting_valuation',
+ 'financial_business_management': 'financial_knowledge',
+ 'financial_calculation_reasoning': 'accounting_valuation',
+ 'financial_cash_flow_calculation': 'accounting_valuation',
+ 'financial_causal_event_reasoning': 'market_macro_reasoning',
+ 'financial_certification_exam_qa': 'financial_knowledge',
+ 'financial_certification_qa': 'financial_knowledge',
+ 'financial_concept_explanation': 'financial_knowledge',
+ 'financial_counterfactual_inference': 'market_macro_reasoning',
+ 'financial_customer_analysis_and_marketing': 'financial_knowledge',
+ 'financial_customer_management': 'financial_knowledge',
+ 'financial_data_description': 'generation_dialogue',
+ 'financial_data_interpretation': 'financial_knowledge',
+ 'financial_data_ranking': 'financial_knowledge',
+ 'financial_dialogue': 'generation_dialogue',
+ 'financial_diluted_eps_calculation': 'accounting_valuation',
+ 'financial_disclosure_evasion_detection': 'classification_sentiment',
+ 'financial_distress_score_calculation': 'accounting_valuation',
+ 'financial_document_title_classification': 'generation_dialogue',
+ 'financial_engineering': 'accounting_valuation',
+ 'financial_entity_extraction': 'information_extraction',
+ 'financial_event_extraction': 'information_extraction',
+ 'financial_foundations': 'financial_knowledge',
+ 'financial_headline_classification': 'classification_sentiment',
+ 'financial_industry_classification': 'classification_sentiment',
+ 'financial_institution_governance': 'financial_knowledge',
+ 'financial_institution_operations': 'financial_knowledge',
+ 'financial_interest_rate_reasoning': 'accounting_valuation',
+ 'financial_liquidity_calculation': 'accounting_valuation',
+ 'financial_market_index_calculation': 'numerical_statistics',
+ 'financial_market_mechanism_reasoning': 'market_macro_reasoning',
+ 'financial_market_time_series_analysis': 'market_macro_reasoning',
+ 'financial_math_and_time_value': 'numerical_statistics',
+ 'financial_meeting_classification': 'classification_sentiment',
+ 'financial_metric_interpretation': 'financial_knowledge',
+ 'financial_multi_turn_perception': 'document_perception',
+ 'financial_numeric_labeling': 'classification_sentiment',
+ 'financial_numerical_reasoning': 'numerical_statistics',
+ 'financial_ocr': 'document_perception',
+ 'financial_per_share_calculation': 'accounting_valuation',
+ 'financial_planning_and_budgeting': 'financial_knowledge',
+ 'financial_professional_ethics': 'risk_policy_advice',
+ 'financial_question_decomposition': 'generation_dialogue',
+ 'financial_recapitalization_calculation': 'accounting_valuation',
+ 'financial_regulation_and_compliance': 'risk_policy_advice',
+ 'financial_relation_extraction': 'information_extraction',
+ 'financial_report_analysis': 'financial_knowledge',
+ 'financial_return_calculation': 'accounting_valuation',
+ 'financial_return_on_investment_calculation': 'accounting_valuation',
+ 'financial_risk_analysis': 'risk_policy_advice',
+ 'financial_semantic_role_labeling': 'information_extraction',
+ 'financial_sentiment_analysis': 'classification_sentiment',
+ 'financial_statement_adjustment_calculation': 'accounting_valuation',
+ 'financial_statement_calculation': 'accounting_valuation',
+ 'financial_summarization': 'generation_dialogue',
+ 'financial_system_and_institutions': 'financial_knowledge',
+ 'financial_technology_and_banking': 'financial_knowledge',
+ 'financial_term_explanation': 'financial_knowledge',
+ 'financial_time_reasoning': 'numerical_statistics',
+ 'financial_time_value_calculation': 'accounting_valuation',
+ 'financial_tool_use': 'financial_knowledge',
+ 'financial_topic_classification': 'classification_sentiment',
+ 'financial_translation': 'generation_dialogue',
+ 'financial_trust_management': 'financial_knowledge',
+ 'financial_truthfulness_qa': 'classification_sentiment',
+ 'financial_valuation_calculation': 'accounting_valuation',
+ 'financial_valuation_reasoning': 'accounting_valuation',
+ 'fiscal_policy_scenario_classification': 'classification_sentiment',
+ 'fixed_income_valuation_reasoning': 'accounting_valuation',
+ 'foreign_currency_translation_calculation': 'accounting_valuation',
+ 'function_relationship_reasoning': 'numerical_statistics',
+ 'general_dialogue': 'generation_dialogue',
+ 'general_legal_reasoning': 'risk_policy_advice',
+ 'global_events_impact': 'market_macro_reasoning',
+ 'hierarchical_table_qa': 'table_reasoning',
+ 'hypothesis_testing_reasoning': 'numerical_statistics',
+ 'image_caption': 'document_perception',
+ 'inclusive_finance': 'financial_knowledge',
+ 'industry_analysis_and_competition': 'financial_knowledge',
+ 'industry_sentiment_extraction': 'classification_sentiment',
+ 'industry_trend_inference': 'market_macro_reasoning',
+ 'insurance_finance': 'risk_policy_advice',
+ 'international_finance_and_forex': 'financial_knowledge',
+ 'investment_advice_strategy': 'risk_policy_advice',
+ 'investment_and_market_knowledge': 'market_macro_reasoning',
+ 'investor_suitability_assessment': 'risk_policy_advice',
+ 'legal_evidence_reasoning': 'retrieval_grounding',
+ 'long': 'multipage_financial_reasoning',
+ 'long_context_citation_grounded_qa': 'multipage_financial_reasoning',
+ 'long_document_cross_page': 'multipage_financial_reasoning',
+ 'macro_regime_classification': 'classification_sentiment',
+ 'macroeconomic_impact_inference': 'market_macro_reasoning',
+ 'macroeconomic_trend_inference': 'market_macro_reasoning',
+ 'management_accounting_and_budgeting': 'accounting_valuation',
+ 'management_accounting_and_costing': 'accounting_valuation',
+ 'market_concentration_calculation': 'market_macro_reasoning',
+ 'market_event_impact_inference': 'market_macro_reasoning',
+ 'merger_acquisition_completeness_classification': 'classification_sentiment',
+ 'monetary_policy_stance_classification': 'classification_sentiment',
+ 'multi_span_extraction': 'information_extraction',
+ 'multi_step_numerical_reasoning': 'numerical_statistics',
+ 'multi_table_reasoning': 'table_reasoning',
+ 'multimodal_financial_knowledge': 'financial_knowledge',
+ 'news_title_generation': 'generation_dialogue',
+ 'nonbank_financial_institutions': 'financial_knowledge',
+ 'pattern_relationship_reasoning': 'numerical_statistics',
+ 'payroll_calculation': 'accounting_valuation',
+ 'personal_financial_planning': 'risk_policy_advice',
+ 'portfolio_allocation_risk_return': 'risk_policy_advice',
+ 'portfolio_and_risk_management': 'risk_policy_advice',
+ 'portfolio_performance_metric_calculation': 'accounting_valuation',
+ 'probability_expected_value_calculation': 'numerical_statistics',
+ 'probability_reasoning': 'numerical_statistics',
+ 'product_information_qa': 'financial_knowledge',
+ 'public_law_reasoning': 'risk_policy_advice',
+ 'python_programming': 'general_capability',
+ 'real_estate_finance_and_valuation': 'accounting_valuation',
+ 'relationship_equity_structure': 'information_extraction',
+ 'research_report_opinion_qa': 'financial_knowledge',
+ 'research_report_title_generation': 'generation_dialogue',
+ 'risk_sentiment_policy': 'risk_policy_advice',
+ 'schedule_temporal_reasoning': 'numerical_statistics',
+ 'single_table_qa': 'table_reasoning',
+ 'spatial_localization': 'document_perception',
+ 'statistical_hypothesis_testing': 'numerical_statistics',
+ 'statistical_inference_reasoning': 'numerical_statistics',
+ 'statistical_interval_estimation': 'numerical_statistics',
+ 'statistical_numerical_reasoning': 'numerical_statistics',
+ 'statistics': 'numerical_statistics',
+ 'statistics_comparison_ranking': 'numerical_statistics',
+ 'stock_movement_prediction': 'market_macro_reasoning',
+ 'summary_announcement': 'generation_dialogue',
+ 'supply_demand_reasoning': 'market_macro_reasoning',
+ 'sustainable_finance': 'risk_policy_advice',
+ 'table_aggregation_reasoning': 'table_reasoning',
+ 'table_arithmetic_reasoning': 'table_reasoning',
+ 'table_budget_decision': 'table_reasoning',
+ 'table_budget_reasoning': 'table_reasoning',
+ 'table_comparison_reasoning': 'table_reasoning',
+ 'table_counting': 'table_reasoning',
+ 'table_data_extraction': 'table_reasoning',
+ 'table_decision_reasoning': 'table_reasoning',
+ 'table_financial_arithmetic': 'table_reasoning',
+ 'table_math_reasoning': 'table_reasoning',
+ 'table_multi_hop_reasoning': 'table_reasoning',
+ 'table_multi_step_decision_reasoning': 'table_reasoning',
+ 'table_probability_reasoning': 'table_reasoning',
+ 'table_proportion_reasoning': 'table_reasoning',
+ 'table_rate_change': 'table_reasoning',
+ 'table_ratio_reasoning': 'table_reasoning',
+ 'table_statement_verification': 'table_reasoning',
+ 'table_statistical_reasoning': 'table_reasoning',
+ 'table_statistics_and_comparison': 'table_reasoning',
+ 'table_structure_detection': 'document_perception',
+ 'taxation_and_tax_law': 'risk_policy_advice',
+ 'time_series_forecasting': 'market_macro_reasoning',
+ 'time_series_regression_forecasting': 'market_macro_reasoning',
+ 'trust_and_asset_management': 'financial_knowledge',
+ 'visual_counting': 'document_perception',
+ 'visual_pattern_reasoning': 'document_perception',
+ 'vligabench_ru': 'general_capability'}
+FAMILY_CAP = {'accounting_valuation': 0.15,
+ 'chart_reasoning': 0.15,
+ 'classification_sentiment': 0.12,
+ 'document_perception': 0.12,
+ 'financial_knowledge': 0.2,
+ 'general_capability': 0.03,
+ 'generation_dialogue': 0.12,
+ 'information_extraction': 0.15,
+ 'market_macro_reasoning': 0.15,
+ 'multipage_financial_reasoning': 0.1,
+ 'numerical_statistics': 0.15,
+ 'retrieval_grounding': 0.1,
+ 'risk_policy_advice': 0.12,
+ 'table_reasoning': 0.15}
+MAX_TASK_RATIO = 0.05
 SMALL_TASK_MIN_N = 100
 SMALL_TASK_MAX_N = 499
 SMALL_TASK_RATIO = 0.02
@@ -97,6 +325,10 @@ def task_b_weight(task: str) -> float:
     if task in BENCHMARK_UPWEIGHT:
         return BENCHMARK_UPWEIGHT[task]
     return 1.0
+
+
+def task_length_scale(mean_assistant_tokens: float) -> float:
+    return max(mean_assistant_tokens, MIN_ASSISTANT_TOKENS_FOR_WEIGHT) ** TOKEN_LENGTH_BETA
 
 
 def family_for_task(task: str) -> str:
@@ -139,24 +371,33 @@ def _load_training_template(model: str, model_type: str, max_length: int):
     return template
 
 
-def _supervision_tokens(template, row: dict[str, Any]) -> int:
+def _token_counts(template, row: dict[str, Any]) -> tuple[int, int]:
     encoded = template.encode(row)
     if isinstance(encoded, list):
         raise ValueError("truncation produced multiple encoded rows")
+    input_ids = encoded.get("input_ids")
+    if input_ids is None:
+        effective_token_count = 0
+    else:
+        if hasattr(input_ids, "reshape"):
+            input_ids = input_ids.reshape(-1)
+        if hasattr(input_ids, "tolist"):
+            input_ids = input_ids.tolist()
+        input_values = input_ids if isinstance(input_ids, list) else [input_ids]
+        while input_values and isinstance(input_values[0], list):
+            input_values = [item for nested in input_values for item in nested]
+        effective_token_count = len(input_values)
     labels = encoded.get("labels")
     if labels is None:
-        return 0
+        return 0, effective_token_count
     if hasattr(labels, "reshape"):
         labels = labels.reshape(-1)
     if hasattr(labels, "tolist"):
         labels = labels.tolist()
-    if isinstance(labels, list):
-        values = labels
-        while values and isinstance(values[0], list):
-            values = [item for nested in values for item in nested]
-    else:
-        values = [labels]
-    return sum(int(value != -100) for value in values)
+    values = labels if isinstance(labels, list) else [labels]
+    while values and isinstance(values[0], list):
+        values = [item for nested in values for item in nested]
+    return sum(int(value != -100) for value in values), effective_token_count
 
 
 def scan_encoded_index(
@@ -180,9 +421,10 @@ def scan_encoded_index(
             task = str(row.get("task") or UNKNOWN_TASK)
             if template is None:
                 token_count = 1
+                effective_token_count = 1
             else:
                 try:
-                    token_count = _supervision_tokens(template, row)
+                    token_count, effective_token_count = _token_counts(template, row)
                 except Exception as exc:
                     try:
                         from swift.template import MaxLengthError
@@ -203,6 +445,7 @@ def scan_encoded_index(
                 "task": task,
                 "family": family,
                 "assistant_token_count": int(token_count),
+                "effective_token_count": int(effective_token_count),
                 "eligible": bool(token_count > 0),
             }
             cache_rows.append(cache_row)
@@ -217,6 +460,7 @@ def scan_encoded_index(
                     "task": task,
                     "family": family,
                     "assistant_token_count": int(token_count),
+                    "effective_token_count": int(effective_token_count),
                 }
             )
     return task_index, stats["retained"], stats["eligible"], cache_rows, stats
@@ -241,13 +485,13 @@ def allocate_quotas(
     means = means or {task: 1.0 for task in counts}
     tiny_tasks = sorted(task for task, count in counts.items() if count < TINY_TASK_MAX_N)
     sampling_weights = {
-        task: (count**alpha) * task_b_weight(task) / means[task]
+        task: (count**alpha) * task_b_weight(task) / task_length_scale(means[task])
         for task, count in counts.items()
         if task not in tiny_tasks
     }
     if tiny_tasks:
         sampling_weights[_TINY_POOL_KEY] = sum(
-            (counts[task]**alpha) * task_b_weight(task) / means[task]
+            (counts[task]**alpha) * task_b_weight(task) / task_length_scale(means[task])
             for task in tiny_tasks
         )
 
@@ -359,7 +603,7 @@ def _sample_tiny_pool(
     eligible = {task: rows for task, rows in eligible.items() if rows}
     while len(picked) < quota and eligible:
         tasks = sorted(eligible)
-        weights = [len(task_index[task]) ** alpha * task_b_weight(task) / means[task] for task in tasks]
+        weights = [len(task_index[task]) ** alpha * task_b_weight(task) / task_length_scale(means[task]) for task in tasks]
         task = rng.choices(tasks, weights=weights, k=1)[0]
         entry = rng.choice(eligible[task])
         eligible[task].remove(entry)
@@ -406,26 +650,35 @@ def _distribution(samples: list[dict[str, Any]]) -> dict[str, Any]:
     tasks: dict[str, dict[str, int]] = {}
     families: dict[str, dict[str, int]] = {}
     for entry in samples:
-        token = int(entry["assistant_token_count"])
+        assistant_tokens = int(entry["assistant_token_count"])
+        effective_tokens = int(entry.get("effective_token_count", assistant_tokens))
         task = entry["task"]
         family = entry["family"]
-        tasks.setdefault(task, {"samples": 0, "assistant_tokens": 0})
-        families.setdefault(family, {"samples": 0, "assistant_tokens": 0})
+        tasks.setdefault(task, {"samples": 0, "assistant_tokens": 0, "effective_tokens": 0})
+        families.setdefault(family, {"samples": 0, "assistant_tokens": 0, "effective_tokens": 0})
         tasks[task]["samples"] += 1
-        tasks[task]["assistant_tokens"] += token
+        tasks[task]["assistant_tokens"] += assistant_tokens
+        tasks[task]["effective_tokens"] += effective_tokens
         families[family]["samples"] += 1
-        families[family]["assistant_tokens"] += token
+        families[family]["assistant_tokens"] += assistant_tokens
+        families[family]["effective_tokens"] += effective_tokens
     total_samples = len(samples)
-    total_tokens = sum(v["assistant_tokens"] for v in tasks.values())
+    total_assistant_tokens = sum(v["assistant_tokens"] for v in tasks.values())
+    total_effective_tokens = sum(v["effective_tokens"] for v in tasks.values())
     for grouped in (tasks, families):
         for values in grouped.values():
             values["sample_ratio"] = values["samples"] / total_samples if total_samples else 0.0
-            values["token_ratio"] = values["assistant_tokens"] / total_tokens if total_tokens else 0.0
+            values["token_ratio"] = values["assistant_tokens"] / total_assistant_tokens if total_assistant_tokens else 0.0
+            values["effective_token_ratio"] = (
+                values["effective_tokens"] / total_effective_tokens if total_effective_tokens else 0.0
+            )
     return {
         "samples": total_samples,
-        "assistant_tokens": total_tokens,
+        "assistant_tokens": total_assistant_tokens,
+        "effective_tokens": total_effective_tokens,
         "sample_ratio": 1.0 if total_samples else 0.0,
-        "token_ratio": 1.0 if total_tokens else 0.0,
+        "token_ratio": 1.0 if total_assistant_tokens else 0.0,
+        "effective_token_ratio": 1.0 if total_effective_tokens else 0.0,
         "tasks": tasks,
         "families": families,
     }
@@ -561,7 +814,7 @@ def _sample_modality(
             for task in allocations
         }
         pending = {
-            task: counts[task] ** alpha * task_b_weight(task) / means[task]
+            task: counts[task] ** alpha * task_b_weight(task) / task_length_scale(means[task])
             for task, capacity in capacities.items()
             if capacity > 0
         }
@@ -623,7 +876,6 @@ def build_block(
     rng = random.Random(seed * 100_000 + block_id)
     cursor = cursor or PersistentCursor(seed * 100_000)
     alpha = alpha_for_step(start_step)
-
     def normalize(index: dict[str, list[Any]], modality: str) -> dict[str, list[dict[str, Any]]]:
         return {
             task: [
@@ -633,12 +885,12 @@ def build_block(
                     "task": task,
                     "family": family_for_task(task),
                     "assistant_token_count": 1,
+                    "effective_token_count": 1,
                 }
                 for row in rows
             ]
             for task, rows in index.items()
         }
-
     multi_index = normalize(multi_index, "multi")
     text_index = normalize(text_index, "text")
     multi_quota = int(steps * global_batch_size * multi_ratio + 0.5)
@@ -647,7 +899,15 @@ def build_block(
     text_means = {task: sum(row["assistant_token_count"] for row in rows) / len(rows) for task, rows in text_index.items()}
     multi_samples, multi_quotas = _sample_modality(multi_index, multi_quota, alpha, multi_means, tiny_usage, rng, cursor, modality="multi")
     text_samples, text_quotas = _sample_modality(text_index, text_quota, alpha, text_means, tiny_usage, rng, cursor, modality="text")
-
+    multi_effective_tokens = sum(int(row.get("effective_token_count", row["assistant_token_count"])) for row in multi_samples)
+    text_effective_tokens = sum(int(row.get("effective_token_count", row["assistant_token_count"])) for row in text_samples)
+    effective_total = multi_effective_tokens + text_effective_tokens
+    multi_effective_token_ratio = multi_effective_tokens / effective_total if effective_total else 0.0
+    if multi_effective_token_ratio > MAX_MULTI_EFFECTIVE_TOKEN_RATIO:
+        raise ValueError(
+            f"multimodal effective-token ratio {multi_effective_token_ratio:.4f} exceeds hard cap "
+            f"{MAX_MULTI_EFFECTIVE_TOKEN_RATIO:.2f}; reduce --multi-ratio"
+        )
     micro_steps = steps * grad_acc
     per_micro = dp_world_size * per_device_batch
     multi_sizes: list[int] = []
@@ -675,6 +935,7 @@ def build_block(
                 "index": row["index"],
                 "raw_index": row.get("raw_index", row["index"]),
                 "assistant_token_count": int(row["assistant_token_count"]),
+                "effective_token_count": int(row.get("effective_token_count", row["assistant_token_count"])),
                 "tiny_pool": bool(row.get("tiny_pool", False)),
                 "pool": _TINY_POOL_KEY if row.get("tiny_pool", False) else "regular",
             })
@@ -683,6 +944,7 @@ def build_block(
         "start_step": start_step,
         "steps": steps,
         "alpha": alpha,
+        "multi_effective_token_ratio": multi_effective_token_ratio,
         "quotas": {"multi": multi_quotas, "text": text_quotas},
         "planned": {
             "multi": _distribution([entry for entry in entries if entry["modality"] == "multi"]),
