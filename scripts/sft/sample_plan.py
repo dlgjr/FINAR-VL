@@ -723,65 +723,109 @@ def _repair_family_caps(
         family, excess, tolerance = _family_violation(samples)
         if family is None:
             return samples
-        candidates: list[tuple[float, str, int, dict[str, Any], dict[str, Any]]] = []
-        old_rows = [row for row in samples if row["family"] == family]
+
         total_tokens = sum(int(row["assistant_token_count"]) for row in samples)
-        family_tokens = sum(int(row["assistant_token_count"]) for row in old_rows)
+        family_rows = [row for row in samples if row["family"] == family]
+        family_tokens = sum(int(row["assistant_token_count"]) for row in family_rows)
         cap_ratio = FAMILY_CAP[family]
-        for old in sorted(old_rows, key=lambda row: (-int(row["assistant_token_count"]), row["task"], row["index"])):
+
+        family_token_totals: dict[str, int] = {}
+        family_max_token: dict[str, int] = {}
+        for row in samples:
+            row_family = row["family"]
+            row_tokens = int(row["assistant_token_count"])
+            family_token_totals[row_family] = family_token_totals.get(row_family, 0) + row_tokens
+            family_max_token[row_family] = max(family_max_token.get(row_family, 0), row_tokens)
+
+        best: tuple[float, str, int, dict[str, Any], dict[str, Any]] | None = None
+
+        for old_pool in (False, True):
+            old_candidates = [row for row in family_rows if (row["task"] in tiny_tasks) == old_pool]
+            if not old_candidates:
+                continue
+
+            old = min(
+                old_candidates,
+                key=lambda row: (-int(row["assistant_token_count"]), row["task"], int(row["index"])),
+            )
             old_tokens = int(old["assistant_token_count"])
-            old_pool = old["task"] in tiny_tasks
+
             for task in sorted(task_index):
                 if (task in tiny_tasks) != old_pool:
                     continue
+                if family_for_task(task) == family:
+                    continue
+
                 cap = tiny_quota if old_pool else task_cap(len(task_index[task]), len(samples))
-                if task != old["task"] and quotas.get(task, 0) >= cap:
+                if quotas.get(task, 0) >= cap:
                     continue
-                if task == old["task"] and quotas.get(task, 0) > cap:
-                    continue
-                if task in tiny_tasks:
-                    rows = [row for row in task_index[task] if usage.get((modality, row["index"]), 0) < TINY_MAX_REPEAT]
-                    rows = [row for row in rows if (row["index"], row["task"]) not in selected]
+
+                if old_pool:
+                    rows = [
+                        row for row in task_index[task]
+                        if usage.get((modality, row["index"]), 0) < TINY_MAX_REPEAT
+                        and (row["index"], row["task"]) not in selected
+                    ]
                     if not rows:
                         continue
-                    candidate = min(rows, key=lambda row: (int(row["assistant_token_count"]), row["task"], row["index"]))
+                    candidate = min(
+                        rows,
+                        key=lambda row: (int(row["assistant_token_count"]), row["task"], int(row["index"])),
+                    )
                 else:
                     candidate = cursor.peek(modality, task, task_index[task])
                     if (candidate["index"], candidate["task"]) in selected:
                         continue
+
                 candidate_tokens = int(candidate["assistant_token_count"])
-                candidate_in_family = candidate["family"] == family
                 new_total = total_tokens - old_tokens + candidate_tokens
-                new_family_tokens = family_tokens - old_tokens + (candidate_tokens if candidate_in_family else 0)
+                new_family_tokens = family_tokens - old_tokens
                 new_excess = new_family_tokens - cap_ratio * new_total
                 score = excess - max(0.0, new_excess)
-                if score > 0:
-                    candidates.append((score, task, int(candidate["index"]), old, candidate))
-        if not candidates:
+                if score <= 0:
+                    continue
+
+                dst_family = candidate["family"]
+                dst_cap = FAMILY_CAP.get(dst_family)
+                if dst_cap is not None:
+                    dst_tokens = family_token_totals.get(dst_family, 0) + candidate_tokens
+                    dst_tolerance = max(family_max_token.get(dst_family, 0), candidate_tokens)
+                    if dst_tokens - dst_cap * new_total > dst_tolerance:
+                        continue
+
+                item = (score, task, int(candidate["index"]), old, candidate)
+                if best is None or item[0] > best[0] or (
+                    item[0] == best[0] and (item[1], item[2]) < (best[1], best[2])
+                ):
+                    best = item
+
+        if best is None:
             if excess <= tolerance:
                 return samples
             raise ValueError(f"family cap cannot be satisfied for family={family}")
-        best_score = max(item[0] for item in candidates)
-        _, task, _, old, candidate = min(
-            (item for item in candidates if item[0] == best_score),
-            key=lambda item: (item[1], item[2]),
-        )
+
+        _, _, _, old, candidate = best
         if candidate["task"] in tiny_tasks:
             candidate = dict(candidate, tiny_pool=True)
+
         samples[samples.index(old)] = candidate
-        quotas[old["task"]] = quotas.get(old["task"], 0) - 1
-        quotas[candidate["task"]] = quotas.get(candidate["task"], 0) + 1
+        if old["task"] not in tiny_tasks:
+            quotas[old["task"]] = quotas.get(old["task"], 0) - 1
+            quotas[candidate["task"]] = quotas.get(candidate["task"], 0) + 1
         selected.remove((old["index"], old["task"]))
         selected.add((candidate["index"], candidate["task"]))
+
         if old["task"] in tiny_tasks:
             old_key = (modality, old["index"])
             usage[old_key] = max(0, usage.get(old_key, 0) - 1)
         if candidate["task"] in tiny_tasks:
             candidate_key = (modality, candidate["index"])
             usage[candidate_key] = usage.get(candidate_key, 0) + 1
+
         if candidate["task"] not in tiny_tasks:
             cursor.draw(modality, candidate["task"], task_index[candidate["task"]], 1)
             cursor.put_back(modality, old["task"], task_index[old["task"]], old)
+
 
 
 def _sample_modality(
