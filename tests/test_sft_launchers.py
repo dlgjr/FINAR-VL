@@ -120,7 +120,7 @@ def test_dsw_launcher_runs_five_steps_without_wandb_and_limits_eval_to_one_sampl
         "--per_device_train_batch_size 1",
         "--tuner_type lora",
         "--freeze_vit true",
-        "--freeze_aligner true",
+        "--freeze_aligner false",
         "--target_modules all-linear",
         "--lora_rank 16",
         "--lora_alpha 32",

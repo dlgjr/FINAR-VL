@@ -90,7 +90,7 @@ exec "$SWIFT_BIN" sft \
   --strict false \
   --tuner_type lora \
   --freeze_vit true \
-  --freeze_aligner true \
+  --freeze_aligner false \
   --freeze_llm false \
   --target_modules all-linear \
   --lora_rank 16 \
