@@ -17,6 +17,7 @@ from typing import Any
 
 
 PASS_AT_8_TEMPERATURE = float(os.environ.get("SFT_PASS_AT_8_TEMPERATURE", "1.0"))
+PASS_AT_1_TEMPERATURE = 0.1
 
 
 def _load_pass_at_k_module() -> ModuleType:
@@ -372,8 +373,8 @@ def _evaluate_row(model: Any, processor: Any, judge_url: str, row: dict[str, Any
         processor,
         row,
         seed=base_seed,
-        do_sample=False,
-        temperature=None,
+        do_sample=True,
+        temperature=PASS_AT_1_TEMPERATURE,
         num_return_sequences=1,
     )[0]
     pass_at_8_candidates = _generate_candidates(
@@ -465,7 +466,8 @@ def run_distributed_evaluation(
                     "step": step,
                     "total": len(rows),
                     "max_samples": max_samples,
-                    "pass_at_1_greedy": True,
+                    "pass_at_1_greedy": False,
+                    "pass_at_1_temperature": PASS_AT_1_TEMPERATURE,
                     "pass_at_8_temperature": PASS_AT_8_TEMPERATURE,
                     "pass_at_1_samples": 1,
                     "pass_at_8_samples": 8,
