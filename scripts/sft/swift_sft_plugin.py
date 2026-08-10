@@ -714,9 +714,9 @@ def _distribution_difference(planned: dict[str, Any], actual: dict[str, Any]) ->
 
 
 class _PlanRuntimeTracker:
-    def __init__(self, plan_dir: str, trainer) -> None:
+    def __init__(self, plan_dir: str, output_dir: Path) -> None:
         self.plan_dir = Path(plan_dir)
-        self.output_dir = Path(trainer.args.output_dir) / "sample_distribution"
+        self.output_dir = Path(output_dir) / "sample_distribution"
         self.rank = _global_rank()
         self.dp_rank, self.dp_world = _dp_rank()
         self.meta = json.loads((self.plan_dir / "meta.json").read_text(encoding="utf-8"))
@@ -857,7 +857,7 @@ class FinarPlanCallback(TrainerCallback):
             self._blocks = meta.get("blocks", [])
             self._steps_per_block = int(meta.get("steps_per_block", 500))
             _install_plan_dataloader(trainer)
-            self._tracker = _PlanRuntimeTracker(plan_dir, trainer)
+            self._tracker = _PlanRuntimeTracker(plan_dir, args_output_dir(args))
             trainer._finar_plan_tracker = self._tracker
             original_compute_loss = trainer.compute_loss
 

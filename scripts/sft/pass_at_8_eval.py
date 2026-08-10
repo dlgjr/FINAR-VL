@@ -15,9 +15,22 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from scripts.rl.gspo_reward import score_programmatic_answer
+
 
 PASS_AT_8_TEMPERATURE = float(os.environ.get("SFT_PASS_AT_8_TEMPERATURE", "1.0"))
 PASS_AT_1_TEMPERATURE = 0.1
+GSPO_BENCHMARK_TASKS = {
+    "multi_table_reasoning",
+    "long_document_cross_page",
+    "evidence_retrieval",
+    "cross_modal_multi_hop",
+    "multi_step_numerical_reasoning",
+    "single_table_qa",
+    "basic_arithmetic_metrics",
+    "financial_counterfactual_inference",
+    "relationship_equity_structure",
+}
 
 
 def _load_pass_at_k_module() -> ModuleType:
@@ -36,7 +49,12 @@ _PASS_AT_K = _load_pass_at_k_module()
 extract_answer = _PASS_AT_K.extract_answer
 
 _CHOICE_RE = re.compile(r"^\s*([A-H])(?:\s*[.、:：)]|\s|$)", re.IGNORECASE)
+_CHOICE_ANSWER_RE = re.compile(
+    r"^\s*[A-H]+(?:\s*(?:[,，、;/&+]|\band\b|和|与)\s*[A-H]+)*\s*$",
+    re.IGNORECASE,
+)
 _NUMBER_RE = re.compile(r"^\s*[$￥¥€£]?\s*[-+]?\d+(?:,\d{3})*(?:\.\d+)?%?\s*$")
+_NUMBER_TOKEN_RE = re.compile(r"(?<![\d.])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![\d.])")
 _DATE_RE = re.compile(r"^(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?$")
 _PAGE_RE = re.compile(r"第\s*(\d+)\s*页|page\s*(\d+)", re.IGNORECASE)
 
@@ -60,10 +78,21 @@ def _number(value: str) -> tuple[Decimal, bool] | None:
         return None
 
 
-def _number_equal(reference: tuple[Decimal, bool], candidate: tuple[Decimal, bool]) -> bool:
-    if reference[1] != candidate[1]:
-        return False
-    expected, actual = reference[0], candidate[0]
+def _numbers(value: str) -> list[Decimal]:
+    numbers: list[Decimal] = []
+    for match in _NUMBER_TOKEN_RE.finditer(value.replace("，", ",")):
+        try:
+            numbers.append(Decimal(match.group(0).replace(",", "")))
+        except InvalidOperation:
+            continue
+    return numbers
+
+
+def _choice_labels(value: str) -> set[str]:
+    return {label.casefold() for label in re.findall(r"[A-H]", value, re.IGNORECASE)}
+
+
+def _number_matches(expected: Decimal, actual: Decimal) -> bool:
     if expected == 0:
         return actual == 0
     return abs(actual - expected) <= abs(expected) * Decimal("0.01")
@@ -76,12 +105,17 @@ def _date(value: str) -> tuple[int, int, int] | None:
     return tuple(int(part) for part in match.groups())
 
 
-def _pages(value: str) -> set[int] | None:
+def _pages(value: str, *, allow_bare: bool = False) -> set[int] | None:
     pages = {int(first or second) for first, second in _PAGE_RE.findall(value)}
+    if allow_bare and not pages:
+        pages = {int(number) for number in re.findall(r"\d+", value)}
     return pages or None
 
 
 def _json_value(value: str) -> Any | None:
+    fence = re.fullmatch(r"\s*```(?:json)?\s*(.*?)\s*```\s*", value, re.IGNORECASE | re.DOTALL)
+    if fence is not None:
+        value = fence.group(1)
     if not value.lstrip().startswith(("{", "[")):
         return None
     try:
@@ -90,19 +124,20 @@ def _json_value(value: str) -> Any | None:
         return None
 
 
-def programmatic_judge(reference: Any, candidate: Any) -> bool | None:
-    """复用共享答案提取，并保留 SFT 的数值容差、日期、页码与 JSON 判分。"""
+def programmatic_judge(reference: Any, candidate: Any, *, task: str = "") -> bool | None:
+    """复用共享答案提取，并扫描候选全文中的选项、数字、页码与 JSON。"""
     expected = extract_answer(reference)
     actual = extract_answer(candidate)
-    expected_choice = _CHOICE_RE.match(expected)
-    if expected_choice is not None:
-        actual_choice = _CHOICE_RE.match(actual)
-        return actual_choice is not None and expected_choice.group(1).casefold() == actual_choice.group(1).casefold()
+    if task == "evidence_retrieval":
+        expected_pages = {int(number) for number in re.findall(r"\d+", expected)}
+        actual_pages = {int(number) for number in re.findall(r"\d+", actual)}
+        return bool(expected_pages) and expected_pages.issubset(actual_pages)
+    if _CHOICE_ANSWER_RE.fullmatch(expected):
+        return _choice_labels(expected) == _choice_labels(actual)
 
     expected_number = _number(expected)
-    actual_number = _number(actual)
     if expected_number is not None:
-        return actual_number is not None and _number_equal(expected_number, actual_number)
+        return any(_number_matches(expected_number[0], number) for number in _numbers(actual))
 
     expected_date = _date(expected)
     if expected_date is not None:
@@ -110,7 +145,7 @@ def programmatic_judge(reference: Any, candidate: Any) -> bool | None:
 
     expected_pages = _pages(expected)
     if expected_pages is not None:
-        return _pages(actual) == expected_pages
+        return expected_pages.issubset(_pages(actual, allow_bare=True) or set())
 
     expected_json = _json_value(expected)
     if expected_json is not None:
@@ -119,6 +154,29 @@ def programmatic_judge(reference: Any, candidate: Any) -> bool | None:
     if len(expected) <= 32 and re.fullmatch(r"[A-Za-z0-9_\s,./\-]+", expected):
         return _normalize_text(expected) == _normalize_text(actual)
     return None
+
+
+def _benchmark_verifier_type(row: dict[str, Any], reference: str) -> str:
+    task = str(row.get("task", ""))
+    if task == "evidence_retrieval":
+        return "page_numbers"
+    if task == "cross_modal_multi_hop":
+        return "multiple_choice"
+    if _CHOICE_RE.match(reference):
+        return "single_choice"
+    return "numeric"
+
+
+def _benchmark_programmatic_judge(row: dict[str, Any], reference: str, candidate: str) -> bool:
+    verifier_type = _benchmark_verifier_type(row, reference)
+    reference_answer = extract_answer(reference)
+    score = score_programmatic_answer(
+        candidate,
+        [reference_answer],
+        verifier_type,
+        question=str(row.get("messages", [{}])[0].get("content", "")),
+    )
+    return score >= 1.0 - 1e-12
 
 
 def estimate_cost(row: dict[str, Any]) -> float:
@@ -130,11 +188,18 @@ def estimate_cost(row: dict[str, Any]) -> float:
 
 def load_benchmark(path: Path, root: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    allowlist = {
+        task.strip()
+        for task in os.environ.get("GSPO_BENCHMARK_ALLOWLIST", "").split(",")
+        if task.strip()
+    }
     with path.open(encoding="utf-8") as handle:
         for index, line in enumerate(handle):
             if not line.strip():
                 continue
             row = json.loads(line)
+            if allowlist and row.get("task") not in allowlist:
+                continue
             image_paths = []
             for image in row.get("images", []):
                 image_path = Path(image)
@@ -255,6 +320,10 @@ def _write_jsonl(path: Path, record: dict[str, Any]) -> None:
 
 def _make_messages(row: dict[str, Any]) -> list[dict[str, Any]]:
     question = str(row["messages"][0]["content"])
+    if os.environ.get("GSPO_BENCHMARK_ALLOWLIST"):
+        question += "\n请只输出一行‘答案：具体答案’，不要输出分析过程或额外解释。"
+    else:
+        question += "\n请只输出最终答案本身，不要输出分析过程或额外解释。"
     content: list[dict[str, Any]] = [{"type": "image", "image": str(path)} for path in row["image_paths"]]
     content.append({"type": "text", "text": question.replace("<image>", "")})
     return [{"role": "user", "content": content}]
@@ -351,7 +420,15 @@ def _judge_generation(
     reference: str,
     candidate: str,
 ) -> dict[str, Any]:
-    correct = programmatic_judge(reference, candidate)
+    if os.environ.get("GSPO_BENCHMARK_ALLOWLIST") and row.get("task") in GSPO_BENCHMARK_TASKS:
+        correct = _benchmark_programmatic_judge(row, reference, candidate)
+        return {
+            "text": candidate,
+            "extracted_answer": extract_answer(candidate),
+            "correct": bool(correct),
+            "judge": "programmatic",
+        }
+    correct = programmatic_judge(reference, candidate, task=str(row.get("task", "")))
     route = "programmatic"
     if correct is None:
         route = "model"

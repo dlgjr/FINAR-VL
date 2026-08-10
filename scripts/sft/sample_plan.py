@@ -3,26 +3,27 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import json
+import multiprocessing
 import os
 import random
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
-DEFAULT_MULTI_RATIO = 0.40
-ALPHA_SCHEDULE = ((0, 1000, 0.60), (1000, 3000, 0.50), (3000, float("inf"), 0.45))
+DEFAULT_MULTI_RATIO = 0.35
+ALPHA_SCHEDULE = ((0, 1000, 0.65), (1000, 3000, 0.60), (3000, float("inf"), 0.55))
 TOKEN_LENGTH_BETA = 0.5
 MIN_ASSISTANT_TOKENS_FOR_WEIGHT = 8
 MAX_MULTI_EFFECTIVE_TOKEN_RATIO = 0.60
-HEAD_DOWNWEIGHT = {'basic_arithmetic_metrics': 0.7,
- 'document_fact_extraction': 0.7,
- 'financial_event_extraction': 0.6,
- 'financial_headline_classification': 0.45,
+HEAD_DOWNWEIGHT = {'document_fact_extraction': 0.7,
+ 'financial_event_extraction': 0.5,
+ 'financial_headline_classification': 0.35,
  'financial_sentiment_analysis': 0.6,
  'general_dialogue': 0.5,
- 'statistics_comparison_ranking': 0.7,
- 'stock_movement_prediction': 0.4,
+ 'stock_movement_prediction': 0.3,
  'table_counting': 0.7}
 BENCHMARK_UPWEIGHT = {'basic_arithmetic_metrics': 1.3,
  'candlestick_time_series': 1.6,
@@ -66,6 +67,20 @@ BENCHMARK_UPWEIGHT = {'basic_arithmetic_metrics': 1.3,
  'statistics_comparison_ranking': 1.4,
  'stock_movement_prediction': 1.4,
  'summary_announcement': 1.3}
+SEMANTIC_BENCHMARK_UPWEIGHT = {
+ 'corporate_finance_and_deals': 1.4,
+ 'document_arithmetic_reasoning': 1.8,
+ 'document_numeric_extraction': 1.3,
+ 'economics_and_monetary_policy': 1.4,
+ 'financial_dialogue': 1.5,
+ 'financial_entity_extraction': 1.4,
+ 'financial_event_extraction': 1.3,
+ 'financial_headline_classification': 1.3,
+ 'financial_relation_extraction': 1.3,
+ 'multimodal_financial_chart_reasoning_v5': 1.8,
+ 'multimodal_financial_knowledge_v5': 1.6,
+ 'sustainable_finance': 1.4,
+ 'table_multi_hop_reasoning': 1.8}
 TASK_TO_FAMILY = {'accounting_cost_reasoning': 'accounting_valuation',
  'administrative_law_reasoning': 'risk_policy_advice',
  'anomaly_information_tracing': 'retrieval_grounding',
@@ -236,6 +251,8 @@ TASK_TO_FAMILY = {'accounting_cost_reasoning': 'accounting_valuation',
  'multi_step_numerical_reasoning': 'numerical_statistics',
  'multi_table_reasoning': 'table_reasoning',
  'multimodal_financial_knowledge': 'financial_knowledge',
+ 'multimodal_financial_chart_reasoning_v5': 'chart_reasoning',
+ 'multimodal_financial_knowledge_v5': 'financial_knowledge',
  'news_title_generation': 'generation_dialogue',
  'nonbank_financial_institutions': 'financial_knowledge',
  'pattern_relationship_reasoning': 'numerical_statistics',
@@ -320,11 +337,12 @@ _TINY_POOL_KEY = "__tiny_pool__"
 
 
 def task_b_weight(task: str) -> float:
-    if task in HEAD_DOWNWEIGHT:
-        return HEAD_DOWNWEIGHT[task]
-    if task in BENCHMARK_UPWEIGHT:
-        return BENCHMARK_UPWEIGHT[task]
-    return 1.0
+    head_weight = HEAD_DOWNWEIGHT.get(task, 1.0)
+    benchmark_weight = max(
+        BENCHMARK_UPWEIGHT.get(task, 1.0),
+        SEMANTIC_BENCHMARK_UPWEIGHT.get(task, 1.0),
+    )
+    return head_weight * benchmark_weight
 
 
 def task_length_scale(mean_assistant_tokens: float) -> float:
@@ -400,6 +418,198 @@ def _token_counts(template, row: dict[str, Any]) -> tuple[int, int]:
     return sum(int(value != -100) for value in values), effective_token_count
 
 
+def _shard_offsets(path: Path, num_proc: int) -> list[tuple[int, int, int]]:
+    """Return (start_byte, line_count, raw_start) shards covering all lines in order."""
+    offsets: list[int] = [0]
+    with path.open("rb") as handle:
+        while handle.readline():
+            offsets.append(handle.tell())
+    n_lines = len(offsets) - 1
+    shards: list[tuple[int, int, int]] = []
+    base = 0
+    for i in range(num_proc):
+        count = (n_lines - base) // (num_proc - i)
+        shards.append((offsets[base], count, base))
+        base += count
+    return shards
+
+
+def _scan_shard_worker(args: tuple) -> tuple[int, list[tuple[int, str, int, int, str]]]:
+    path, start_offset, count, raw_start, model, model_type, max_length = args
+    template = _load_training_template(model, model_type, max_length) if model else None
+    records: list[tuple[int, str, int, int, str]] = []
+    nonempty = 0
+    with open(path, "rb") as handle:
+        handle.seek(start_offset)
+        for offset_index in range(count):
+            raw = handle.readline().decode("utf-8")
+            if not raw:
+                break
+            if not raw.strip():
+                continue
+            nonempty += 1
+            raw_index = raw_start + offset_index
+            row = json.loads(raw)
+            task = str(row.get("task") or UNKNOWN_TASK)
+            if template is None:
+                records.append((raw_index, task, 1, 1, "ok"))
+                continue
+            try:
+                token_count, effective_token_count = _token_counts(template, row)
+                records.append((raw_index, task, int(token_count), int(effective_token_count), "ok"))
+            except Exception as exc:
+                try:
+                    from swift.template import MaxLengthError
+                except ImportError:
+                    MaxLengthError = ()
+                if MaxLengthError and isinstance(exc, MaxLengthError):
+                    records.append((raw_index, task, 0, 0, "maxlen"))
+                else:
+                    records.append((raw_index, task, 0, 0, "failed"))
+    return nonempty, records
+
+
+def _sub_shard_offsets(path: Path, start_offset: int, count: int, raw_start: int, num_proc: int) -> list[tuple[int, int, int]]:
+    """Split a line range [start_offset, count) into num_proc contiguous sub-shards."""
+    offsets: list[int] = []
+    with open(path, "rb") as handle:
+        handle.seek(start_offset)
+        for _ in range(count):
+            offsets.append(handle.tell())
+            handle.readline()
+        offsets.append(handle.tell())
+    shards: list[tuple[int, int, int]] = []
+    base = 0
+    for i in range(num_proc):
+        n = (count - base) // (num_proc - i)
+        shards.append((offsets[base], n, raw_start + base))
+        base += n
+    return shards
+
+
+def _scan_range(
+    path: Path,
+    start_offset: int,
+    count: int,
+    raw_start: int,
+    *,
+    model: str | None,
+    model_type: str,
+    max_length: int,
+    num_proc: int,
+) -> tuple[int, list[tuple[int, str, int, int, str]]]:
+    if num_proc <= 1:
+        return _scan_shard_worker((str(path), start_offset, count, raw_start, model, model_type, max_length))
+    shard_args = [
+        (str(path), start, n, rs, model, model_type, max_length)
+        for start, n, rs in _sub_shard_offsets(path, start_offset, count, raw_start, num_proc)
+    ]
+    with multiprocessing.Pool(num_proc) as pool:
+        results = pool.map(_scan_shard_worker, shard_args)
+    nonempty = 0
+    records: list[tuple[int, str, int, int, str]] = []
+    for n, shard_records in results:
+        nonempty += n
+        records.extend(shard_records)
+    return nonempty, records
+
+
+def _scan_node_partials(
+    path: Path,
+    *,
+    modality: str,
+    node_rank: int,
+    node_count: int,
+    model: str | None,
+    model_type: str,
+    max_length: int,
+    num_proc: int,
+    output_dir: Path,
+    wait_timeout: int,
+) -> tuple[int, list[tuple[int, str, int, int, str]]]:
+    """Scan this node's line range, write a partial file; node 0 merges all partials."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    node_shards = _shard_offsets(path, node_count)
+    start, count, raw_start = node_shards[node_rank]
+    nonempty, records = _scan_range(
+        path, start, count, raw_start,
+        model=model, model_type=model_type, max_length=max_length, num_proc=num_proc,
+    )
+    partial = output_dir / f"partial_{modality}.rank{node_rank:04d}.jsonl"
+    with partial.open("w", encoding="utf-8", newline="\n") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    if node_rank != 0:
+        return nonempty, []
+    deadline = time.monotonic() + wait_timeout
+    while True:
+        missing = [
+            rank for rank in range(node_count)
+            if not (output_dir / f"partial_{modality}.rank{rank:04d}.jsonl").is_file()
+        ]
+        if not missing:
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"timed out waiting for scan partials: {missing} ({path})")
+        time.sleep(2)
+    merged: list[tuple[int, str, int, int, str]] = []
+    for rank in range(node_count):
+        with (output_dir / f"partial_{modality}.rank{rank:04d}.jsonl").open(encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    merged.append(tuple(json.loads(line)))
+    return len(merged), merged
+
+
+def _record_to_index(
+    stats: dict[str, int],
+    task_index: dict[str, list[dict[str, Any]]],
+    cache_rows: list[dict[str, Any]],
+    *,
+    modality: str,
+    raw_index: int,
+    task: str,
+    token_count: int,
+    effective_token_count: int,
+    kind: str,
+) -> None:
+    if kind == "maxlen":
+        stats["deleted"] += 1
+        return
+    if kind == "failed":
+        stats["encoding_failed"] += 1
+        return
+    dataset_index = stats["retained"]
+    stats["retained"] += 1
+    family = family_for_task(task)
+    cache_rows.append(
+        {
+            "modality": modality,
+            "dataset_index": dataset_index,
+            "raw_index": raw_index,
+            "task": task,
+            "family": family,
+            "assistant_token_count": int(token_count),
+            "effective_token_count": int(effective_token_count),
+            "eligible": bool(token_count > 0),
+        }
+    )
+    if token_count <= 0:
+        stats["zero_supervision"] += 1
+        return
+    stats["eligible"] += 1
+    task_index.setdefault(task, []).append(
+        {
+            "index": dataset_index,
+            "raw_index": raw_index,
+            "task": task,
+            "family": family,
+            "assistant_token_count": int(token_count),
+            "effective_token_count": int(effective_token_count),
+        }
+    )
+
+
 def scan_encoded_index(
     path: Path,
     *,
@@ -407,62 +617,78 @@ def scan_encoded_index(
     model: str | None,
     model_type: str = "qwen3_vl",
     max_length: int = 49152,
+    num_proc: int = 1,
+    node_rank: int = 0,
+    node_count: int = 1,
+    output_dir: Path | None = None,
+    wait_timeout: int = 1800,
 ) -> tuple[dict[str, list[dict[str, Any]]], int, int, list[dict[str, Any]], dict[str, int]]:
-    template = _load_training_template(model, model_type, max_length) if model else None
+    stats = {"raw": 0, "retained": 0, "eligible": 0, "deleted": 0, "encoding_failed": 0, "zero_supervision": 0}
     task_index: dict[str, list[dict[str, Any]]] = {}
     cache_rows: list[dict[str, Any]] = []
-    stats = {"raw": 0, "retained": 0, "eligible": 0, "deleted": 0, "encoding_failed": 0, "zero_supervision": 0}
-    with path.open(encoding="utf-8") as handle:
-        for raw_index, line in enumerate(handle):
-            if not line.strip():
-                continue
-            stats["raw"] += 1
-            row = json.loads(line)
-            task = str(row.get("task") or UNKNOWN_TASK)
-            if template is None:
-                token_count = 1
-                effective_token_count = 1
-            else:
-                try:
-                    token_count, effective_token_count = _token_counts(template, row)
-                except Exception as exc:
-                    try:
-                        from swift.template import MaxLengthError
-                    except ImportError:
-                        MaxLengthError = ()
-                    if MaxLengthError and isinstance(exc, MaxLengthError):
-                        stats["deleted"] += 1
-                    else:
-                        stats["encoding_failed"] += 1
-                    continue
-            dataset_index = stats["retained"]
-            stats["retained"] += 1
-            family = family_for_task(task)
-            cache_row = {
-                "modality": modality,
-                "dataset_index": dataset_index,
-                "raw_index": raw_index,
-                "task": task,
-                "family": family,
-                "assistant_token_count": int(token_count),
-                "effective_token_count": int(effective_token_count),
-                "eligible": bool(token_count > 0),
-            }
-            cache_rows.append(cache_row)
-            if token_count <= 0:
-                stats["zero_supervision"] += 1
-                continue
-            stats["eligible"] += 1
-            task_index.setdefault(task, []).append(
-                {
-                    "index": dataset_index,
-                    "raw_index": raw_index,
-                    "task": task,
-                    "family": family,
-                    "assistant_token_count": int(token_count),
-                    "effective_token_count": int(effective_token_count),
-                }
+
+    def records() -> Iterator[tuple[int, str, int, int, str]]:
+        if node_count > 1:
+            _nonempty, node_records = _scan_node_partials(
+                path,
+                modality=modality,
+                node_rank=node_rank,
+                node_count=node_count,
+                model=model,
+                model_type=model_type,
+                max_length=max_length,
+                num_proc=num_proc,
+                output_dir=output_dir,
+                wait_timeout=wait_timeout,
             )
+            yield from node_records
+            return
+        if num_proc <= 1:
+            template = _load_training_template(model, model_type, max_length) if model else None
+            with path.open(encoding="utf-8") as handle:
+                for raw_index, line in enumerate(handle):
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    task = str(row.get("task") or UNKNOWN_TASK)
+                    if template is None:
+                        yield raw_index, task, 1, 1, "ok"
+                        continue
+                    try:
+                        token_count, effective_token_count = _token_counts(template, row)
+                        yield raw_index, task, int(token_count), int(effective_token_count), "ok"
+                    except Exception as exc:
+                        try:
+                            from swift.template import MaxLengthError
+                        except ImportError:
+                            MaxLengthError = ()
+                        if MaxLengthError and isinstance(exc, MaxLengthError):
+                            yield raw_index, task, 0, 0, "maxlen"
+                        else:
+                            yield raw_index, task, 0, 0, "failed"
+        else:
+            shard_args = [
+                (str(path), start, count, raw_start, model, model_type, max_length)
+                for start, count, raw_start in _shard_offsets(path, num_proc)
+            ]
+            with multiprocessing.Pool(num_proc) as pool:
+                results = pool.map(_scan_shard_worker, shard_args)
+            for _nonempty, shard_records in results:
+                yield from shard_records
+
+    for raw_index, task, token_count, effective_token_count, kind in records():
+        stats["raw"] += 1
+        _record_to_index(
+            stats,
+            task_index,
+            cache_rows,
+            modality=modality,
+            raw_index=raw_index,
+            task=task,
+            token_count=token_count,
+            effective_token_count=effective_token_count,
+            kind=kind,
+        )
     return task_index, stats["retained"], stats["eligible"], cache_rows, stats
 
 
@@ -718,7 +944,7 @@ def _repair_family_caps(
     modality: str,
     usage: dict[tuple[str, int], int],
 ) -> list[dict[str, Any]]:
-    selected = {(entry["index"], entry["task"]) for entry in samples}
+    selected = collections.Counter((entry["index"], entry["task"]) for entry in samples)
     while True:
         family, excess, tolerance = _family_violation(samples)
         if family is None:
@@ -764,7 +990,7 @@ def _repair_family_caps(
                     rows = [
                         row for row in task_index[task]
                         if usage.get((modality, row["index"]), 0) < TINY_MAX_REPEAT
-                        and (row["index"], row["task"]) not in selected
+                        and selected[(row["index"], row["task"])] == 0
                     ]
                     if not rows:
                         continue
@@ -774,7 +1000,7 @@ def _repair_family_caps(
                     )
                 else:
                     candidate = cursor.peek(modality, task, task_index[task])
-                    if (candidate["index"], candidate["task"]) in selected:
+                    if selected[(candidate["index"], candidate["task"])] > 0:
                         continue
 
                 candidate_tokens = int(candidate["assistant_token_count"])
@@ -812,8 +1038,8 @@ def _repair_family_caps(
         if old["task"] not in tiny_tasks:
             quotas[old["task"]] = quotas.get(old["task"], 0) - 1
             quotas[candidate["task"]] = quotas.get(candidate["task"], 0) + 1
-        selected.remove((old["index"], old["task"]))
-        selected.add((candidate["index"], candidate["task"]))
+        selected[(old["index"], old["task"])] -= 1
+        selected[(candidate["index"], candidate["task"])] += 1
 
         if old["task"] in tiny_tasks:
             old_key = (modality, old["index"])
@@ -954,21 +1180,18 @@ def build_block(
         )
     micro_steps = steps * grad_acc
     per_micro = dp_world_size * per_device_batch
-    multi_sizes: list[int] = []
-    for step_multi in _split_uneven(multi_quota, steps):
-        step_sizes = _split_uneven(step_multi, grad_acc)
-        rng.shuffle(step_sizes)
-        multi_sizes.extend(step_sizes)
+    # 长度感知组步：同步训练中微步耗时由组内最长样本决定。
+    # 按 effective_token_count 降序后每 per_micro 条一组，长样本集中且组内长度相近，
+    # 最小化所有微步最长样本之和（即总步时），同时不丢弃任何样本。
+    combined = [(row, "multi") for row in multi_samples] + [(row, "text") for row in text_samples]
+    combined.sort(
+        key=lambda item: int(item[0].get("effective_token_count", item[0]["assistant_token_count"])),
+        reverse=True,
+    )
     entries: list[dict[str, Any]] = []
-    multi_pos = text_pos = 0
     for micro_index in range(micro_steps):
-        take_multi = multi_sizes[micro_index]
-        micro = [(row, "multi") for row in multi_samples[multi_pos:multi_pos + take_multi]]
-        micro.extend((row, "text") for row in text_samples[text_pos:text_pos + per_micro - take_multi])
-        multi_pos += take_multi
-        text_pos += per_micro - take_multi
-        rng.shuffle(micro)
-        for position, (row, modality) in enumerate(micro):
+        chunk = combined[micro_index * per_micro:(micro_index + 1) * per_micro]
+        for position, (row, modality) in enumerate(chunk):
             entries.append({
                 "block": block_id,
                 "micro_step": start_step * grad_acc + micro_index,
@@ -1015,6 +1238,10 @@ def generate_plan(
     model: str | None = None,
     model_type: str = "qwen3_vl",
     max_length: int = 49152,
+    scan_num_proc: int = 1,
+    node_rank: int = 0,
+    node_count: int = 1,
+    partial_wait_timeout: int = 1800,
 ) -> dict[str, Any]:
     if not 0.0 < multi_ratio < 1.0:
         raise ValueError(f"multi_ratio must be between 0 and 1, got {multi_ratio}")
@@ -1024,10 +1251,28 @@ def generate_plan(
         raise ValueError("sample plan actual accounting requires per_device_batch=1")
     output_dir.mkdir(parents=True, exist_ok=True)
     multi_index, dataset_n_multi, eligible_n_multi, multi_cache, multi_stats = scan_encoded_index(
-        train_multi, modality="multi", model=model, model_type=model_type, max_length=max_length
+        train_multi,
+        modality="multi",
+        model=model,
+        model_type=model_type,
+        max_length=max_length,
+        num_proc=scan_num_proc,
+        node_rank=node_rank,
+        node_count=node_count,
+        output_dir=output_dir,
+        wait_timeout=partial_wait_timeout,
     )
     text_index, dataset_n_text, eligible_n_text, text_cache, text_stats = scan_encoded_index(
-        train_text, modality="text", model=model, model_type=model_type, max_length=max_length
+        train_text,
+        modality="text",
+        model=model,
+        model_type=model_type,
+        max_length=max_length,
+        num_proc=scan_num_proc,
+        node_rank=node_rank,
+        node_count=node_count,
+        output_dir=output_dir,
+        wait_timeout=partial_wait_timeout,
     )
     (output_dir / "token_cache_multi.jsonl").write_text(
         "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in multi_cache), encoding="utf-8"
@@ -1091,18 +1336,40 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", "--base-model", dest="model", type=str, default=None)
     parser.add_argument("--model-type", "--model_type", dest="model_type", type=str, default="qwen3_vl")
     parser.add_argument("--max-length", "--max_length", dest="max_length", type=int, default=49152)
+    parser.add_argument("--scan-num-proc", "--scan_num_proc", dest="scan_num_proc", type=int, default=1)
+    parser.add_argument("--node-rank", "--node_rank", dest="node_rank", type=int, default=0)
+    parser.add_argument("--node-count", "--node_count", dest="node_count", type=int, default=1)
+    parser.add_argument("--partial-wait-timeout", "--partial_wait_timeout", dest="partial_wait_timeout", type=int, default=1800)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.node_count > 1 and args.node_rank > 0:
+        for path, modality in ((args.train_multi, "multi"), (args.train_text, "text")):
+            _scan_node_partials(
+                path,
+                modality=modality,
+                node_rank=args.node_rank,
+                node_count=args.node_count,
+                model=args.model,
+                model_type=args.model_type,
+                max_length=args.max_length,
+                num_proc=args.scan_num_proc,
+                output_dir=args.output_dir,
+                wait_timeout=args.partial_wait_timeout,
+            )
+        print(f"node {args.node_rank}/{args.node_count} partial scan done", flush=True)
+        return 0
     meta = generate_plan(
         train_multi=args.train_multi, train_text=args.train_text, output_dir=args.output_dir,
         global_batch_size=args.global_batch_size, dp_world_size=args.dp_world_size,
         per_device_batch=args.per_device_batch, grad_acc=args.grad_acc, seed=args.seed,
         multi_ratio=args.multi_ratio, max_steps=args.max_steps, epochs=args.epochs,
         steps_per_block=args.steps_per_block, model=args.model, model_type=args.model_type,
-        max_length=args.max_length,
+        max_length=args.max_length, scan_num_proc=args.scan_num_proc,
+        node_rank=args.node_rank, node_count=args.node_count,
+        partial_wait_timeout=args.partial_wait_timeout,
     )
     print(
         f"sample_plan n_multi={meta['N_multi']} n_text={meta['N_text']} "

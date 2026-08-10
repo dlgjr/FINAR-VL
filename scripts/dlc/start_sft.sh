@@ -18,7 +18,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6
 export SFT_JUDGE_GPUS=7
 export NNODES="$NODE_WORLD_SIZE"
 export NODE_RANK="$NODE_RANK"
-export SFT_EVAL_STEPS=500
+export SFT_EVAL_STEPS="${SFT_EVAL_STEPS:-500}"
 export SFT_EVAL_AT_ZERO=true
 export SFT_SAVE_STEPS="${SFT_SAVE_STEPS:-500}"
 export SFT_PASS_AT_8_TEMPERATURE="${SFT_PASS_AT_8_TEMPERATURE:-1.0}"
@@ -31,8 +31,11 @@ export SFT_GRAD_ACC="${SFT_GRAD_ACC:-2}"
 export SFT_DP_WORLD_SIZE=$((NPROC_PER_NODE * NODE_WORLD_SIZE))
 export SFT_GLOBAL_BATCH_SIZE=$((SFT_DP_WORLD_SIZE * 1 * SFT_GRAD_ACC))
 export SFT_PLAN_SEED="${SFT_PLAN_SEED:-42}"
-export SFT_MULTI_RATIO="${SFT_MULTI_RATIO:-0.40}"
+export SFT_MULTI_RATIO="${SFT_MULTI_RATIO:-0.35}"
 export SFT_EPOCHS="${SFT_EPOCHS:-1}"
+export SFT_DATASET_NUM_PROC="${SFT_DATASET_NUM_PROC:-1}"
+export SFT_DATALOADER_NUM_WORKERS="${SFT_DATALOADER_NUM_WORKERS:-1}"
+export SFT_SCAN_NUM_PROC="${SFT_SCAN_NUM_PROC:-1}"
 export WANDB_PROJECT="${WANDB_PROJECT:-FINAR-VL-SFT}"
 export WANDB_VERSION="0.28.1"
 export WANDB_MODE=offline
@@ -182,7 +185,7 @@ if (( NODE_RANK == 0 )); then
   echo "max_steps=from_sample_plan max_length=49152 global_batch=$SFT_GLOBAL_BATCH_SIZE per_device_batch=1 grad_accum=$SFT_GRAD_ACC"
   echo "tuner=lora rank=16 alpha=32 dropout=0.05 target_modules=all-linear"
   echo "learning_rate=1e-5 scheduler=cosine warmup_ratio=0.05 max_grad_norm=1.0"
-  echo "eval_step0=true eval_steps=500 save_steps=$SFT_SAVE_STEPS"
+  echo "eval_step0=true eval_steps=$SFT_EVAL_STEPS save_steps=$SFT_SAVE_STEPS"
   echo "pass_at_1=greedy pass_at_8_temperature=$SFT_PASS_AT_8_TEMPERATURE"
   echo "training_gpus_per_node=7 judge_gpus_per_node=1 nodes=$NODE_WORLD_SIZE"
   echo "training_topology=sequence_parallel:1,data_parallel:$SFT_DP_WORLD_SIZE deepspeed=zero2"
@@ -234,22 +237,25 @@ export IMAGE_MAX_TOKEN_NUM=512
 
 SFT_PLAN_DIR="$RUN_DIR/sample_plans"
 export SFT_PLAN_DIR
-if (( NODE_RANK == 0 )); then
-  "$PYTHON_BIN" "$ROOT/scripts/sft/sample_plan.py" \
-    --train-multi "$TRAIN_MULTI" \
-    --train-text "$TRAIN_TEXT" \
-    --output-dir "$SFT_PLAN_DIR" \
-    --global-batch-size "$SFT_GLOBAL_BATCH_SIZE" \
-    --dp-world-size "$SFT_DP_WORLD_SIZE" \
-    --per-device-batch 1 \
-    --grad-acc "$SFT_GRAD_ACC" \
-    --seed "$SFT_PLAN_SEED" \
-    --model "$BASE_MODEL" \
-    --model-type qwen3_vl \
-    --max-length 49152 \
-    --multi-ratio "$SFT_MULTI_RATIO" \
-    --epochs "$SFT_EPOCHS"
-else
+"$PYTHON_BIN" "$ROOT/scripts/sft/sample_plan.py" \
+  --train-multi "$TRAIN_MULTI" \
+  --train-text "$TRAIN_TEXT" \
+  --output-dir "$SFT_PLAN_DIR" \
+  --global-batch-size "$SFT_GLOBAL_BATCH_SIZE" \
+  --dp-world-size "$SFT_DP_WORLD_SIZE" \
+  --per-device-batch 1 \
+  --grad-acc "$SFT_GRAD_ACC" \
+  --seed "$SFT_PLAN_SEED" \
+  --model "$BASE_MODEL" \
+  --model-type qwen3_vl \
+  --max-length 49152 \
+  --multi-ratio "$SFT_MULTI_RATIO" \
+  --epochs "$SFT_EPOCHS" \
+  --scan-num-proc "$SFT_SCAN_NUM_PROC" \
+  --node-rank "$NODE_RANK" \
+  --node-count "$NODE_WORLD_SIZE"
+
+if (( NODE_RANK != 0 )); then
   for attempt in $(seq 1 900); do
     if [[ -f "$SFT_PLAN_DIR/meta.json" ]]; then
       break
@@ -308,6 +314,6 @@ echo "sample_plan_dir=$SFT_PLAN_DIR epochs=$SFT_EPOCHS max_steps=$SFT_MAX_STEPS"
   --run_name "$RUN_ID" \
   --external_plugins "$ROOT/scripts/sft/swift_sft_plugin.py" \
   --callbacks finar_log finar_numerics finar_pass_at_8 finar_plan \
-  --dataset_num_proc 1 \
-  --dataloader_num_workers 1 \
+  --dataset_num_proc "$SFT_DATASET_NUM_PROC" \
+  --dataloader_num_workers "$SFT_DATALOADER_NUM_WORKERS" \
   --output_dir "$RUN_DIR"

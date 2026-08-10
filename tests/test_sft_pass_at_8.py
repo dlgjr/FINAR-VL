@@ -12,10 +12,42 @@ def test_programmatic_judge_accepts_choices_numbers_dates_and_page_lists():
     assert programmatic_judge("第1页、第3页", "第3页, 第1页") is True
 
 
+def test_programmatic_judge_scans_full_response_for_choice_and_numeric_answers():
+    from scripts.sft.pass_at_8_eval import programmatic_judge
+
+    assert programmatic_judge("A", "经过分析，正确选项是 A。") is True
+    assert programmatic_judge("A", "经过分析，正确选项是 a。") is True
+    assert programmatic_judge("A", "CAT") is False
+    assert programmatic_judge("A,C", "综合判断应选择 a 和 c。") is True
+    assert programmatic_judge("A,C", "综合判断应选择 ac。") is True
+    assert programmatic_judge("AC", "综合判断应选择选项AC。") is True
+    assert programmatic_judge("A,C", "综合判断应选择 ABC。") is False
+    assert programmatic_judge("A,C", "综合判断只选择 a。") is False
+    assert programmatic_judge("A,C", "zzczz") is False
+    assert programmatic_judge("A,C", "xyz") is False
+    assert programmatic_judge("14.18", "计算过程略，最终结果为 14.18%。") is True
+    assert programmatic_judge("14.18", "最终结果为14.18，符合要求。") is True
+    assert programmatic_judge("1090.0", "因此答案是 1090.0 万元。") is True
+    assert programmatic_judge("14.18", "计算得到 7.09，最终结果为 14.18。") is True
+    assert programmatic_judge("14.18", "计算得到 7.09，最终结果为 14.19。") is True
+    assert programmatic_judge("14.18", "计算得到 7.09，最终结果为 14.40。") is False
+
+
+def test_programmatic_judge_accepts_bare_page_numbers_and_json_code_fences():
+    from scripts.sft.pass_at_8_eval import programmatic_judge
+
+    assert programmatic_judge("第1页、第20页", "答案在 1, 20。") is True
+    assert programmatic_judge("1,20", "答案在第1页和第20页。", task="evidence_retrieval") is True
+    assert programmatic_judge("1,20", "第1页和第20页，另见2024年数据。", task="evidence_retrieval") is True
+    assert programmatic_judge("1,20", "第10页和第20页。", task="evidence_retrieval") is False
+    assert programmatic_judge('{"a": 1}', '```json\n{"a": 1}\n```') is True
+
+
 def test_programmatic_judge_routes_open_answers_to_model_judge():
     from scripts.sft.pass_at_8_eval import programmatic_judge
 
     assert programmatic_judge("这是一段开放式摘要", "另一段摘要") is None
+    assert programmatic_judge("2024年公司收入增长", "另一段带年份的开放答案") is None
 
 
 def test_pass_at_8_counts_errors_as_incorrect():
@@ -78,6 +110,21 @@ def test_load_benchmark_preserves_multi_image_rows(tmp_path: Path):
 
     assert rows[0]["sample_id"] == "my_benchmark:000000"
     assert rows[0]["image_paths"] == [tmp_path / "a.png", tmp_path / "b.png"]
+
+
+def test_make_messages_requires_answer_only(monkeypatch):
+    from scripts.sft.pass_at_8_eval import _make_messages
+
+    monkeypatch.delenv("GSPO_BENCHMARK_ALLOWLIST", raising=False)
+    row = {
+        "messages": [{"role": "user", "content": "问题"}],
+        "image_paths": [],
+    }
+
+    prompt = _make_messages(row)[0]["content"][-1]["text"]
+
+    assert "只输出最终答案本身" in prompt
+    assert "不要输出分析过程或额外解释" in prompt
 
 
 def test_generate_candidates_uses_supported_generation_seed_path():

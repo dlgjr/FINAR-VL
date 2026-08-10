@@ -72,7 +72,8 @@ export SFT_PLAN_DIR
   --model "$BASE_MODEL" \
   --model-type qwen3_vl \
   --max-length "$SFT_DEBUG_MAX_LENGTH" \
-  --max-steps 5
+  --max-steps 5 \
+  --scan-num-proc "${SFT_SCAN_NUM_PROC:-1}"
 
 echo "===== SFT DSW DEBUG CONFIG ====="
 echo "model=$BASE_MODEL benchmark=$SFT_BENCHMARK"

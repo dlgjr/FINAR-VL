@@ -38,23 +38,25 @@ def sample_data(tmp_path: Path):
 def test_alpha_schedule_boundaries():
     from scripts.sft.sample_plan import alpha_for_step
 
-    assert alpha_for_step(0) == 0.60
-    assert alpha_for_step(999) == 0.60
-    assert alpha_for_step(1000) == 0.50
-    assert alpha_for_step(2999) == 0.50
-    assert alpha_for_step(3000) == 0.45
-    assert alpha_for_step(99999) == 0.45
+    assert alpha_for_step(0) == 0.65
+    assert alpha_for_step(999) == 0.65
+    assert alpha_for_step(1000) == 0.60
+    assert alpha_for_step(2999) == 0.60
+    assert alpha_for_step(3000) == 0.55
+    assert alpha_for_step(99999) == 0.55
 
 
 def test_task_b_weight_defaults_and_tables():
     from scripts.sft.sample_plan import task_b_weight
 
     assert task_b_weight("unlisted_task") == 1.0
-    assert task_b_weight("financial_headline_classification") == 0.45
-    assert task_b_weight("financial_event_extraction") == 0.60
-    assert task_b_weight("stock_movement_prediction") == 0.40
+    assert task_b_weight("financial_headline_classification") == 0.35 * 1.3
+    assert task_b_weight("financial_event_extraction") == 0.50 * 1.4
+    assert task_b_weight("stock_movement_prediction") == 0.30 * 1.4
     assert task_b_weight("multi_table_reasoning") == 1.8
     assert task_b_weight("long_document_cross_page") == 1.8
+    assert task_b_weight("multimodal_financial_knowledge_v5") == 1.6
+    assert task_b_weight("economics_and_monetary_policy") == 1.4
 
 
 def test_allocate_quotas_respects_caps_and_sum():
@@ -104,8 +106,8 @@ def test_generate_plan_block_layout_and_ratio(tmp_path: Path, sample_data):
             ).splitlines()
         ]
         assert len(entries) == 500 * 24
-        assert sum(entry["modality"] == "multi" for entry in entries) == 4800
-        assert sum(entry["modality"] == "text" for entry in entries) == 7200
+        assert sum(entry["modality"] == "multi" for entry in entries) == 4200
+        assert sum(entry["modality"] == "text" for entry in entries) == 7800
         by_micro = {}
         for entry in entries:
             by_micro.setdefault(entry["micro_step"], []).append(entry)
@@ -113,11 +115,70 @@ def test_generate_plan_block_layout_and_ratio(tmp_path: Path, sample_data):
         for micro_entries in by_micro.values():
             assert len(micro_entries) == 12
             assert len({entry["position_in_micro_step"] for entry in micro_entries}) == 12
-            assert sum(entry["modality"] == "multi" for entry in micro_entries) in {4, 5}
+            tokens = [entry["effective_token_count"] for entry in micro_entries]
+            assert tokens == sorted(tokens, reverse=True)
         for rank in range(12):
             assert sum(
                 entry["position_in_micro_step"] == rank for entry in entries
             ) == len(entries) // 12
+
+
+def test_build_block_groups_long_samples_together():
+    from scripts.sft.sample_plan import build_block
+
+    def rows(task, count, base):
+        return [
+            {
+                "index": index,
+                "raw_index": index,
+                "task": task,
+                "family": task,
+                "assistant_token_count": base - index,
+                "effective_token_count": base - index,
+            }
+            for index in range(count)
+        ]
+
+    # 每个任务 200 行（非 tiny），30 个任务保证配额可分配；multi/text 长度区间接近，
+    # 避免 multi effective-token 比例超过 0.60 硬上限。
+    multi_index = {f"mt{i}": rows(f"mt{i}", 200, 4000 - i * 50) for i in range(30)}
+    text_index = {f"tt{i}": rows(f"tt{i}", 200, 3800 - i * 50) for i in range(30)}
+    entries, block_info, _ = build_block(
+        block_id=0,
+        start_step=0,
+        steps=2,
+        global_batch_size=24,
+        dp_world_size=12,
+        per_device_batch=1,
+        grad_acc=2,
+        seed=42,
+        multi_ratio=0.5,
+        multi_index=multi_index,
+        text_index=text_index,
+        tiny_usage={},
+    )
+    assert len(entries) == 48
+    assert sum(entry["modality"] == "multi" for entry in entries) == 24
+    assert sum(entry["modality"] == "text" for entry in entries) == 24
+    by_micro = {}
+    for entry in entries:
+        by_micro.setdefault(entry["micro_step"], []).append(entry)
+    assert len(by_micro) == 4
+    for micro_entries in by_micro.values():
+        assert len(micro_entries) == 12
+        assert sorted(entry["position_in_micro_step"] for entry in micro_entries) == list(range(12))
+        tokens = [entry["effective_token_count"] for entry in micro_entries]
+        assert tokens == sorted(tokens, reverse=True)
+    # 组步按长度降序：微步最大值跨微步不增，全局最长样本位于第 0 个微步的 position 0。
+    maxima = [
+        max(entry["effective_token_count"] for entry in micro_entries)
+        for micro_entries in by_micro.values()
+    ]
+    assert maxima == sorted(maxima, reverse=True)
+    first = sorted(by_micro[0], key=lambda entry: entry["position_in_micro_step"])
+    assert first[0]["effective_token_count"] == max(
+        entry["effective_token_count"] for entry in entries
+    )
 
 
 def test_generate_plan_tiny_repeat_limit(tmp_path: Path, sample_data):
