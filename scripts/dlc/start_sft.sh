@@ -78,7 +78,14 @@ export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
 export MODELSCOPE_CACHE="$LOCAL_CACHE_ROOT/modelscope"
 export TRITON_CACHE_DIR="$LOCAL_CACHE_ROOT/triton"
 
-for required in "$BASE_MODEL/config.json" "$TRAIN_MULTI" "$TRAIN_TEXT" "$SFT_BENCHMARK" "$ROOT/scripts/sft/swift_sft_plugin.py"; do
+for required in \
+  "$BASE_MODEL/config.json" \
+  "$TRAIN_MULTI" \
+  "$TRAIN_TEXT" \
+  "$SFT_BENCHMARK" \
+  "$ROOT/scripts/data/normalize_train_multi_sft_format.py" \
+  "$ROOT/scripts/data/normalize_train_text_schema.py" \
+  "$ROOT/scripts/sft/swift_sft_plugin.py"; do
   test -f "$required" || { echo "missing required file: $required" >&2; exit 1; }
 done
 if [[ -x "$SWIFT_BIN" ]]; then
@@ -117,6 +124,14 @@ finally:
     os.close(fd)
     os.unlink(path)
 PY
+
+NORMALIZED_DATA_DIR="$TMPDIR/train_data"
+NORMALIZED_TRAIN_MULTI="$NORMALIZED_DATA_DIR/train_multi.jsonl"
+NORMALIZED_TRAIN_TEXT="$NORMALIZED_DATA_DIR/train_text.jsonl"
+mkdir -p "$NORMALIZED_DATA_DIR"
+cp -- "$TRAIN_MULTI" "$NORMALIZED_TRAIN_MULTI"
+"$PYTHON_BIN" "$ROOT/scripts/data/normalize_train_multi_sft_format.py" "$NORMALIZED_TRAIN_MULTI"
+"$PYTHON_BIN" "$ROOT/scripts/data/normalize_train_text_schema.py" "$TRAIN_TEXT" "$NORMALIZED_TRAIN_TEXT"
 
 wandb_check() {
   "$PYTHON_BIN" - "$WANDB_VERSION" <<'PY'
@@ -238,8 +253,8 @@ export IMAGE_MAX_TOKEN_NUM=512
 SFT_PLAN_DIR="$RUN_DIR/sample_plans"
 export SFT_PLAN_DIR
 "$PYTHON_BIN" "$ROOT/scripts/sft/sample_plan.py" \
-  --train-multi "$TRAIN_MULTI" \
-  --train-text "$TRAIN_TEXT" \
+  --train-multi "$NORMALIZED_TRAIN_MULTI" \
+  --train-text "$NORMALIZED_TRAIN_TEXT" \
   --output-dir "$SFT_PLAN_DIR" \
   --global-batch-size "$SFT_GLOBAL_BATCH_SIZE" \
   --dp-world-size "$SFT_DP_WORLD_SIZE" \
@@ -274,7 +289,7 @@ echo "sample_plan_dir=$SFT_PLAN_DIR epochs=$SFT_EPOCHS max_steps=$SFT_MAX_STEPS"
 "${SWIFT_CMD[@]}" sft \
   --model "$BASE_MODEL" \
   --model_type qwen3_vl \
-  --dataset "$TRAIN_MULTI" "$TRAIN_TEXT" \
+  --dataset "$NORMALIZED_TRAIN_MULTI" "$NORMALIZED_TRAIN_TEXT" \
   --split_dataset_ratio 0 \
   --dataset_shuffle false \
   --train_dataloader_shuffle false \
