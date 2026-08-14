@@ -13,74 +13,83 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-DEFAULT_MULTI_RATIO = 0.35
-ALPHA_SCHEDULE = ((0, 1000, 0.65), (1000, 3000, 0.60), (3000, float("inf"), 0.55))
+DEFAULT_MULTI_RATIO = 0.40
+ALPHA_SCHEDULE = ((0, 800, 0.55), (800, 2000, 0.50), (2000, float("inf"), 0.45))
 TOKEN_LENGTH_BETA = 0.5
 MIN_ASSISTANT_TOKENS_FOR_WEIGHT = 8
 MAX_MULTI_EFFECTIVE_TOKEN_RATIO = 0.60
-HEAD_DOWNWEIGHT = {'document_fact_extraction': 0.7,
- 'financial_event_extraction': 0.5,
- 'financial_headline_classification': 0.35,
- 'financial_sentiment_analysis': 0.6,
- 'general_dialogue': 0.5,
- 'stock_movement_prediction': 0.3,
- 'table_counting': 0.7}
-BENCHMARK_UPWEIGHT = {'basic_arithmetic_metrics': 1.3,
- 'candlestick_time_series': 1.6,
- 'chart_data_extraction': 1.5,
- 'compliance_safety_suitability': 1.6,
- 'cross_modal_multi_hop': 1.8,
- 'entity_extraction_classification': 1.3,
- 'esg_issue_identification': 1.4,
- 'evidence_retrieval': 1.8,
- 'explanation_anomaly_causality': 1.7,
- 'financial_audit_fundamentals': 1.5,
- 'financial_causal_event_reasoning': 1.7,
- 'financial_certification_exam_qa': 1.4,
- 'financial_counterfactual_inference': 1.7,
- 'financial_data_description': 1.3,
- 'financial_entity_extraction': 1.4,
- 'financial_event_extraction': 1.4,
- 'financial_headline_classification': 1.3,
- 'financial_multi_turn_perception': 1.5,
- 'financial_numeric_labeling': 1.3,
- 'financial_ocr': 1.4,
- 'financial_relation_extraction': 1.5,
- 'financial_semantic_role_labeling': 1.3,
- 'financial_sentiment_analysis': 1.3,
- 'financial_summarization': 1.4,
- 'financial_topic_classification': 1.3,
- 'image_caption': 1.3,
- 'industry_trend_inference': 1.6,
- 'investment_advice_strategy': 1.6,
- 'long_document_cross_page': 1.8,
- 'merger_acquisition_completeness_classification': 1.4,
- 'monetary_policy_stance_classification': 1.4,
- 'multi_step_numerical_reasoning': 1.7,
- 'multi_table_reasoning': 1.8,
- 'multimodal_financial_knowledge': 1.6,
- 'portfolio_allocation_risk_return': 1.6,
- 'relationship_equity_structure': 1.5,
- 'risk_sentiment_policy': 1.6,
- 'single_table_qa': 1.5,
- 'spatial_localization': 1.3,
- 'statistics_comparison_ranking': 1.4,
- 'stock_movement_prediction': 1.4,
- 'summary_announcement': 1.3}
-SEMANTIC_BENCHMARK_UPWEIGHT = {
- 'corporate_finance_and_deals': 1.4,
- 'document_arithmetic_reasoning': 1.8,
- 'document_numeric_extraction': 1.3,
- 'economics_and_monetary_policy': 1.4,
- 'financial_dialogue': 1.5,
- 'financial_entity_extraction': 1.4,
- 'financial_event_extraction': 1.3,
- 'financial_headline_classification': 1.3,
- 'financial_relation_extraction': 1.3,
- 'multimodal_financial_chart_reasoning_v5': 1.8,
- 'multimodal_financial_knowledge_v5': 1.6,
- 'sustainable_finance': 1.4,
- 'table_multi_hop_reasoning': 1.8}
+MULTI_UPWEIGHT = {
+    "cross_modal_multi_hop": 2.5,
+    "multimodal_financial_knowledge": 2.5,
+    "multi_step_numerical_reasoning": 2.4,
+    "financial_scenario_sensitivity_analysis": 2.4,
+    "valuation_reasoning": 2.4,
+    "financial_consistency_error_detection": 2.3,
+    "financial_evidence_reconciliation": 2.3,
+    "financial_counterfactual_inference": 2.3,
+    "financial_definition_scope_reasoning": 2.2,
+    "temporal_financial_reasoning": 2.2,
+    "relationship_equity_structure": 2.2,
+    "evidence_retrieval": 2.2,
+    "risk_sentiment_policy": 2.0,
+    "compliance_safety_suitability": 1.5,
+    "portfolio_allocation_risk_return": 1.5,
+}
+TEXT_UPWEIGHT = {
+    "valuation_reasoning": 2.2,
+    "financial_scenario_sensitivity_analysis": 2.2,
+    "financial_evidence_reconciliation": 2.2,
+    "financial_causal_event_reasoning": 2.1,
+    "financial_counterfactual_inference": 2.1,
+    "financial_definition_scope_reasoning": 2.1,
+    "temporal_financial_reasoning": 2.1,
+    "financial_consistency_error_detection": 2.1,
+    "multi_step_numerical_reasoning": 2.0,
+    "relationship_equity_structure": 2.0,
+    "risk_sentiment_policy": 2.0,
+    "single_table_qa": 2.0,
+    "financial_relation_extraction": 1.6,
+    "financial_entity_extraction": 1.5,
+    "financial_audit_fundamentals": 1.5,
+    "compliance_safety_suitability": 1.5,
+    "portfolio_allocation_risk_return": 1.5,
+    "evidence_retrieval": 1.2,
+}
+MULTI_DOWNWEIGHT = {
+    "document_fact_extraction": 0.50,
+    "statistics_comparison_ranking": 0.35,
+    "chart_data_extraction": 0.40,
+    "basic_arithmetic_metrics": 0.40,
+    "entity_extraction_classification": 0.50,
+    "table_counting": 0.50,
+    "image_caption": 0.25,
+    "chart_statement_verification": 0.65,
+}
+TEXT_DOWNWEIGHT = {
+    "financial_event_extraction": 0.35,
+    "financial_headline_classification": 0.20,
+    "stock_movement_prediction": 0.15,
+    "financial_sentiment_analysis": 0.45,
+    "economic_law": 0.60,
+    "general_dialogue": 0.50,
+}
+PRIORITY_SMALL_TASKS = frozenset({
+    "cross_modal_multi_hop",
+    "multimodal_financial_knowledge",
+    "multi_step_numerical_reasoning",
+    "financial_scenario_sensitivity_analysis",
+    "valuation_reasoning",
+    "financial_consistency_error_detection",
+    "financial_evidence_reconciliation",
+    "financial_counterfactual_inference",
+    "financial_definition_scope_reasoning",
+    "temporal_financial_reasoning",
+    "relationship_equity_structure",
+    "evidence_retrieval",
+    "risk_sentiment_policy",
+    "single_table_qa",
+    "financial_causal_event_reasoning",
+})
 TASK_TO_FAMILY = {'accounting_cost_reasoning': 'accounting_valuation',
  'administrative_law_reasoning': 'risk_policy_advice',
  'anomaly_information_tracing': 'retrieval_grounding',
@@ -157,11 +166,13 @@ TASK_TO_FAMILY = {'accounting_cost_reasoning': 'accounting_valuation',
  'financial_certification_qa': 'financial_knowledge',
  'financial_concept_explanation': 'financial_knowledge',
  'financial_counterfactual_inference': 'market_macro_reasoning',
+ 'financial_consistency_error_detection': 'accounting_valuation',
  'financial_customer_analysis_and_marketing': 'financial_knowledge',
  'financial_customer_management': 'financial_knowledge',
  'financial_data_description': 'generation_dialogue',
  'financial_data_interpretation': 'financial_knowledge',
  'financial_data_ranking': 'financial_knowledge',
+ 'financial_definition_scope_reasoning': 'accounting_valuation',
  'financial_dialogue': 'generation_dialogue',
  'financial_diluted_eps_calculation': 'accounting_valuation',
  'financial_disclosure_evasion_detection': 'classification_sentiment',
@@ -170,6 +181,7 @@ TASK_TO_FAMILY = {'accounting_cost_reasoning': 'accounting_valuation',
  'financial_engineering': 'accounting_valuation',
  'financial_entity_extraction': 'information_extraction',
  'financial_event_extraction': 'information_extraction',
+ 'financial_evidence_reconciliation': 'retrieval_grounding',
  'financial_foundations': 'financial_knowledge',
  'financial_headline_classification': 'classification_sentiment',
  'financial_industry_classification': 'classification_sentiment',
@@ -207,6 +219,7 @@ TASK_TO_FAMILY = {'accounting_cost_reasoning': 'accounting_valuation',
  'financial_technology_and_banking': 'financial_knowledge',
  'financial_term_explanation': 'financial_knowledge',
  'financial_time_reasoning': 'numerical_statistics',
+ 'financial_scenario_sensitivity_analysis': 'accounting_valuation',
  'financial_time_value_calculation': 'accounting_valuation',
  'financial_tool_use': 'financial_knowledge',
  'financial_topic_classification': 'classification_sentiment',
@@ -225,6 +238,7 @@ TASK_TO_FAMILY = {'accounting_cost_reasoning': 'accounting_valuation',
  'hierarchical_table_qa': 'table_reasoning',
  'hypothesis_testing_reasoning': 'numerical_statistics',
  'image_caption': 'document_perception',
+ 'insufficient_information_detection': 'retrieval_grounding',
  'inclusive_finance': 'financial_knowledge',
  'industry_analysis_and_competition': 'financial_knowledge',
  'industry_sentiment_extraction': 'classification_sentiment',
@@ -305,30 +319,33 @@ TASK_TO_FAMILY = {'accounting_cost_reasoning': 'accounting_valuation',
  'table_statistics_and_comparison': 'table_reasoning',
  'table_structure_detection': 'document_perception',
  'taxation_and_tax_law': 'risk_policy_advice',
+ 'temporal_financial_reasoning': 'numerical_statistics',
  'time_series_forecasting': 'market_macro_reasoning',
  'time_series_regression_forecasting': 'market_macro_reasoning',
  'trust_and_asset_management': 'financial_knowledge',
  'visual_counting': 'document_perception',
  'visual_pattern_reasoning': 'document_perception',
+ 'valuation_reasoning': 'accounting_valuation',
  'vligabench_ru': 'general_capability'}
-FAMILY_CAP = {'accounting_valuation': 0.15,
+FAMILY_CAP = {'accounting_valuation': 0.18,
  'chart_reasoning': 0.15,
- 'classification_sentiment': 0.12,
- 'document_perception': 0.12,
+ 'classification_sentiment': 0.08,
+ 'document_perception': 0.10,
  'financial_knowledge': 0.2,
  'general_capability': 0.03,
- 'generation_dialogue': 0.12,
- 'information_extraction': 0.15,
- 'market_macro_reasoning': 0.15,
- 'multipage_financial_reasoning': 0.1,
- 'numerical_statistics': 0.15,
- 'retrieval_grounding': 0.1,
+ 'generation_dialogue': 0.09,
+ 'information_extraction': 0.12,
+ 'market_macro_reasoning': 0.18,
+ 'multipage_financial_reasoning': 0.14,
+ 'numerical_statistics': 0.18,
+ 'retrieval_grounding': 0.13,
  'risk_policy_advice': 0.12,
  'table_reasoning': 0.15}
 MAX_TASK_RATIO = 0.05
 SMALL_TASK_MIN_N = 100
 SMALL_TASK_MAX_N = 499
 SMALL_TASK_RATIO = 0.02
+PRIORITY_SMALL_TASK_RATIO = 0.04
 TINY_TASK_MAX_N = 100
 TINY_POOL_RATIO = 0.005
 TINY_MAX_REPEAT = 2
@@ -336,13 +353,12 @@ UNKNOWN_TASK = "__unknown__"
 _TINY_POOL_KEY = "__tiny_pool__"
 
 
-def task_b_weight(task: str) -> float:
-    head_weight = HEAD_DOWNWEIGHT.get(task, 1.0)
-    benchmark_weight = max(
-        BENCHMARK_UPWEIGHT.get(task, 1.0),
-        SEMANTIC_BENCHMARK_UPWEIGHT.get(task, 1.0),
-    )
-    return head_weight * benchmark_weight
+def task_b_weight(task: str, modality: str) -> float:
+    if modality == "multi":
+        return MULTI_UPWEIGHT.get(task, 1.0) * MULTI_DOWNWEIGHT.get(task, 1.0)
+    if modality == "text":
+        return TEXT_UPWEIGHT.get(task, 1.0) * TEXT_DOWNWEIGHT.get(task, 1.0)
+    raise ValueError(f"unknown modality: {modality}")
 
 
 def task_length_scale(mean_assistant_tokens: float) -> float:
@@ -692,11 +708,11 @@ def scan_encoded_index(
     return task_index, stats["retained"], stats["eligible"], cache_rows, stats
 
 
-def task_cap(count: int, quota: int) -> int:
+def task_cap(task: str, count: int, quota: int) -> int:
     if count < TINY_TASK_MAX_N:
         return max(1, int(quota * TINY_POOL_RATIO))
     if SMALL_TASK_MIN_N <= count <= SMALL_TASK_MAX_N:
-        ratio = SMALL_TASK_RATIO
+        ratio = PRIORITY_SMALL_TASK_RATIO if task in PRIORITY_SMALL_TASKS else SMALL_TASK_RATIO
     else:
         ratio = MAX_TASK_RATIO
     return max(1, int(quota * ratio))
@@ -706,25 +722,26 @@ def allocate_quotas(
     counts: dict[str, int],
     quota: int,
     alpha: float,
+    modality: str,
     means: dict[str, float] | None = None,
 ) -> tuple[dict[str, int], int, list[str]]:
     means = means or {task: 1.0 for task in counts}
     tiny_tasks = sorted(task for task, count in counts.items() if count < TINY_TASK_MAX_N)
     sampling_weights = {
-        task: (count**alpha) * task_b_weight(task) / task_length_scale(means[task])
+        task: (count**alpha) * task_b_weight(task, modality) / task_length_scale(means[task])
         for task, count in counts.items()
         if task not in tiny_tasks
     }
     if tiny_tasks:
         sampling_weights[_TINY_POOL_KEY] = sum(
-            (counts[task]**alpha) * task_b_weight(task) / task_length_scale(means[task])
+            (counts[task]**alpha) * task_b_weight(task, modality) / task_length_scale(means[task])
             for task in tiny_tasks
         )
 
     def cap_fn(task: str) -> int:
         if task == _TINY_POOL_KEY:
             return quota if not any(task_name not in tiny_tasks for task_name in counts) else max(1, int(quota * TINY_POOL_RATIO))
-        return task_cap(counts[task], quota)
+        return task_cap(task, counts[task], quota)
 
     pending = dict(sampling_weights)
     values: dict[str, float] = {}
@@ -822,19 +839,47 @@ def _sample_tiny_pool(
     alpha: float,
 ) -> list[dict[str, Any]]:
     picked: list[dict[str, Any]] = []
+    all_tiny = bool(task_index) and len(tiny_tasks) == len(task_index)
+    if all_tiny:
+        while len(picked) < quota:
+            tasks = sorted(tiny_tasks)
+            weights = [
+                len(task_index[task]) ** alpha
+                    * task_b_weight(task, modality)
+                / task_length_scale(means[task])
+                for task in tasks
+            ]
+            task = rng.choices(tasks, weights=weights, k=1)[0]
+            min_usage = min(
+                usage.get((modality, entry["index"]), 0)
+                for entry in task_index[task]
+            )
+            candidates = [
+                entry for entry in task_index[task]
+                if usage.get((modality, entry["index"]), 0) == min_usage
+            ]
+            entry = rng.choice(candidates)
+            picked.append(entry)
+            key = (modality, entry["index"])
+            usage[key] = usage.get(key, 0) + 1
+        return picked
+
     eligible = {
-        task: [entry for entry in task_index[task] if usage.get((modality, entry["index"]), 0) < TINY_MAX_REPEAT]
+        task: [
+            entry for entry in task_index[task]
+            if usage.get((modality, entry["index"]), 0) < TINY_MAX_REPEAT
+        ]
         for task in tiny_tasks
     }
     eligible = {task: rows for task, rows in eligible.items() if rows}
     while len(picked) < quota and eligible:
         tasks = sorted(eligible)
-        weights = [len(task_index[task]) ** alpha * task_b_weight(task) / task_length_scale(means[task]) for task in tasks]
+        weights = [len(task_index[task]) ** alpha * task_b_weight(task, modality) / task_length_scale(means[task]) for task in tasks]
         task = rng.choices(tasks, weights=weights, k=1)[0]
         entry = rng.choice(eligible[task])
         eligible[task].remove(entry)
         if not eligible[task]:
-            del eligible[task]
+           del eligible[task]
         picked.append(entry)
     for entry in picked:
         key = (modality, entry["index"])
@@ -945,6 +990,7 @@ def _repair_family_caps(
     usage: dict[tuple[str, int], int],
 ) -> list[dict[str, Any]]:
     selected = collections.Counter((entry["index"], entry["task"]) for entry in samples)
+    allow_tiny_reuse = bool(task_index) and len(tiny_tasks) == len(task_index)
     while True:
         family, excess, tolerance = _family_violation(samples)
         if family is None:
@@ -982,15 +1028,18 @@ def _repair_family_caps(
                 if family_for_task(task) == family:
                     continue
 
-                cap = tiny_quota if old_pool else task_cap(len(task_index[task]), len(samples))
+                cap = tiny_quota if old_pool else task_cap(task, len(task_index[task]), len(samples))
                 if quotas.get(task, 0) >= cap:
                     continue
 
                 if old_pool:
                     rows = [
                         row for row in task_index[task]
-                        if usage.get((modality, row["index"]), 0) < TINY_MAX_REPEAT
-                        and selected[(row["index"], row["task"])] == 0
+                        if allow_tiny_reuse
+                        or (
+                            usage.get((modality, row["index"]), 0) < TINY_MAX_REPEAT
+                            and selected[(row["index"], row["task"])] == 0
+                        )
                     ]
                     if not rows:
                         continue
@@ -1066,7 +1115,7 @@ def _sample_modality(
     modality: str,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     counts = {task: len(rows) for task, rows in task_index.items()}
-    allocations, tiny_quota, tiny_tasks = allocate_quotas(counts, quota, alpha, means)
+    allocations, tiny_quota, tiny_tasks = allocate_quotas(counts, quota, alpha, modality, means)
     samples: list[dict[str, Any]] = []
     for task in sorted(allocations):
         samples.extend(cursor.draw(modality, task, task_index[task], allocations[task]))
@@ -1080,11 +1129,11 @@ def _sample_modality(
     shortfall = quota - len(samples)
     if shortfall > 0:
         capacities = {
-            task: max(0, task_cap(counts[task], quota) - allocations[task])
+            task: max(0, task_cap(task, counts[task], quota) - allocations[task])
             for task in allocations
         }
         pending = {
-            task: counts[task] ** alpha * task_b_weight(task) / task_length_scale(means[task])
+            task: counts[task] ** alpha * task_b_weight(task, modality) / task_length_scale(means[task])
             for task, capacity in capacities.items()
             if capacity > 0
         }
@@ -1234,7 +1283,7 @@ def generate_plan(
     multi_ratio: float = DEFAULT_MULTI_RATIO,
     max_steps: int | None = None,
     epochs: int = 1,
-    steps_per_block: int = 500,
+    steps_per_block: int = 200,
     model: str | None = None,
     model_type: str = "qwen3_vl",
     max_length: int = 49152,
@@ -1332,7 +1381,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--multi-ratio", type=float, default=DEFAULT_MULTI_RATIO)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=1)
-    parser.add_argument("--steps-per-block", type=int, default=500)
+    parser.add_argument("--steps-per-block", type=int, default=200)
     parser.add_argument("--model", "--base-model", dest="model", type=str, default=None)
     parser.add_argument("--model-type", "--model_type", dest="model_type", type=str, default="qwen3_vl")
     parser.add_argument("--max-length", "--max_length", dest="max_length", type=int, default=49152)

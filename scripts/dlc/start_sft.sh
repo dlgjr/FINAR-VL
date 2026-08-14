@@ -7,6 +7,7 @@ set -euo pipefail
 ROOT="${QWEN3VL_ROOT:-/mnt/nas/bihaoran/qwen3vl}"
 NODE_WORLD_SIZE="${WORLD_SIZE:?DLC must provide WORLD_SIZE}"
 NODE_RANK="${RANK:?DLC must provide RANK}"
+export SFT_MAX_STEPS="${SFT_MAX_STEPS:-50000}"
 source "$ROOT/scripts/dlc/dlc_env.sh"
 
 export BASE_MODEL="$ROOT/models/qwen4"
@@ -18,7 +19,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6
 export SFT_JUDGE_GPUS=7
 export NNODES="$NODE_WORLD_SIZE"
 export NODE_RANK="$NODE_RANK"
-export SFT_EVAL_STEPS="${SFT_EVAL_STEPS:-500}"
+export SFT_EVAL_STEPS="${SFT_EVAL_STEPS:-200}"
 export SFT_EVAL_AT_ZERO=true
 export SFT_SAVE_STEPS="${SFT_SAVE_STEPS:-500}"
 export SFT_PASS_AT_8_TEMPERATURE="${SFT_PASS_AT_8_TEMPERATURE:-1.0}"
@@ -31,7 +32,7 @@ export SFT_GRAD_ACC="${SFT_GRAD_ACC:-2}"
 export SFT_DP_WORLD_SIZE=$((NPROC_PER_NODE * NODE_WORLD_SIZE))
 export SFT_GLOBAL_BATCH_SIZE=$((SFT_DP_WORLD_SIZE * 1 * SFT_GRAD_ACC))
 export SFT_PLAN_SEED="${SFT_PLAN_SEED:-42}"
-export SFT_MULTI_RATIO="${SFT_MULTI_RATIO:-0.35}"
+export SFT_MULTI_RATIO="${SFT_MULTI_RATIO:-0.40}"
 export SFT_EPOCHS="${SFT_EPOCHS:-1}"
 export SFT_DATASET_NUM_PROC="${SFT_DATASET_NUM_PROC:-1}"
 export SFT_DATALOADER_NUM_WORKERS="${SFT_DATALOADER_NUM_WORKERS:-1}"
@@ -266,6 +267,8 @@ export SFT_PLAN_DIR
   --max-length 49152 \
   --multi-ratio "$SFT_MULTI_RATIO" \
   --epochs "$SFT_EPOCHS" \
+  --max-steps "$SFT_MAX_STEPS" \
+  --steps-per-block 200 \
   --scan-num-proc "$SFT_SCAN_NUM_PROC" \
   --node-rank "$NODE_RANK" \
   --node-count "$NODE_WORLD_SIZE"

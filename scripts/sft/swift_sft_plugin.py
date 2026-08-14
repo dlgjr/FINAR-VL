@@ -847,7 +847,7 @@ class FinarPlanCallback(TrainerCallback):
         self.enabled = bool(plan_dir) and (Path(plan_dir) / "meta.json").is_file()
         self.last_logged_block: int | None = None
         self._blocks: list[dict[str, Any]] = []
-        self._steps_per_block = 500
+        self._steps_per_block = 200
         if self.enabled:
             meta = json.loads((Path(plan_dir) / "meta.json").read_text(encoding="utf-8"))
             if int(getattr(args, "per_device_train_batch_size", 1)) != 1:
@@ -855,7 +855,7 @@ class FinarPlanCallback(TrainerCallback):
             if int(meta.get("per_device_batch", 1)) != 1:
                 raise AssertionError("sample plan actual accounting requires per_device_batch=1")
             self._blocks = meta.get("blocks", [])
-            self._steps_per_block = int(meta.get("steps_per_block", 500))
+            self._steps_per_block = int(meta.get("steps_per_block", 200))
             _install_plan_dataloader(trainer)
             self._tracker = _PlanRuntimeTracker(plan_dir, args_output_dir(args))
             trainer._finar_plan_tracker = self._tracker

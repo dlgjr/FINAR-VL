@@ -38,25 +38,50 @@ def sample_data(tmp_path: Path):
 def test_alpha_schedule_boundaries():
     from scripts.sft.sample_plan import alpha_for_step
 
-    assert alpha_for_step(0) == 0.65
-    assert alpha_for_step(999) == 0.65
-    assert alpha_for_step(1000) == 0.60
-    assert alpha_for_step(2999) == 0.60
-    assert alpha_for_step(3000) == 0.55
-    assert alpha_for_step(99999) == 0.55
+    assert alpha_for_step(0) == 0.55
+    assert alpha_for_step(799) == 0.55
+    assert alpha_for_step(800) == 0.50
+    assert alpha_for_step(1999) == 0.50
+    assert alpha_for_step(2000) == 0.45
+    assert alpha_for_step(99999) == 0.45
+
+
+def test_generate_plan_blocks_align_with_alpha_boundaries(tmp_path: Path):
+    from scripts.sft.sample_plan import generate_plan
+
+    multi = tmp_path / "multi.jsonl"
+    text = tmp_path / "text.jsonl"
+    _write_rows(multi, [f"m{i}" for i in range(10)], 20)
+    _write_rows(text, [f"t{i}" for i in range(10)], 20)
+    meta = generate_plan(
+        train_multi=multi,
+        train_text=text,
+        output_dir=tmp_path / "plan",
+        global_batch_size=4,
+        dp_world_size=2,
+        grad_acc=2,
+        seed=42,
+        max_steps=2200,
+    )
+    assert meta["steps_per_block"] == 200
+    assert meta["total_blocks"] == 11
+    assert [(block["start_step"], block["alpha"]) for block in meta["blocks"]][4] == (800, 0.50)
+    assert [(block["start_step"], block["alpha"]) for block in meta["blocks"]][10] == (2000, 0.45)
 
 
 def test_task_b_weight_defaults_and_tables():
     from scripts.sft.sample_plan import task_b_weight
 
-    assert task_b_weight("unlisted_task") == 1.0
-    assert task_b_weight("financial_headline_classification") == 0.35 * 1.3
-    assert task_b_weight("financial_event_extraction") == 0.50 * 1.4
-    assert task_b_weight("stock_movement_prediction") == 0.30 * 1.4
-    assert task_b_weight("multi_table_reasoning") == 1.8
-    assert task_b_weight("long_document_cross_page") == 1.8
-    assert task_b_weight("multimodal_financial_knowledge_v5") == 1.6
-    assert task_b_weight("economics_and_monetary_policy") == 1.4
+    assert task_b_weight("unlisted_task", "multi") == 1.0
+    assert task_b_weight("unlisted_task", "text") == 1.0
+    assert task_b_weight("financial_headline_classification", "text") == 0.20
+    assert task_b_weight("financial_event_extraction", "text") == 0.35
+    assert task_b_weight("stock_movement_prediction", "text") == 0.15
+    assert task_b_weight("multi_step_numerical_reasoning", "multi") == 2.4
+    assert task_b_weight("multi_step_numerical_reasoning", "text") == 2.0
+    assert task_b_weight("evidence_retrieval", "multi") == 2.2
+    assert task_b_weight("evidence_retrieval", "text") == 1.2
+    assert task_b_weight("image_caption", "multi") == 0.25
 
 
 def test_allocate_quotas_respects_caps_and_sum():
@@ -65,7 +90,7 @@ def test_allocate_quotas_respects_caps_and_sum():
     counts = {f"big{i}": 30000 for i in range(25)}
     counts["mid"] = 200
     counts["small"] = 50
-    allocations, tiny_quota, tiny_tasks = allocate_quotas(counts, 6000, alpha=0.7)
+    allocations, tiny_quota, tiny_tasks = allocate_quotas(counts, 6000, alpha=0.7, modality="text")
     assert sum(allocations.values()) + tiny_quota == 6000
     assert all(allocations[task] <= int(6000 * 0.05) for task in allocations if task != "mid")
     assert allocations["mid"] <= int(6000 * 0.02)
@@ -76,10 +101,11 @@ def test_allocate_quotas_respects_caps_and_sum():
 def test_allocate_quotas_tiny_size_boundary():
     from scripts.sft.sample_plan import allocate_quotas, task_cap
 
-    assert task_cap(99, 6000) == int(6000 * 0.005)
-    assert task_cap(100, 6000) == int(6000 * 0.02)
-    assert task_cap(499, 6000) == int(6000 * 0.02)
-    assert task_cap(500, 6000) == int(6000 * 0.05)
+    assert task_cap("ordinary", 99, 6000) == int(6000 * 0.005)
+    assert task_cap("ordinary", 100, 6000) == int(6000 * 0.02)
+    assert task_cap("financial_counterfactual_inference", 499, 6000) == int(6000 * 0.04)
+    assert task_cap("ordinary", 499, 6000) == int(6000 * 0.02)
+    assert task_cap("ordinary", 500, 6000) == int(6000 * 0.05)
 
 
 def test_generate_plan_block_layout_and_ratio(tmp_path: Path, sample_data):
@@ -97,21 +123,21 @@ def test_generate_plan_block_layout_and_ratio(tmp_path: Path, sample_data):
         seed=42,
         max_steps=1000,
     )
-    assert meta["total_blocks"] == 2
-    for block_id in range(2):
+    assert meta["total_blocks"] == 5
+    for block_id in range(5):
         entries = [
             json.loads(line)
             for line in (output / f"block_{block_id:04d}.jsonl").read_text(
                 encoding="utf-8"
             ).splitlines()
         ]
-        assert len(entries) == 500 * 24
-        assert sum(entry["modality"] == "multi" for entry in entries) == 4200
-        assert sum(entry["modality"] == "text" for entry in entries) == 7800
+        assert len(entries) == 200 * 24
+        assert sum(entry["modality"] == "multi" for entry in entries) == 1920
+        assert sum(entry["modality"] == "text" for entry in entries) == 2880
         by_micro = {}
         for entry in entries:
             by_micro.setdefault(entry["micro_step"], []).append(entry)
-        assert len(by_micro) == 1000
+        assert len(by_micro) == 400
         for micro_entries in by_micro.values():
             assert len(micro_entries) == 12
             assert len({entry["position_in_micro_step"] for entry in micro_entries}) == 12
@@ -301,10 +327,10 @@ def test_generate_plan_tail_block_incomplete(tmp_path: Path, sample_data):
         seed=42,
         max_steps=1001,
     )
-    assert meta["total_blocks"] == 3
+    assert meta["total_blocks"] == 6
     entries = [
         json.loads(line)
-        for line in (output / "block_0002.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in (output / "block_0005.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert len(entries) == 1 * 24
 
@@ -366,6 +392,13 @@ def test_finance_family_mapping_and_sampling_constants():
     assert family_for_task("table_arithmetic_reasoning") == "table_reasoning"
     assert family_for_task("chart_data_extraction") == "chart_reasoning"
     assert family_for_task("financial_ocr") == "document_perception"
+    assert family_for_task("financial_consistency_error_detection") == "accounting_valuation"
+    assert family_for_task("financial_definition_scope_reasoning") == "accounting_valuation"
+    assert family_for_task("financial_scenario_sensitivity_analysis") == "accounting_valuation"
+    assert family_for_task("temporal_financial_reasoning") == "numerical_statistics"
+    assert family_for_task("financial_evidence_reconciliation") == "retrieval_grounding"
+    assert family_for_task("insufficient_information_detection") == "retrieval_grounding"
+    assert family_for_task("valuation_reasoning") == "accounting_valuation"
     assert MAX_TASK_RATIO == 0.05
     assert TOKEN_LENGTH_BETA == 0.5
     assert MIN_ASSISTANT_TOKENS_FOR_WEIGHT == 8
