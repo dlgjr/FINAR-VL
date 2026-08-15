@@ -1,0 +1,23 @@
+name: benchmark-source-fetch
+on:
+  push:
+    branches: ["benchmark-fetch-tmp"]
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch public benchmark source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p public_sources
+          curl -L --retry 3 --fail -o public_sources/MMfin_CN.tsv 'https://huggingface.co/datasets/hithink-ai/MME-Finance/resolve/main/MMfin_CN.tsv?download=true'
+          test -s public_sources/MMfin_CN.tsv
+      - name: Upload source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-source-smoke
+          path: public_sources/
+          retention-days: 1
