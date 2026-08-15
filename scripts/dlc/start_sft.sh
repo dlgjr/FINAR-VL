@@ -11,6 +11,7 @@ export SFT_MAX_STEPS="${SFT_MAX_STEPS:-50000}"
 source "$ROOT/scripts/dlc/dlc_env.sh"
 
 export BASE_MODEL="$ROOT/models/qwen4"
+export JUDGE_MODEL="${JUDGE_MODEL:-/mnt/nas/bihaoran/model/qwen30}"
 export TRAIN_MULTI="${TRAIN_MULTI:-$ROOT/data/train_multi/train_multi_sft_minhash_dedup.jsonl}"
 export TRAIN_TEXT="${TRAIN_TEXT:-$ROOT/data/train_text/train_text_sft_minhash_dedup.jsonl}"
 export SFT_BENCHMARK="${SFT_BENCHMARK:-$ROOT/data/benchmark/my_benchmark/all.jsonl}"
@@ -81,6 +82,7 @@ export TRITON_CACHE_DIR="$LOCAL_CACHE_ROOT/triton"
 
 for required in \
   "$BASE_MODEL/config.json" \
+  "$JUDGE_MODEL/config.json" \
   "$TRAIN_MULTI" \
   "$TRAIN_TEXT" \
   "$SFT_BENCHMARK" \
@@ -195,6 +197,7 @@ PY
 if (( NODE_RANK == 0 )); then
   echo "===== SFT DLC CONFIG ====="
   echo "model=$BASE_MODEL"
+  echo "judge_model=$JUDGE_MODEL"
   echo "train_multi=$TRAIN_MULTI"
   echo "train_text=$TRAIN_TEXT"
   echo "benchmark=$SFT_BENCHMARK"
@@ -221,14 +224,14 @@ fi
   export WANDB_DISABLED=true
   export WANDB_MODE=disabled
   exec "$PYTHON_BIN" -m vllm.entrypoints.openai.api_server \
-    --model "$BASE_MODEL" \
-    --served-model-name qwen4-judge \
+    --model "$JUDGE_MODEL" \
+    --served-model-name qwen30-judge \
     --host 127.0.0.1 \
     --port 8001 \
     --dtype bfloat16 \
     --max-model-len 8192 \
     --tensor-parallel-size 1 \
-    --gpu-memory-utilization 0.5 \
+    --gpu-memory-utilization 0.70 \
     --max-num-seqs 8
 ) >"$JUDGE_LOG" 2>&1 &
 JUDGE_PID=$!
