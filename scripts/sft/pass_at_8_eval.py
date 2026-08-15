@@ -20,17 +20,10 @@ from scripts.rl.gspo_reward import score_programmatic_answer
 
 PASS_AT_8_TEMPERATURE = float(os.environ.get("SFT_PASS_AT_8_TEMPERATURE", "1.0"))
 PASS_AT_1_TEMPERATURE = 0.1
-EXCLUDED_BENCHMARK_TASKS = {"financial_scenario_sensitivity_analysis"}
 GSPO_BENCHMARK_TASKS = {
-    "multi_table_reasoning",
-    "long_document_cross_page",
-    "evidence_retrieval",
-    "cross_modal_multi_hop",
+    "document_evidence_retrieval",
     "multi_step_numerical_reasoning",
-    "single_table_qa",
-    "basic_arithmetic_metrics",
-    "financial_counterfactual_inference",
-    "relationship_equity_structure",
+    "single_table_reasoning",
 }
 
 
@@ -129,10 +122,10 @@ def programmatic_judge(reference: Any, candidate: Any, *, task: str = "") -> boo
     """复用共享答案提取，并扫描候选全文中的选项、数字、页码与 JSON。"""
     expected = extract_answer(reference)
     actual = extract_answer(candidate)
-    if task == "evidence_retrieval":
+    if task in {"evidence_retrieval", "document_evidence_retrieval"}:
         expected_pages = {int(number) for number in re.findall(r"\d+", expected)}
         actual_pages = {int(number) for number in re.findall(r"\d+", actual)}
-        return bool(expected_pages) and expected_pages.issubset(actual_pages)
+        return bool(expected_pages) and expected_pages == actual_pages
     if _CHOICE_ANSWER_RE.fullmatch(expected):
         return _choice_labels(expected) == _choice_labels(actual)
 
@@ -146,7 +139,7 @@ def programmatic_judge(reference: Any, candidate: Any, *, task: str = "") -> boo
 
     expected_pages = _pages(expected)
     if expected_pages is not None:
-        return expected_pages.issubset(_pages(actual, allow_bare=True) or set())
+        return _pages(actual, allow_bare=True) == expected_pages
 
     expected_json = _json_value(expected)
     if expected_json is not None:
@@ -159,10 +152,8 @@ def programmatic_judge(reference: Any, candidate: Any, *, task: str = "") -> boo
 
 def _benchmark_verifier_type(row: dict[str, Any], reference: str) -> str:
     task = str(row.get("task", ""))
-    if task == "evidence_retrieval":
+    if task == "document_evidence_retrieval":
         return "page_numbers"
-    if task == "cross_modal_multi_hop":
-        return "multiple_choice"
     if _CHOICE_RE.match(reference):
         return "single_choice"
     return "numeric"
@@ -199,8 +190,6 @@ def load_benchmark(path: Path, root: Path) -> list[dict[str, Any]]:
             if not line.strip():
                 continue
             row = json.loads(line)
-            if row.get("task") in EXCLUDED_BENCHMARK_TASKS:
-                continue
             if allowlist and row.get("task") not in allowlist:
                 continue
             image_paths = []
