@@ -8,7 +8,7 @@ jobs:
   fetch:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch and extract public benchmark samples
+      - name: Fetch MME-Finance originals
         shell: bash
         run: |
           set -euxo pipefail
@@ -18,13 +18,8 @@ jobs:
           python - <<'PY'
           import csv, json, zipfile, shutil
           from pathlib import Path
-          cats = {
-              'Image Caption':'financial_visual_description',
-              'Spatial Awareness':'visual_grounding_spatial_awareness',
-              'Numerical Calculation':'visual_numerical_estimation',
-          }
-          with open('MMfin_CN.tsv',encoding='utf-8-sig',newline='') as f:
-              rows=list(csv.DictReader(f,delimiter='\t'))
+          cats={'Image Caption':'financial_visual_description','Spatial Awareness':'visual_grounding_spatial_awareness','Numerical Calculation':'visual_numerical_estimation'}
+          with open('MMfin_CN.tsv',encoding='utf-8-sig',newline='') as f: rows=list(csv.DictReader(f,delimiter='\t'))
           z=zipfile.ZipFile('MMfin_CN.zip'); members=z.namelist(); out=[]
           for cat,task in cats.items():
               cand=[r for r in rows if r['task_category']==cat]
@@ -43,55 +38,68 @@ jobs:
               assert len(selected)==10,(cat,len(selected))
               tdir=Path('public_selected/assets')/task; tdir.mkdir(parents=True,exist_ok=True)
               for i,r in enumerate(selected,1):
-                  rel=r['image_path'].replace('\\','/')
-                  matches=[m for m in members if m.endswith('/'+rel) or m==rel]
+                  rel=r['image_path'].replace('\\','/'); matches=[m for m in members if m.endswith('/'+rel) or m==rel]
                   assert matches,('missing',rel)
                   suffix=Path(rel).suffix.lower() or '.png'; dst=tdir/f'{i:02d}{suffix}'
                   with z.open(matches[0]) as src, open(dst,'wb') as fo: shutil.copyfileobj(src,fo)
-                  out.append({'task':task,'source_benchmark':'MME-Finance','source_index':int(r['index']),'source_task_category':cat,'question':r['question'],'answer':r['answer'],'image_type':r.get('image_type',''),'image_style':r.get('image_style',''),'original_image_path':rel,'local_image_path':str(dst).replace('public_selected/','')})
+                  out.append({'task':task,'source_benchmark':'MME-Finance','source_index':int(r['index']),'source_task_category':cat,'question':r['question'],'answer':r['answer'],'image_type':r.get('image_type',''),'image_style':r.get('image_style',''),'original_image_path':rel,'local_image_paths':[str(dst).replace('public_selected/','')]})
           with open('public_selected/mme_selected.jsonl','w',encoding='utf-8') as f:
               for x in out:f.write(json.dumps(x,ensure_ascii=False)+'\n')
           print('MME selected',len(out))
           PY
 
-          python -m pip install -q --disable-pip-version-check 'datasets>=3.0' pillow
+      - name: Fetch FAMMA multilingual originals
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install -q --disable-pip-version-check 'datasets>=3.0' pillow requests
           python - <<'PY'
-          import json, io
+          import json, io, os, requests
           from pathlib import Path
           from datasets import load_dataset
           from PIL import Image
           outdir=Path('public_selected/assets/multilingual_crosslingual_financial_reasoning'); outdir.mkdir(parents=True,exist_ok=True)
           ds=load_dataset('weaverbirdllm/famma')
-          print(ds)
-          chosen=[]
-          for split in ds.keys():
-              for idx,row in enumerate(ds[split]):
-                  lang=str(row.get('language','')).lower()
-                  if lang in ('english','en',''):
-                      continue
-                  img=row.get('image')
-                  if img is None or not str(row.get('question','')).strip() or row.get('answer') is None:
-                      continue
-                  chosen.append((split,idx,row))
-                  if len(chosen)>=10: break
-              if len(chosen)>=10: break
-          assert len(chosen)==10,len(chosen)
           records=[]
-          for n,(split,idx,row) in enumerate(chosen,1):
-              img=row['image']
-              if isinstance(img,dict) and img.get('bytes'):
-                  im=Image.open(io.BytesIO(img['bytes'])).convert('RGB')
-              elif hasattr(img,'save'):
-                  im=img.convert('RGB')
-              elif isinstance(img,dict) and img.get('path'):
-                  im=Image.open(img['path']).convert('RGB')
-              else: raise RuntimeError(type(img))
-              dst=outdir/f'{n:02d}.jpg'; im.save(dst,quality=95)
-              records.append({'task':'multilingual_crosslingual_financial_reasoning','source_benchmark':'FAMMA','source_split':split,'source_index':idx,'question':row.get('question'),'options':row.get('options') or row.get('choices') or [],'answer':row.get('answer'),'language':row.get('language'),'subfield':row.get('subfield'),'image_type':row.get('image_type'),'local_image_path':str(dst).replace('public_selected/','')})
+          def save_any(obj,dst):
+              if obj is None or obj=='': return False
+              try:
+                  if hasattr(obj,'save'):
+                      obj.convert('RGB').save(dst,quality=95); return True
+                  if isinstance(obj,dict) and obj.get('bytes'):
+                      Image.open(io.BytesIO(obj['bytes'])).convert('RGB').save(dst,quality=95); return True
+                  if isinstance(obj,dict) and obj.get('path'):
+                      Image.open(obj['path']).convert('RGB').save(dst,quality=95); return True
+                  if isinstance(obj,str) and obj.startswith(('http://','https://')):
+                      b=requests.get(obj,timeout=30).content; Image.open(io.BytesIO(b)).convert('RGB').save(dst,quality=95); return True
+                  if isinstance(obj,str) and os.path.exists(obj):
+                      Image.open(obj).convert('RGB').save(dst,quality=95); return True
+              except Exception as e:
+                  print('image-save-failed',type(obj),str(e)[:200])
+              return False
+          for split in ['release_basic','release_livepro']:
+              if split not in ds: continue
+              for idx,row in enumerate(ds[split]):
+                  lang=str(row.get('language','')).strip().lower()
+                  if lang in ('english','en','') or not str(row.get('question','')).strip() or row.get('answers') is None:
+                      continue
+                  image_objs=[row.get(f'image_{i}') for i in range(1,8)]
+                  if not any(x is not None and x!='' for x in image_objs): continue
+                  n=len(records)+1; paths=[]
+                  for j,obj in enumerate(image_objs,1):
+                      if obj is None or obj=='': continue
+                      dst=outdir/f'{n:02d}_{j:02d}.jpg'
+                      if save_any(obj,dst): paths.append(str(dst).replace('public_selected/',''))
+                  if not paths: continue
+                  records.append({'task':'multilingual_crosslingual_financial_reasoning','source_benchmark':'FAMMA','source_split':split,'source_index':idx,'question_id':row.get('question_id'),'context':row.get('context'),'question':row.get('question'),'options':row.get('options') or [],'answer':row.get('answers'),'explanation':row.get('explanation'),'language':row.get('language'),'subfield':row.get('subfield'),'question_type':row.get('question_type'),'image_type':row.get('image_type'),'local_image_paths':paths})
+                  if len(records)>=10: break
+              if len(records)>=10: break
+          assert len(records)==10,len(records)
           with open('public_selected/famma_selected.jsonl','w',encoding='utf-8') as f:
               for x in records:f.write(json.dumps(x,ensure_ascii=False,default=str)+'\n')
-          print('FAMMA selected',len(records))
+          print('FAMMA selected',len(records),[r['language'] for r in records])
           PY
+
       - name: Upload selected originals
         uses: actions/upload-artifact@v4
         with:
