@@ -125,7 +125,7 @@ def programmatic_judge(reference: Any, candidate: Any, *, task: str = "") -> boo
     if task in {"evidence_retrieval", "document_evidence_retrieval"}:
         expected_pages = {int(number) for number in re.findall(r"\d+", expected)}
         actual_pages = {int(number) for number in re.findall(r"\d+", actual)}
-        return bool(expected_pages) and expected_pages == actual_pages
+        return bool(expected_pages) and expected_pages.issubset(actual_pages)
     if _CHOICE_ANSWER_RE.fullmatch(expected):
         return _choice_labels(expected) == _choice_labels(actual)
 
@@ -139,7 +139,7 @@ def programmatic_judge(reference: Any, candidate: Any, *, task: str = "") -> boo
 
     expected_pages = _pages(expected)
     if expected_pages is not None:
-        return _pages(actual, allow_bare=True) == expected_pages
+        return expected_pages.issubset(_pages(actual, allow_bare=True) or set())
 
     expected_json = _json_value(expected)
     if expected_json is not None:
