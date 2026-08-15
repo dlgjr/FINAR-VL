@@ -21,17 +21,13 @@ jobs:
           cats = {
               'Image Caption':'financial_visual_description',
               'Spatial Awareness':'visual_grounding_spatial_awareness',
-              'Estimated Numerical Calculation':'visual_numerical_estimation',
+              'Numerical Calculation':'visual_numerical_estimation',
           }
-          rows=[]
           with open('MMfin_CN.tsv',encoding='utf-8-sig',newline='') as f:
               rows=list(csv.DictReader(f,delimiter='\t'))
-          z=zipfile.ZipFile('MMfin_CN.zip')
-          members=z.namelist()
-          out=[]
+          z=zipfile.ZipFile('MMfin_CN.zip'); members=z.namelist(); out=[]
           for cat,task in cats.items():
               cand=[r for r in rows if r['task_category']==cat]
-              # Greedy diversity over image type/style and image path.
               selected=[]; seen_paths=set(); seen_pairs=set()
               for r in cand:
                   if r['image_path'] in seen_paths: continue
@@ -50,16 +46,9 @@ jobs:
                   rel=r['image_path'].replace('\\','/')
                   matches=[m for m in members if m.endswith('/'+rel) or m==rel]
                   assert matches,('missing',rel)
-                  member=matches[0]
-                  suffix=Path(rel).suffix.lower() or '.png'
-                  dst=tdir/f'{i:02d}{suffix}'
-                  with z.open(member) as src, open(dst,'wb') as fo: shutil.copyfileobj(src,fo)
-                  out.append({
-                      'task':task,'source_benchmark':'MME-Finance','source_index':int(r['index']),
-                      'source_task_category':cat,'question':r['question'],'answer':r['answer'],
-                      'image_type':r.get('image_type',''),'image_style':r.get('image_style',''),
-                      'original_image_path':rel,'local_image_path':str(dst).replace('public_selected/','')
-                  })
+                  suffix=Path(rel).suffix.lower() or '.png'; dst=tdir/f'{i:02d}{suffix}'
+                  with z.open(matches[0]) as src, open(dst,'wb') as fo: shutil.copyfileobj(src,fo)
+                  out.append({'task':task,'source_benchmark':'MME-Finance','source_index':int(r['index']),'source_task_category':cat,'question':r['question'],'answer':r['answer'],'image_type':r.get('image_type',''),'image_style':r.get('image_style',''),'original_image_path':rel,'local_image_path':str(dst).replace('public_selected/','')})
           with open('public_selected/mme_selected.jsonl','w',encoding='utf-8') as f:
               for x in out:f.write(json.dumps(x,ensure_ascii=False)+'\n')
           print('MME selected',len(out))
@@ -67,9 +56,10 @@ jobs:
 
           python -m pip install -q --disable-pip-version-check 'datasets>=3.0' pillow
           python - <<'PY'
-          import json, os
+          import json, io
           from pathlib import Path
           from datasets import load_dataset
+          from PIL import Image
           outdir=Path('public_selected/assets/multilingual_crosslingual_financial_reasoning'); outdir.mkdir(parents=True,exist_ok=True)
           ds=load_dataset('weaverbirdllm/famma')
           print(ds)
@@ -80,13 +70,8 @@ jobs:
                   if lang in ('english','en',''):
                       continue
                   img=row.get('image')
-                  if img is None:
+                  if img is None or not str(row.get('question','')).strip() or row.get('answer') is None:
                       continue
-                  q=str(row.get('question','')).strip()
-                  if not q: continue
-                  options=row.get('options') or row.get('choices') or []
-                  answer=row.get('answer')
-                  if answer is None: continue
                   chosen.append((split,idx,row))
                   if len(chosen)>=10: break
               if len(chosen)>=10: break
@@ -95,25 +80,14 @@ jobs:
           for n,(split,idx,row) in enumerate(chosen,1):
               img=row['image']
               if isinstance(img,dict) and img.get('bytes'):
-                  from PIL import Image
-                  import io
                   im=Image.open(io.BytesIO(img['bytes'])).convert('RGB')
               elif hasattr(img,'save'):
                   im=img.convert('RGB')
               elif isinstance(img,dict) and img.get('path'):
-                  from PIL import Image
                   im=Image.open(img['path']).convert('RGB')
-              else:
-                  raise RuntimeError(type(img))
+              else: raise RuntimeError(type(img))
               dst=outdir/f'{n:02d}.jpg'; im.save(dst,quality=95)
-              options=row.get('options') or row.get('choices') or []
-              records.append({
-                  'task':'multilingual_crosslingual_financial_reasoning','source_benchmark':'FAMMA',
-                  'source_split':split,'source_index':idx,'question':row.get('question'),
-                  'options':options,'answer':row.get('answer'),'language':row.get('language'),
-                  'subfield':row.get('subfield'),'image_type':row.get('image_type'),
-                  'local_image_path':str(dst).replace('public_selected/','')
-              })
+              records.append({'task':'multilingual_crosslingual_financial_reasoning','source_benchmark':'FAMMA','source_split':split,'source_index':idx,'question':row.get('question'),'options':row.get('options') or row.get('choices') or [],'answer':row.get('answer'),'language':row.get('language'),'subfield':row.get('subfield'),'image_type':row.get('image_type'),'local_image_path':str(dst).replace('public_selected/','')})
           with open('public_selected/famma_selected.jsonl','w',encoding='utf-8') as f:
               for x in records:f.write(json.dumps(x,ensure_ascii=False,default=str)+'\n')
           print('FAMMA selected',len(records))
