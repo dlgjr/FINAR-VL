@@ -18,6 +18,7 @@ export SFT_BENCHMARK="${SFT_BENCHMARK:-$ROOT/data/benchmark/my_benchmark/all.jso
 export NPROC_PER_NODE=7
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6
 export SFT_JUDGE_GPUS=7
+export SFT_JUDGE_PORT="${SFT_JUDGE_PORT:-8002}"
 export NNODES="$NODE_WORLD_SIZE"
 export NODE_RANK="$NODE_RANK"
 export SFT_EVAL_STEPS="${SFT_EVAL_STEPS:-200}"
@@ -198,6 +199,7 @@ if (( NODE_RANK == 0 )); then
   echo "===== SFT DLC CONFIG ====="
   echo "model=$BASE_MODEL"
   echo "judge_model=$JUDGE_MODEL"
+  echo "judge_port=$SFT_JUDGE_PORT"
   echo "train_multi=$TRAIN_MULTI"
   echo "train_text=$TRAIN_TEXT"
   echo "benchmark=$SFT_BENCHMARK"
@@ -227,19 +229,22 @@ fi
     --model "$JUDGE_MODEL" \
     --served-model-name qwen30-judge \
     --host 127.0.0.1 \
-    --port 8001 \
+    --port "$SFT_JUDGE_PORT" \
     --dtype bfloat16 \
     --max-model-len 8192 \
     --tensor-parallel-size 1 \
     --gpu-memory-utilization 0.70 \
-    --max-num-seqs 8
+    --max-num-seqs 8 \
+    --enforce-eager \
+    --reasoning-parser qwen3 \
+    --generation-config vllm
 ) >"$JUDGE_LOG" 2>&1 &
 JUDGE_PID=$!
 cleanup() { kill "$JUDGE_PID" 2>/dev/null || true; }
 trap cleanup EXIT
 
 for attempt in $(seq 1 120); do
-  if "$PYTHON_BIN" -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2)" >/dev/null 2>&1; then
+  if "$PYTHON_BIN" -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${SFT_JUDGE_PORT}/health', timeout=2)" >/dev/null 2>&1; then
     break
   fi
   sleep 2
@@ -249,7 +254,7 @@ for attempt in $(seq 1 120); do
   fi
 done
 
-export SFT_JUDGE_URL=http://127.0.0.1:8001
+export SFT_JUDGE_URL="http://127.0.0.1:${SFT_JUDGE_PORT}"
 export WANDB_DIR="$LOG_ROOT/wandb"
 export WANDB_NAME="$RUN_ID"
 export IMAGE_MAX_TOKEN_NUM=512
