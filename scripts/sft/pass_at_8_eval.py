@@ -420,37 +420,56 @@ def _judge_with_server(judge_url: str, row: dict[str, Any], reference: str, cand
 10. 不要因为候选答案“看起来相关”“可能想表达正确意思”而放宽标准。只评价它实际写出的内容。
 
 请先完成内部核对。最终只给出一个判定词：CORRECT 或 INCORRECT。"""
-    payload = json.dumps(
-        {
-            "model": "qwen30-judge",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": content},
-            ],
-            "temperature": 0.0,
-            "max_tokens": 1536,
-        },
-        ensure_ascii=False,
-    ).encode("utf-8")
-    request = urllib.request.Request(
-        judge_url.rstrip("/") + "/v1/chat/completions",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=180) as response:
-        body = json.loads(response.read().decode("utf-8"))
 
-    message = body["choices"][0]["message"]
-    raw_verdict = str(message.get("content") or "").strip().upper()
-    verdict_match = re.search(r"\b(INCORRECT|CORRECT)\b\s*[。.!！]*\s*$", raw_verdict)
-    if verdict_match is None:
-        # 兼容 Thinking 模型未分离 reasoning_content 的服务端输出：
-        # 只认回复末尾的最终判定，避免思考过程里出现 CORRECT/INCORRECT 导致误解析。
-        verdict_match = re.search(r"\b(INCORRECT|CORRECT)\b(?!.*\b(?:INCORRECT|CORRECT)\b)", raw_verdict)
-    if verdict_match is None:
-        raise ValueError(f"invalid judge verdict: {raw_verdict!r}")
-    return verdict_match.group(1) == "CORRECT"
+    def parse_verdict(raw_verdict: str) -> str | None:
+        verdict_match = re.search(r"\b(INCORRECT|CORRECT)\b\s*[。.!！]*\s*$", raw_verdict)
+        if verdict_match is None:
+            # 兼容 Thinking 模型未分离 reasoning_content 的服务端输出：
+            # 只认回复末尾的最终判定，避免思考过程里出现 CORRECT/INCORRECT 导致误解析。
+            verdict_match = re.search(
+                r"\b(INCORRECT|CORRECT)\b(?!.*\b(?:INCORRECT|CORRECT)\b)",
+                raw_verdict,
+            )
+        return verdict_match.group(1) if verdict_match is not None else None
+
+    last_finish_reason = ""
+    last_raw_verdict = ""
+    for max_tokens in (1536, 3072):
+        payload = json.dumps(
+            {
+                "model": "qwen30-judge",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": content},
+                ],
+                "temperature": 0.0,
+                "max_tokens": max_tokens,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            judge_url.rstrip("/") + "/v1/chat/completions",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=300) as response:
+            body = json.loads(response.read().decode("utf-8"))
+
+        choice = body["choices"][0]
+        message = choice["message"]
+        finish_reason = str(choice.get("finish_reason") or "")
+        raw_verdict = str(message.get("content") or "").strip().upper()
+        verdict = parse_verdict(raw_verdict)
+        if finish_reason != "length" and verdict is not None:
+            return verdict == "CORRECT"
+        last_finish_reason = finish_reason
+        last_raw_verdict = raw_verdict
+
+    raise ValueError(
+        "invalid judge verdict after retry: "
+        f"finish_reason={last_finish_reason!r} content={last_raw_verdict!r}"
+    )
 
 
 def _judge_generation(
