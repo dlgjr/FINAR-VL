@@ -8,59 +8,30 @@ jobs:
   fetch:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch MME-Finance originals
+      - name: Fetch balanced FAMMA multilingual originals
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p public_selected
-          curl -L --retry 3 --fail -o MMfin_CN.tsv 'https://huggingface.co/datasets/hithink-ai/MME-Finance/resolve/main/MMfin_CN.tsv?download=true'
-          curl -L --retry 3 --fail -o MMfin_CN.zip 'https://huggingface.co/datasets/hithink-ai/MME-Finance/resolve/main/MMfin_CN.zip?download=true'
-          python - <<'PY'
-          import csv, json, zipfile, shutil
-          from pathlib import Path
-          cats={'Image Caption':'financial_visual_description','Spatial Awareness':'visual_grounding_spatial_awareness','Numerical Calculation':'visual_numerical_estimation'}
-          with open('MMfin_CN.tsv',encoding='utf-8-sig',newline='') as f: rows=list(csv.DictReader(f,delimiter='\t'))
-          z=zipfile.ZipFile('MMfin_CN.zip'); members=z.namelist(); out=[]
-          for cat,task in cats.items():
-              cand=[r for r in rows if r['task_category']==cat]
-              selected=[]; seen_paths=set(); seen_pairs=set()
-              for r in cand:
-                  if r['image_path'] in seen_paths: continue
-                  pair=(r.get('image_type',''),r.get('image_style',''))
-                  if pair in seen_pairs and len(selected)<6: continue
-                  selected.append(r); seen_paths.add(r['image_path']); seen_pairs.add(pair)
-                  if len(selected)==10: break
-              if len(selected)<10:
-                  for r in cand:
-                      if r['image_path'] in seen_paths: continue
-                      selected.append(r); seen_paths.add(r['image_path'])
-                      if len(selected)==10: break
-              assert len(selected)==10,(cat,len(selected))
-              tdir=Path('public_selected/assets')/task; tdir.mkdir(parents=True,exist_ok=True)
-              for i,r in enumerate(selected,1):
-                  rel=r['image_path'].replace('\\','/'); matches=[m for m in members if m.endswith('/'+rel) or m==rel]
-                  assert matches,('missing',rel)
-                  suffix=Path(rel).suffix.lower() or '.png'; dst=tdir/f'{i:02d}{suffix}'
-                  with z.open(matches[0]) as src, open(dst,'wb') as fo: shutil.copyfileobj(src,fo)
-                  out.append({'task':task,'source_benchmark':'MME-Finance','source_index':int(r['index']),'source_task_category':cat,'question':r['question'],'answer':r['answer'],'image_type':r.get('image_type',''),'image_style':r.get('image_style',''),'original_image_path':rel,'local_image_paths':[str(dst).replace('public_selected/','')]})
-          with open('public_selected/mme_selected.jsonl','w',encoding='utf-8') as f:
-              for x in out:f.write(json.dumps(x,ensure_ascii=False)+'\n')
-          print('MME selected',len(out))
-          PY
-
-      - name: Fetch FAMMA multilingual originals
-        shell: bash
-        run: |
-          set -euxo pipefail
+          mkdir -p public_selected/assets/multilingual_financial_reasoning
           python -m pip install -q --disable-pip-version-check 'datasets>=3.0' pillow requests
           python - <<'PY'
-          import json, io, os, requests
+          import json, io, os, requests, collections
           from pathlib import Path
           from datasets import load_dataset
           from PIL import Image
-          outdir=Path('public_selected/assets/multilingual_crosslingual_financial_reasoning'); outdir.mkdir(parents=True,exist_ok=True)
+          outdir=Path('public_selected/assets/multilingual_financial_reasoning')
           ds=load_dataset('weaverbirdllm/famma')
-          records=[]
+          counts=collections.Counter()
+          for split in ['release_basic','release_livepro']:
+              if split in ds:
+                  for row in ds[split]: counts[str(row.get('language','')).strip().lower()]+=1
+          print('language_counts',dict(counts))
+          targets={k:5 for k in ['chinese','french'] if counts[k]>0}
+          if len(targets)<2:
+              langs=[k for k,v in counts.items() if k not in ('english','en','') and v>0][:2]
+              targets={k:5 for k in langs}
+          assert len(targets)==2,targets
+          selected={k:[] for k in targets}
           def save_any(obj,dst):
               if obj is None or obj=='': return False
               try:
@@ -74,15 +45,15 @@ jobs:
                       b=requests.get(obj,timeout=30).content; Image.open(io.BytesIO(b)).convert('RGB').save(dst,quality=95); return True
                   if isinstance(obj,str) and os.path.exists(obj):
                       Image.open(obj).convert('RGB').save(dst,quality=95); return True
-              except Exception as e:
-                  print('image-save-failed',type(obj),str(e)[:200])
+              except Exception as e: print('image-save-failed',type(obj),str(e)[:200])
               return False
+          records=[]
           for split in ['release_basic','release_livepro']:
               if split not in ds: continue
               for idx,row in enumerate(ds[split]):
                   lang=str(row.get('language','')).strip().lower()
-                  if lang in ('english','en','') or not str(row.get('question','')).strip() or row.get('answers') is None:
-                      continue
+                  if lang not in targets or len(selected[lang])>=targets[lang]: continue
+                  if not str(row.get('question','')).strip() or row.get('answers') is None: continue
                   image_objs=[row.get(f'image_{i}') for i in range(1,8)]
                   if not any(x is not None and x!='' for x in image_objs): continue
                   n=len(records)+1; paths=[]
@@ -91,19 +62,19 @@ jobs:
                       dst=outdir/f'{n:02d}_{j:02d}.jpg'
                       if save_any(obj,dst): paths.append(str(dst).replace('public_selected/',''))
                   if not paths: continue
-                  records.append({'task':'multilingual_crosslingual_financial_reasoning','source_benchmark':'FAMMA','source_split':split,'source_index':idx,'question_id':row.get('question_id'),'context':row.get('context'),'question':row.get('question'),'options':row.get('options') or [],'answer':row.get('answers'),'explanation':row.get('explanation'),'language':row.get('language'),'subfield':row.get('subfield'),'question_type':row.get('question_type'),'image_type':row.get('image_type'),'local_image_paths':paths})
-                  if len(records)>=10: break
-              if len(records)>=10: break
-          assert len(records)==10,len(records)
+                  rec={'task':'multilingual_financial_reasoning','source_benchmark':'FAMMA','source_split':split,'source_index':idx,'question_id':row.get('question_id'),'context':row.get('context'),'question':row.get('question'),'options':row.get('options') or [],'answer':row.get('answers'),'explanation':row.get('explanation'),'language':row.get('language'),'subfield':row.get('subfield'),'question_type':row.get('question_type'),'image_type':row.get('image_type'),'local_image_paths':paths}
+                  records.append(rec); selected[lang].append(rec)
+                  if all(len(selected[k])>=targets[k] for k in targets): break
+              if all(len(selected[k])>=targets[k] for k in targets): break
+          assert len(records)==10,(len(records),{k:len(v) for k,v in selected.items()})
           with open('public_selected/famma_selected.jsonl','w',encoding='utf-8') as f:
               for x in records:f.write(json.dumps(x,ensure_ascii=False,default=str)+'\n')
-          print('FAMMA selected',len(records),[r['language'] for r in records])
+          print('selected_languages',[r['language'] for r in records])
           PY
-
-      - name: Upload selected originals
+      - name: Upload FAMMA originals
         uses: actions/upload-artifact@v4
         with:
-          name: public-benchmark-selected
+          name: famma-balanced-selected
           path: public_selected/
           retention-days: 1
           compression-level: 6
