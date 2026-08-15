@@ -20,6 +20,7 @@ from scripts.rl.gspo_reward import score_programmatic_answer
 
 PASS_AT_8_TEMPERATURE = float(os.environ.get("SFT_PASS_AT_8_TEMPERATURE", "1.0"))
 PASS_AT_1_TEMPERATURE = 0.1
+EXCLUDED_BENCHMARK_TASKS = {"financial_scenario_sensitivity_analysis"}
 GSPO_BENCHMARK_TASKS = {
     "multi_table_reasoning",
     "long_document_cross_page",
@@ -198,6 +199,8 @@ def load_benchmark(path: Path, root: Path) -> list[dict[str, Any]]:
             if not line.strip():
                 continue
             row = json.loads(line)
+            if row.get("task") in EXCLUDED_BENCHMARK_TASKS:
+                continue
             if allowlist and row.get("task") not in allowlist:
                 continue
             image_paths = []
