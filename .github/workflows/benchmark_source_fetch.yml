@@ -8,7 +8,7 @@ jobs:
   fetch:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch diverse MME-Finance originals
+      - name: Fetch semantically diverse MME-Finance originals
         shell: bash
         run: |
           set -euxo pipefail
@@ -21,14 +21,16 @@ jobs:
           cats={'Image Caption':'financial_visual_description','Spatial Awareness':'visual_grounding_spatial_awareness','Numerical Calculation':'visual_numerical_estimation'}
           with open('MMfin_CN.tsv',encoding='utf-8-sig',newline='') as f: rows=list(csv.DictReader(f,delimiter='\t'))
           z=zipfile.ZipFile('MMfin_CN.zip'); members=z.namelist(); out=[]
+          norm=lambda s:' '.join((s or '').split())
           for cat,task in cats.items():
               cand=[r for r in rows if r['task_category']==cat]
-              # Deduplicate semantic content first (question+answer), then round-robin image types.
-              unique=[]; seen_qa=set()
+              unique=[]; seen=set()
               for r in cand:
-                  key=(' '.join(r['question'].split()), ' '.join(r['answer'].split()))
-                  if key in seen_qa: continue
-                  seen_qa.add(key); unique.append(r)
+                  # Caption prompts are generic, so deduplicate by described visual content (answer).
+                  # Reasoning tasks deduplicate by question wording to avoid style variants of the same problem.
+                  key=norm(r['answer']) if cat=='Image Caption' else norm(r['question'])
+                  if key in seen: continue
+                  seen.add(key); unique.append(r)
               buckets=collections.defaultdict(list)
               for r in unique: buckets[r.get('image_type','unknown')].append(r)
               types=sorted(buckets, key=lambda t:(-len(buckets[t]),t))
@@ -39,12 +41,12 @@ jobs:
                       b=buckets[t]
                       while pos[t]<len(b) and b[pos[t]]['image_path'] in used_paths: pos[t]+=1
                       if pos[t]<len(b):
-                          r=b[pos[t]]; pos[t]+=1
-                          selected.append(r); used_paths.add(r['image_path']); progressed=True
+                          r=b[pos[t]]; pos[t]+=1; selected.append(r); used_paths.add(r['image_path']); progressed=True
                           if len(selected)==10: break
                   if not progressed: break
               assert len(selected)==10,(cat,len(selected),len(unique))
-              assert len({(' '.join(r['question'].split()),' '.join(r['answer'].split())) for r in selected})==10
+              if cat!='Image Caption': assert len({norm(r['question']) for r in selected})==10
+              else: assert len({norm(r['answer']) for r in selected})==10
               tdir=Path('public_selected/assets')/task; tdir.mkdir(parents=True,exist_ok=True)
               for i,r in enumerate(selected,1):
                   rel=r['image_path'].replace('\\','/'); matches=[m for m in members if m.endswith('/'+rel) or m==rel]
@@ -52,15 +54,14 @@ jobs:
                   suffix=Path(rel).suffix.lower() or '.png'; dst=tdir/f'{i:02d}{suffix}'
                   with z.open(matches[0]) as src, open(dst,'wb') as fo: shutil.copyfileobj(src,fo)
                   out.append({'task':task,'source_benchmark':'MME-Finance','source_index':int(r['index']),'source_task_category':cat,'question':r['question'],'answer':r['answer'],'image_type':r.get('image_type',''),'image_style':r.get('image_style',''),'original_image_path':rel,'local_image_paths':[str(dst).replace('public_selected/','')]})
-              print(task, [(r['index'],r.get('image_type'),r['question'][:40]) for r in selected])
+              print(task, [(r['index'],r.get('image_type'),r['question'][:55]) for r in selected])
           with open('public_selected/mme_selected.jsonl','w',encoding='utf-8') as f:
               for x in out:f.write(json.dumps(x,ensure_ascii=False)+'\n')
-          print('MME selected',len(out))
           PY
-      - name: Upload diverse MME originals
+      - name: Upload selected MME originals
         uses: actions/upload-artifact@v4
         with:
-          name: mme-diverse-selected
+          name: mme-final-selected
           path: public_selected/
           retention-days: 1
           compression-level: 6
