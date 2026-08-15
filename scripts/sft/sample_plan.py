@@ -13,71 +13,74 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-DEFAULT_MULTI_RATIO = 0.40
-ALPHA_SCHEDULE = ((0, 800, 0.55), (800, 2000, 0.50), (2000, float("inf"), 0.45))
+DEFAULT_MULTI_RATIO = 0.36
+ALPHA_SCHEDULE = ((0, 1000, 0.65), (1000, 3000, 0.60), (3000, float("inf"), 0.55))
 TOKEN_LENGTH_BETA = 0.5
 MIN_ASSISTANT_TOKENS_FOR_WEIGHT = 8
 MAX_MULTI_EFFECTIVE_TOKEN_RATIO = 0.60
 MULTI_UPWEIGHT = {
-    "cross_modal_multi_hop": 2.5,
-    "multimodal_financial_knowledge": 2.5,
-    "multi_step_numerical_reasoning": 2.4,
-    "financial_scenario_sensitivity_analysis": 2.4,
-    "valuation_reasoning": 2.4,
-    "financial_consistency_error_detection": 2.3,
-    "financial_evidence_reconciliation": 2.3,
-    "financial_counterfactual_inference": 2.3,
-    "financial_definition_scope_reasoning": 2.2,
-    "temporal_financial_reasoning": 2.2,
-    "relationship_equity_structure": 2.2,
-    "evidence_retrieval": 2.2,
-    "risk_sentiment_policy": 2.0,
-    "compliance_safety_suitability": 1.5,
-    "portfolio_allocation_risk_return": 1.5,
+    "cross_modal_multi_hop": 1.15,
+    "multimodal_financial_knowledge": 1.20,
+    "multi_step_numerical_reasoning": 0.90,
+    "valuation_reasoning": 1.10,
+    "financial_consistency_error_detection": 0.90,
+    "financial_evidence_reconciliation": 1.15,
+    "financial_counterfactual_inference": 0.90,
+    "financial_definition_scope_reasoning": 0.95,
+    "temporal_financial_reasoning": 0.95,
+    "relationship_equity_structure": 1.15,
+    "evidence_retrieval": 0.90,
+    "risk_sentiment_policy": 0.90,
+    "compliance_safety_suitability": 0.95,
+    "portfolio_allocation_risk_return": 1.10,
+    "document_arithmetic_reasoning": 1.20,
+    "multimodal_financial_knowledge_v5": 1.20,
+    "schedule_temporal_reasoning": 1.15,
 }
 TEXT_UPWEIGHT = {
-    "valuation_reasoning": 2.2,
-    "financial_scenario_sensitivity_analysis": 2.2,
-    "financial_evidence_reconciliation": 2.2,
-    "financial_causal_event_reasoning": 2.1,
-    "financial_counterfactual_inference": 2.1,
-    "financial_definition_scope_reasoning": 2.1,
-    "temporal_financial_reasoning": 2.1,
-    "financial_consistency_error_detection": 2.1,
-    "multi_step_numerical_reasoning": 2.0,
-    "relationship_equity_structure": 2.0,
-    "risk_sentiment_policy": 2.0,
-    "single_table_qa": 2.0,
-    "financial_relation_extraction": 1.6,
-    "financial_entity_extraction": 1.5,
-    "financial_audit_fundamentals": 1.5,
-    "compliance_safety_suitability": 1.5,
-    "portfolio_allocation_risk_return": 1.5,
-    "evidence_retrieval": 1.2,
+    "valuation_reasoning": 1.15,
+    "financial_evidence_reconciliation": 1.00,
+    "financial_causal_event_reasoning": 0.90,
+    "financial_counterfactual_inference": 0.90,
+    "financial_definition_scope_reasoning": 0.95,
+    "temporal_financial_reasoning": 1.10,
+    "financial_consistency_error_detection": 0.90,
+    "multi_step_numerical_reasoning": 0.90,
+    "relationship_equity_structure": 1.00,
+    "risk_sentiment_policy": 0.90,
+    "single_table_qa": 1.00,
+    "financial_relation_extraction": 0.85,
+    "financial_entity_extraction": 0.90,
+    "financial_audit_fundamentals": 1.00,
+    "compliance_safety_suitability": 0.95,
+    "portfolio_allocation_risk_return": 1.10,
+    "evidence_retrieval": 0.85,
+    "sustainable_finance": 1.40,
+    "economics_and_monetary_policy": 1.20,
+    "financial_asset_valuation": 1.10,
 }
 MULTI_DOWNWEIGHT = {
-    "document_fact_extraction": 0.50,
-    "statistics_comparison_ranking": 0.35,
-    "chart_data_extraction": 0.40,
-    "basic_arithmetic_metrics": 0.40,
-    "entity_extraction_classification": 0.50,
-    "table_counting": 0.50,
-    "image_caption": 0.25,
-    "chart_statement_verification": 0.65,
+    "document_fact_extraction": 0.75,
+    "statistics_comparison_ranking": 0.90,
+    "chart_data_extraction": 1.00,
+    "basic_arithmetic_metrics": 1.10,
+    "entity_extraction_classification": 1.05,
+    "table_counting": 0.80,
+    "image_caption": 0.50,
+    "chart_statement_verification": 1.00,
 }
 TEXT_DOWNWEIGHT = {
-    "financial_event_extraction": 0.35,
-    "financial_headline_classification": 0.20,
-    "stock_movement_prediction": 0.15,
-    "financial_sentiment_analysis": 0.45,
-    "economic_law": 0.60,
-    "general_dialogue": 0.50,
+    "financial_event_extraction": 0.55,
+    "financial_headline_classification": 0.55,
+    "stock_movement_prediction": 0.55,
+    "financial_sentiment_analysis": 0.75,
+    "economic_law": 0.70,
+    "general_dialogue": 1.00,
 }
 PRIORITY_SMALL_TASKS = frozenset({
     "cross_modal_multi_hop",
     "multimodal_financial_knowledge",
     "multi_step_numerical_reasoning",
-    "financial_scenario_sensitivity_analysis",
     "valuation_reasoning",
     "financial_consistency_error_detection",
     "financial_evidence_reconciliation",
@@ -327,28 +330,28 @@ TASK_TO_FAMILY = {'accounting_cost_reasoning': 'accounting_valuation',
  'visual_pattern_reasoning': 'document_perception',
  'valuation_reasoning': 'accounting_valuation',
  'vligabench_ru': 'general_capability'}
-FAMILY_CAP = {'accounting_valuation': 0.18,
+FAMILY_CAP = {'accounting_valuation': 0.15,
  'chart_reasoning': 0.15,
- 'classification_sentiment': 0.08,
- 'document_perception': 0.10,
- 'financial_knowledge': 0.2,
+ 'classification_sentiment': 0.12,
+ 'document_perception': 0.12,
+ 'financial_knowledge': 0.20,
  'general_capability': 0.03,
- 'generation_dialogue': 0.09,
- 'information_extraction': 0.12,
- 'market_macro_reasoning': 0.18,
- 'multipage_financial_reasoning': 0.14,
- 'numerical_statistics': 0.18,
- 'retrieval_grounding': 0.13,
+ 'generation_dialogue': 0.12,
+ 'information_extraction': 0.15,
+ 'market_macro_reasoning': 0.15,
+ 'multipage_financial_reasoning': 0.10,
+ 'numerical_statistics': 0.15,
+ 'retrieval_grounding': 0.10,
  'risk_policy_advice': 0.12,
  'table_reasoning': 0.15}
 MAX_TASK_RATIO = 0.05
 SMALL_TASK_MIN_N = 100
 SMALL_TASK_MAX_N = 499
 SMALL_TASK_RATIO = 0.02
-PRIORITY_SMALL_TASK_RATIO = 0.04
+PRIORITY_SMALL_TASK_RATIO = 0.02
 TINY_TASK_MAX_N = 100
 TINY_POOL_RATIO = 0.005
-TINY_MAX_REPEAT = 2
+TINY_MAX_REPEAT = 1
 UNKNOWN_TASK = "__unknown__"
 _TINY_POOL_KEY = "__tiny_pool__"
 
