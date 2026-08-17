@@ -18,6 +18,11 @@ def test_dlc_launcher_uses_full_sft_sp2_and_dedicated_reference_gpu():
         "--model_type qwen3_vl",
         "NPROC_PER_NODE=6",
         "CUDA_VISIBLE_DEVICES=0,1,2,3,4,5",
+        'export SFT_MULTI_MEDIA_ROOT="${SFT_MULTI_MEDIA_ROOT:-$(cd "$(dirname "$TRAIN_MULTI")" && pwd -P)}"',
+        'export ROOT_IMAGE_DIR="${ROOT_IMAGE_DIR:-$SFT_MULTI_MEDIA_ROOT}"',
+        'test -d "$ROOT_IMAGE_DIR"',
+        'cd "$ROOT_IMAGE_DIR"',
+        'multi_media_root=$SFT_MULTI_MEDIA_ROOT root_image_dir=$ROOT_IMAGE_DIR',
         'export SFT_REF_GPU="${SFT_REF_GPU:-6}"',
         'export SFT_REF_PORT="${SFT_REF_PORT:-8003}"',
         'export SFT_REF_MODEL="${SFT_REF_MODEL:-$BASE_MODEL}"',
@@ -106,6 +111,7 @@ def test_dlc_launcher_uses_full_sft_sp2_and_dedicated_reference_gpu():
         "import flash_attn",
     ):
         assert required in text
+    assert text.index('cd "$ROOT_IMAGE_DIR"') < text.index('"$PYTHON_BIN" "$ROOT/scripts/sft/sample_plan.py"')
     for forbidden in (
         "--tuner_type lora",
         "--target_modules all-linear",
