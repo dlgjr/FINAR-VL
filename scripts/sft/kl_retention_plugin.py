@@ -346,7 +346,6 @@ def _generation_kl_loss(model, inputs: dict[str, Any], trainer, *, return_output
         "video_grid_thw",
         "mm_token_type_ids",
         "token_type_ids",
-        "text_position_ids",
     }
     forward_inputs = {key: value for key, value in inputs.items() if key in allowed_keys}
     forward_inputs["use_cache"] = False
