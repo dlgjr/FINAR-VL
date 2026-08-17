@@ -27,12 +27,14 @@ export SFT_REF_MAX_MODEL_LEN="${SFT_REF_MAX_MODEL_LEN:-49152}"
 export SFT_REF_MAX_NUM_SEQS="${SFT_REF_MAX_NUM_SEQS:-8}"
 export SFT_REF_GPU_MEMORY_UTILIZATION="${SFT_REF_GPU_MEMORY_UTILIZATION:-0.85}"
 export SFT_REF_REQUEST_TIMEOUT="${SFT_REF_REQUEST_TIMEOUT:-600}"
+export SFT_REF_STARTUP_TIMEOUT="${SFT_REF_STARTUP_TIMEOUT:-1800}"
 export SFT_KL_BETA="${SFT_KL_BETA:-1.0}"
 export SFT_TEACHER_MAX_TOKENS="${SFT_TEACHER_MAX_TOKENS:-512}"
 export SFT_TEACHER_TEMPERATURE="${SFT_TEACHER_TEMPERATURE:-1.0}"
 export SFT_TEACHER_TOP_P="${SFT_TEACHER_TOP_P:-1.0}"
 export SFT_JUDGE_GPUS=7
 export SFT_JUDGE_PORT="${SFT_JUDGE_PORT:-8002}"
+export SFT_JUDGE_STARTUP_TIMEOUT="${SFT_JUDGE_STARTUP_TIMEOUT:-1800}"
 export NNODES="$NODE_WORLD_SIZE"
 export NODE_RANK="$NODE_RANK"
 export SFT_EVAL_STEPS="${SFT_EVAL_STEPS:-200}"
@@ -53,6 +55,13 @@ if (( NPROC_PER_NODE % SFT_SEQUENCE_PARALLEL_SIZE != 0 )); then
   echo "NPROC_PER_NODE=$NPROC_PER_NODE must be divisible by SFT_SEQUENCE_PARALLEL_SIZE=$SFT_SEQUENCE_PARALLEL_SIZE" >&2
   exit 1
 fi
+for timeout_var in SFT_REF_STARTUP_TIMEOUT SFT_JUDGE_STARTUP_TIMEOUT; do
+  timeout_value="${!timeout_var}"
+  if [[ ! "$timeout_value" =~ ^[1-9][0-9]*$ ]]; then
+    echo "$timeout_var must be a positive integer number of seconds, got: $timeout_value" >&2
+    exit 1
+  fi
+done
 if [[ ",$CUDA_VISIBLE_DEVICES," == *",$SFT_REF_GPU,"* ]]; then
   echo "SFT_REF_GPU=$SFT_REF_GPU overlaps training CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES" >&2
   exit 1
@@ -235,9 +244,9 @@ PY
 if (( NODE_RANK == 0 )); then
   echo "===== SFT DLC CONFIG ====="
   echo "model=$BASE_MODEL"
-  echo "reference_model=$SFT_REF_MODEL reference_gpu=$SFT_REF_GPU reference_port=$SFT_REF_PORT"
+  echo "reference_model=$SFT_REF_MODEL reference_gpu=$SFT_REF_GPU reference_port=$SFT_REF_PORT reference_startup_timeout=$SFT_REF_STARTUP_TIMEOUT"
   echo "judge_model=$JUDGE_MODEL"
-  echo "judge_port=$SFT_JUDGE_PORT"
+  echo "judge_port=$SFT_JUDGE_PORT judge_startup_timeout=$SFT_JUDGE_STARTUP_TIMEOUT"
   echo "train_multi=$TRAIN_MULTI"
   echo "train_text=$TRAIN_TEXT"
   echo "benchmark=$SFT_BENCHMARK"
@@ -291,7 +300,7 @@ REF_PID=$!
     --host 127.0.0.1 \
     --port "$SFT_JUDGE_PORT" \
     --dtype bfloat16 \
-    --max-model-len 8192 \
+    --max-model-llen 8192 \
     --tensor-parallel-size 1 \
     --gpu-memory-utilization 0.70 \
     --max-num-seqs 8 \
@@ -306,7 +315,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for attempt in $(seq 1 120); do
+ref_deadline=$((SECONDS + SFT_REF_STARTUP_TIMEOUT))
+while (( SECONDS < ref_deadline )); do
   if ! kill -0 "$REF_PID" 2>/dev/null; then
     echo "reference server exited before becoming healthy: $REF_LOG" >&2
     exit 1
@@ -325,13 +335,14 @@ PY
     break
   fi
   sleep 2
-  if (( attempt == 120 )); then
-    echo "reference server failed to become healthy: $REF_LOG" >&2
-    exit 1
-  fi
 done
+if (( SECONDS >= ref_deadline )); then
+  echo "reference server failed to become healthy within ${SFT_REF_STARTUP_TIMEOUT}s: $REF_LOG" >&2
+  exit 1
+fi
 
-for attempt in $(seq 1 120); do
+judge_deadline=$((SECONDS + SFT_JUDGE_STARTUP_TIMEOUT))
+while (( SECONDS < judge_deadline )); do
   if ! kill -0 "$JUDGE_PID" 2>/dev/null; then
     echo "judge server exited before becoming healthy: $JUDGE_LOG" >&2
     exit 1
@@ -340,11 +351,11 @@ for attempt in $(seq 1 120); do
     break
   fi
   sleep 2
-  if (( attempt == 120 )); then
-    echo "judge server failed to become healthy: $JUDGE_LOG" >&2
-    exit 1
-  fi
 done
+if (( SECONDS >= judge_deadline )); then
+  echo "judge server failed to become healthy within ${SFT_JUDGE_STARTUP_TIMEOUT}s: $JUDGE_LOG" >&2
+  exit 1
+fi
 
 export SFT_JUDGE_URL="http://127.0.0.1:${SFT_JUDGE_PORT}"
 export WANDB_DIR="$LOG_ROOT/wandb"
