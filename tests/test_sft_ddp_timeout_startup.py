@@ -43,3 +43,11 @@ def test_timeout_patch_handles_positional_timeout() -> None:
     assert args[0] == "nccl"
     assert args[2] == minimum
     assert kwargs == {}
+
+
+def test_sft_launcher_exposes_repo_root_for_sitecustomize() -> None:
+    launcher = (ROOT / "scripts/dlc/start_sft.sh").read_text(encoding="utf-8")
+    env_script = (ROOT / "scripts/dlc/dlc_env.sh").read_text(encoding="utf-8")
+
+    assert 'source "$ROOT/scripts/dlc/dlc_env.sh"' in launcher
+    assert 'export PYTHONPATH="$QWEN3VL_ROOT:$PYTHON_USER_SITE' in env_script
