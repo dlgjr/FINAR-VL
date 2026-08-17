@@ -551,8 +551,17 @@ def _teacher_rollout_for_route(trainer, route: dict[str, Any], record: dict[str,
         raise RuntimeError("generation distillation does not support ring parallel")
     payload = None
     if world_size <= 1 or sp_rank == 0:
-        payload = _teacher_generate(record, data_file=data_file)
+        try:
+            payload = _teacher_generate(record, data_file=data_file)
+        except Exception as exc:
+            # If the SP leader raises before entering the broadcast, its partner
+            # would otherwise block forever in broadcast_object_list(). Broadcast
+            # the failure as data so every rank in the SP pair exits coherently.
+            payload = {"_finar_teacher_error": f"{type(exc).__name__}: {exc}"}
     payload = _broadcast_teacher(payload)
+    teacher_error = payload.pop("_finar_teacher_error", None)
+    if teacher_error:
+        raise RuntimeError(f"teacher generation failed on SP leader: {teacher_error}")
     payload["modality"] = str(route.get("modality") or "")
     payload["index"] = int(route.get("index", -1))
     payload["raw_index"] = int(route.get("raw_index", route.get("index", -1)))
