@@ -157,6 +157,17 @@ def _trace_steps() -> set[int]:
     return {int(value.strip()) for value in raw.split(",") if value.strip()}
 
 
+def _kl_tasks() -> frozenset[str]:
+    """返回需要走 KL retention 的精确 task 名；默认只启用 task == generation。"""
+    raw = os.environ.get("SFT_KL_TASKS", "generation")
+    return frozenset(value.strip() for value in raw.split(",") if value.strip())
+
+
+def use_kl_for_task(task: Any) -> bool:
+    """KL 路由只按 task 精确匹配，不按 family 或模糊 generation 类别扩展。"""
+    return str(task or "") in _kl_tasks()
+
+
 def _batch_metadata(inputs: dict[str, Any]) -> dict[str, Any]:
     import torch
 
@@ -347,6 +358,8 @@ class FinarNumericsCallback(TrainerCallback):
             should_trace = attempted_step in _trace_steps()
             trace_inputs = dict(inputs)
             metadata = _batch_metadata(trace_inputs)
+            metadata["task"] = getattr(trainer, "_finar_current_task", None)
+            metadata["use_kl"] = bool(getattr(trainer, "_finar_use_kl", False))
             sampler = getattr(trainer, "_finar_token_budget_sampler", None)
             sample_metadata = None
             if sampler is not None:
@@ -363,6 +376,8 @@ class FinarNumericsCallback(TrainerCallback):
                     "valid_labels": metadata.get("valid_labels"),
                     "ignored_labels": metadata.get("ignored_labels"),
                     "tensors": metadata.get("tensors", {}),
+                    "task": metadata.get("task"),
+                    "use_kl": metadata.get("use_kl"),
                     **(sample_metadata or {}),
                 }
             if should_trace:
@@ -746,14 +761,17 @@ class _PlanRuntimeTracker:
     def set_skip_batches(self, skip_batches: int) -> None:
         self.cursor = int(skip_batches)
 
+    def current_entry(self) -> dict[str, Any]:
+        if self.cursor >= len(self.entries):
+            raise AssertionError("rank-local plan cursor exhausted before training ended")
+        return self.entries[self.cursor]
+
     def consume(self, labels) -> None:
         if labels is None:
             raise AssertionError("planned SFT batch must contain labels")
         if getattr(labels, "ndim", None) != 2 or int(labels.shape[0]) != 1:
             raise AssertionError("sample plan actual accounting requires batch dimension 1")
-        if self.cursor >= len(self.entries):
-            raise AssertionError("rank-local plan cursor exhausted before training ended")
-        entry = self.entries[self.cursor]
+        entry = self.current_entry()
         token_count = int(labels.ne(-100).sum().item())
         _add_distribution(self.actual[int(entry["block"])], entry, token_count)
         self.cursor += 1
@@ -863,6 +881,16 @@ class FinarPlanCallback(TrainerCallback):
 
             def tracked_compute_loss(model, inputs, *compute_args, **compute_kwargs):
                 labels = inputs.get("labels")
+                entry = self._tracker.current_entry()
+                task = str(entry.get("task") or "")
+                trainer._finar_current_task = task
+                trainer._finar_use_kl = use_kl_for_task(task)
+                trainer._finar_kl_route = {
+                    "task": task,
+                    "use_kl": trainer._finar_use_kl,
+                    "modality": str(entry.get("modality") or ""),
+                    "index": int(entry.get("index", -1)),
+                }
                 result = original_compute_loss(model, inputs, *compute_args, **compute_kwargs)
                 loss = result[0] if isinstance(result, tuple) else result
                 if not math.isfinite(float(loss.item())):
