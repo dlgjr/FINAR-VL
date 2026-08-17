@@ -17,6 +17,20 @@ export TRAIN_TEXT="${TRAIN_TEXT:-$ROOT/data/train_text/train_text_sft_minhash_de
 export SFT_BENCHMARK="${SFT_BENCHMARK:-$ROOT/data/benchmark/my_benchmark/all.jsonl}"
 export NPROC_PER_NODE=6
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
+export SFT_REF_GPU="${SFT_REF_GPU:-6}"
+export SFT_REF_PORT="${SFT_REF_PORT:-8003}"
+export SFT_REF_MODEL="${SFT_REF_MODEL:-$BASE_MODEL}"
+export SFT_REF_SERVED_MODEL="${SFT_REF_SERVED_MODEL:-qwen4-ref}"
+export SFT_REF_URL="http://127.0.0.1:${SFT_REF_PORT}"
+export SFT_REF_ALLOWED_MEDIA_PATH="${SFT_REF_ALLOWED_MEDIA_PATH:-$ROOT}"
+export SFT_REF_MAX_MODEL_LEN="${SFT_REF_MAX_MODEL_LEN:-49152}"
+export SFT_REF_MAX_NUM_SEQS="${SFT_REF_MAX_NUM_SEQS:-8}"
+export SFT_REF_GPU_MEMORY_UTILIZATION="${SFT_REF_GPU_MEMORY_UTILIZATION:-0.85}"
+export SFT_REF_REQUEST_TIMEOUT="${SFT_REF_REQUEST_TIMEOUT:-600}"
+export SFT_KL_BETA="${SFT_KL_BETA:-1.0}"
+export SFT_TEACHER_MAX_TOKENS="${SFT_TEACHER_MAX_TOKENS:-512}"
+export SFT_TEACHER_TEMPERATURE="${SFT_TEACHER_TEMPERATURE:-1.0}"
+export SFT_TEACHER_TOP_P="${SFT_TEACHER_TOP_P:-1.0}"
 export SFT_JUDGE_GPUS=7
 export SFT_JUDGE_PORT="${SFT_JUDGE_PORT:-8002}"
 export NNODES="$NODE_WORLD_SIZE"
@@ -32,10 +46,23 @@ export SFT_FREEZE_LLM="${SFT_FREEZE_LLM:-false}"
 export SFT_VIT_GRADIENT_CHECKPOINTING="${SFT_VIT_GRADIENT_CHECKPOINTING:-false}"
 export SFT_SEQUENCE_PARALLEL_SIZE="${SFT_SEQUENCE_PARALLEL_SIZE:-2}"
 export SFT_GRAD_ACC="${SFT_GRAD_ACC:-5}"
-export SFT_LEARNING_RATE="${SFT_LEARNING_RATE:-3e-6}"
-export SFT_KL_TASKS="${SFT_KL_TASKS:-generation}"
+export SFT_LEARNING_RATE="${SFT_LEARNING_RATE:-5e-6}"
+# Retention/distillation is intentionally restricted to the exact task name "generation".
+export SFT_KL_TASKS=generation
 if (( NPROC_PER_NODE % SFT_SEQUENCE_PARALLEL_SIZE != 0 )); then
   echo "NPROC_PER_NODE=$NPROC_PER_NODE must be divisible by SFT_SEQUENCE_PARALLEL_SIZE=$SFT_SEQUENCE_PARALLEL_SIZE" >&2
+  exit 1
+fi
+if [[ ",$CUDA_VISIBLE_DEVICES," == *",$SFT_REF_GPU,"* ]]; then
+  echo "SFT_REF_GPU=$SFT_REF_GPU overlaps training CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES" >&2
+  exit 1
+fi
+if [[ "$SFT_REF_GPU" == "$SFT_JUDGE_GPUS" ]]; then
+  echo "SFT_REF_GPU=$SFT_REF_GPU must differ from SFT_JUDGE_GPUS=$SFT_JUDGE_GPUS" >&2
+  exit 1
+fi
+if [[ "$SFT_REF_PORT" == "$SFT_JUDGE_PORT" ]]; then
+  echo "SFT_REF_PORT=$SFT_REF_PORT must differ from SFT_JUDGE_PORT=$SFT_JUDGE_PORT" >&2
   exit 1
 fi
 export SFT_DP_WORLD_SIZE=$(((NPROC_PER_NODE / SFT_SEQUENCE_PARALLEL_SIZE) * NODE_WORLD_SIZE))
@@ -75,6 +102,7 @@ else
 fi
 RUN_DIR="${SFT_OUTPUT_DIR:-$ROOT/output/sft/$RUN_ID}"
 LOG_DIR="$ROOT/logs/sft/$RUN_ID"
+REF_LOG="$LOG_DIR/reference_node_${NODE_RANK}.log"
 JUDGE_LOG="$LOG_DIR/judge_node_${NODE_RANK}.log"
 WANDB_READY_FILE="$RUN_SYNC_DIR/${RUN_ID}.wandb_ready"
 WANDB_ERROR_FILE="$RUN_SYNC_DIR/${RUN_ID}.wandb_error"
@@ -140,6 +168,7 @@ PY
 NORMALIZED_DATA_DIR="$TMPDIR/train_data"
 NORMALIZED_TRAIN_MULTI="$NORMALIZED_DATA_DIR/train_multi.jsonl"
 NORMALIZED_TRAIN_TEXT="$NORMALIZED_DATA_DIR/train_text.jsonl"
+export NORMALIZED_TRAIN_MULTI NORMALIZED_TRAIN_TEXT
 mkdir -p "$NORMALIZED_DATA_DIR"
 cp -- "$TRAIN_MULTI" "$NORMALIZED_TRAIN_MULTI"
 "$PYTHON_BIN" "$ROOT/scripts/data/normalize_train_multi_sft_format.py" "$NORMALIZED_TRAIN_MULTI"
@@ -206,6 +235,7 @@ PY
 if (( NODE_RANK == 0 )); then
   echo "===== SFT DLC CONFIG ====="
   echo "model=$BASE_MODEL"
+  echo "reference_model=$SFT_REF_MODEL reference_gpu=$SFT_REF_GPU reference_port=$SFT_REF_PORT"
   echo "judge_model=$JUDGE_MODEL"
   echo "judge_port=$SFT_JUDGE_PORT"
   echo "train_multi=$TRAIN_MULTI"
@@ -214,10 +244,10 @@ if (( NODE_RANK == 0 )); then
   echo "max_steps=from_sample_plan max_length=49152 global_batch=$SFT_GLOBAL_BATCH_SIZE per_device_batch=1 grad_accum=$SFT_GRAD_ACC"
   echo "tuner=full"
   echo "learning_rate=$SFT_LEARNING_RATE scheduler=cosine warmup_ratio=0.05 max_grad_norm=1.0"
-  echo "kl_tasks=$SFT_KL_TASKS"
+  echo "kl_tasks=$SFT_KL_TASKS kl_beta=$SFT_KL_BETA teacher_temperature=$SFT_TEACHER_TEMPERATURE teacher_top_p=$SFT_TEACHER_TOP_P teacher_max_tokens=$SFT_TEACHER_MAX_TOKENS"
   echo "eval_step0=true eval_steps=$SFT_EVAL_STEPS save_steps=$SFT_SAVE_STEPS"
   echo "pass_at_1=greedy pass_at_8_temperature=$SFT_PASS_AT_8_TEMPERATURE"
-  echo "training_gpus_per_node=$NPROC_PER_NODE judge_gpus_per_node=1 nodes=$NODE_WORLD_SIZE"
+  echo "training_gpus_per_node=$NPROC_PER_NODE reference_gpus_per_node=1 judge_gpus_per_node=1 nodes=$NODE_WORLD_SIZE"
   echo "training_topology=sequence_parallel:$SFT_SEQUENCE_PARALLEL_SIZE,data_parallel:$SFT_DP_WORLD_SIZE deepspeed=zero2"
   echo "freeze_vit=$SFT_FREEZE_VIT freeze_aligner=$SFT_FREEZE_ALIGNER freeze_llm=$SFT_FREEZE_LLM vit_gradient_checkpointing=$SFT_VIT_GRADIENT_CHECKPOINTING"
   echo "wandb_project=$WANDB_PROJECT run_dir=$RUN_DIR"
@@ -229,6 +259,27 @@ if (( NODE_RANK == 0 )); then
   echo "cache_probe=fchmod_ok"
   echo "wandb_mode=$WANDB_MODE $WANDB_INFO"
 fi
+
+(
+  export CUDA_VISIBLE_DEVICES="$SFT_REF_GPU"
+  export WANDB_DISABLED=true
+  export WANDB_MODE=disabled
+  exec "$PYTHON_BIN" -m vllm.entrypoints.openai.api_server \
+    --model "$SFT_REF_MODEL" \
+    --served-model-name "$SFT_REF_SERVED_MODEL" \
+    --host 127.0.0.1 \
+    --port "$SFT_REF_PORT" \
+    --dtype bfloat16 \
+    --max-model-len "$SFT_REF_MAX_MODEL_LEN" \
+    --tensor-parallel-size 1 \
+    --gpu-memory-utilization "$SFT_REF_GPU_MEMORY_UTILIZATION" \
+    --max-num-seqs "$SFT_REF_MAX_NUM_SEQS" \
+    --max-logprobs 1 \
+    --allowed-local-media-path "$SFT_REF_ALLOWED_MEDIA_PATH" \
+    --enforce-eager \
+    --generation-config vllm
+) >"$REF_LOG" 2>&1 &
+REF_PID=$!
 
 (
   export CUDA_VISIBLE_DEVICES="$SFT_JUDGE_GPUS"
@@ -249,10 +300,42 @@ fi
     --generation-config vllm
 ) >"$JUDGE_LOG" 2>&1 &
 JUDGE_PID=$!
-cleanup() { kill "$JUDGE_PID" 2>/dev/null || true; }
+cleanup() {
+  kill "$JUDGE_PID" 2>/dev/null || true
+  kill "$REF_PID" 2>/dev/null || true
+}
 trap cleanup EXIT
 
 for attempt in $(seq 1 120); do
+  if ! kill -0 "$REF_PID" 2>/dev/null; then
+    echo "reference server exited before becoming healthy: $REF_LOG" >&2
+    exit 1
+  fi
+  if "$PYTHON_BIN" - "$SFT_REF_URL" "$SFT_REF_SERVED_MODEL" <<'PY' >/dev/null 2>&1
+import json
+import sys
+import urllib.request
+
+base, wanted = sys.argv[1:]
+with urllib.request.urlopen(base.rstrip('/') + '/v1/models', timeout=2) as response:
+    payload = json.load(response)
+raise SystemExit(0 if any(str(item.get('id', '')) == wanted for item in payload.get('data', [])) else 1)
+PY
+  then
+    break
+  fi
+  sleep 2
+  if (( attempt == 120 )); then
+    echo "reference server failed to become healthy: $REF_LOG" >&2
+    exit 1
+  fi
+done
+
+for attempt in $(seq 1 120); do
+  if ! kill -0 "$JUDGE_PID" 2>/dev/null; then
+    echo "judge server exited before becoming healthy: $JUDGE_LOG" >&2
+    exit 1
+  fi
   if "$PYTHON_BIN" -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${SFT_JUDGE_PORT}/health', timeout=2)" >/dev/null 2>&1; then
     break
   fi
