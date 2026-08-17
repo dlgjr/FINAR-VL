@@ -15,8 +15,8 @@ export JUDGE_MODEL="${JUDGE_MODEL:-/mnt/nas/bihaoran/model/qwen30}"
 export TRAIN_MULTI="${TRAIN_MULTI:-$ROOT/data/train_multi/train_multi_sft_minhash_dedup.jsonl}"
 export TRAIN_TEXT="${TRAIN_TEXT:-$ROOT/data/train_text/train_text_sft_minhash_dedup.jsonl}"
 export SFT_BENCHMARK="${SFT_BENCHMARK:-$ROOT/data/benchmark/my_benchmark/all.jsonl}"
-export NPROC_PER_NODE=7
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6
+export NPROC_PER_NODE=6
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
 export SFT_JUDGE_GPUS=7
 export SFT_JUDGE_PORT="${SFT_JUDGE_PORT:-8002}"
 export NNODES="$NODE_WORLD_SIZE"
@@ -30,8 +30,14 @@ export SFT_FREEZE_VIT="${SFT_FREEZE_VIT:-true}"
 export SFT_FREEZE_ALIGNER="${SFT_FREEZE_ALIGNER:-false}"
 export SFT_FREEZE_LLM="${SFT_FREEZE_LLM:-false}"
 export SFT_VIT_GRADIENT_CHECKPOINTING="${SFT_VIT_GRADIENT_CHECKPOINTING:-false}"
-export SFT_GRAD_ACC="${SFT_GRAD_ACC:-2}"
-export SFT_DP_WORLD_SIZE=$((NPROC_PER_NODE * NODE_WORLD_SIZE))
+export SFT_SEQUENCE_PARALLEL_SIZE="${SFT_SEQUENCE_PARALLEL_SIZE:-2}"
+export SFT_GRAD_ACC="${SFT_GRAD_ACC:-5}"
+export SFT_LEARNING_RATE="${SFT_LEARNING_RATE:-3e-6}"
+if (( NPROC_PER_NODE % SFT_SEQUENCE_PARALLEL_SIZE != 0 )); then
+  echo "NPROC_PER_NODE=$NPROC_PER_NODE must be divisible by SFT_SEQUENCE_PARALLEL_SIZE=$SFT_SEQUENCE_PARALLEL_SIZE" >&2
+  exit 1
+fi
+export SFT_DP_WORLD_SIZE=$(((NPROC_PER_NODE / SFT_SEQUENCE_PARALLEL_SIZE) * NODE_WORLD_SIZE))
 export SFT_GLOBAL_BATCH_SIZE=$((SFT_DP_WORLD_SIZE * 1 * SFT_GRAD_ACC))
 export SFT_PLAN_SEED="${SFT_PLAN_SEED:-42}"
 export SFT_MULTI_RATIO="${SFT_MULTI_RATIO:-0.40}"
@@ -204,12 +210,12 @@ if (( NODE_RANK == 0 )); then
   echo "train_text=$TRAIN_TEXT"
   echo "benchmark=$SFT_BENCHMARK"
   echo "max_steps=from_sample_plan max_length=49152 global_batch=$SFT_GLOBAL_BATCH_SIZE per_device_batch=1 grad_accum=$SFT_GRAD_ACC"
-  echo "tuner=lora rank=16 alpha=32 dropout=0.05 target_modules=all-linear"
-  echo "learning_rate=1e-5 scheduler=cosine warmup_ratio=0.05 max_grad_norm=1.0"
+  echo "tuner=full"
+  echo "learning_rate=$SFT_LEARNING_RATE scheduler=cosine warmup_ratio=0.05 max_grad_norm=1.0"
   echo "eval_step0=true eval_steps=$SFT_EVAL_STEPS save_steps=$SFT_SAVE_STEPS"
   echo "pass_at_1=greedy pass_at_8_temperature=$SFT_PASS_AT_8_TEMPERATURE"
-  echo "training_gpus_per_node=7 judge_gpus_per_node=1 nodes=$NODE_WORLD_SIZE"
-  echo "training_topology=sequence_parallel:1,data_parallel:$SFT_DP_WORLD_SIZE deepspeed=zero2"
+  echo "training_gpus_per_node=$NPROC_PER_NODE judge_gpus_per_node=1 nodes=$NODE_WORLD_SIZE"
+  echo "training_topology=sequence_parallel:$SFT_SEQUENCE_PARALLEL_SIZE,data_parallel:$SFT_DP_WORLD_SIZE deepspeed=zero2"
   echo "freeze_vit=$SFT_FREEZE_VIT freeze_aligner=$SFT_FREEZE_ALIGNER freeze_llm=$SFT_FREEZE_LLM vit_gradient_checkpointing=$SFT_VIT_GRADIENT_CHECKPOINTING"
   echo "wandb_project=$WANDB_PROJECT run_dir=$RUN_DIR"
   echo "local_cache_root=$LOCAL_CACHE_ROOT"
@@ -305,14 +311,10 @@ echo "sample_plan_dir=$SFT_PLAN_DIR epochs=$SFT_EPOCHS max_steps=$SFT_MAX_STEPS"
   --dataset_shuffle false \
   --train_dataloader_shuffle false \
   --strict false \
-  --tuner_type lora \
+  --tuner_type full \
   --freeze_vit "$SFT_FREEZE_VIT" \
   --freeze_aligner "$SFT_FREEZE_ALIGNER" \
   --freeze_llm "$SFT_FREEZE_LLM" \
-  --target_modules all-linear \
-  --lora_rank 16 \
-  --lora_alpha 32 \
-  --lora_dropout 0.05 \
   --torch_dtype bfloat16 \
   --attn_impl flash_attn \
   --deepspeed zero2 \
@@ -320,13 +322,13 @@ echo "sample_plan_dir=$SFT_PLAN_DIR epochs=$SFT_EPOCHS max_steps=$SFT_MAX_STEPS"
   --gradient_accumulation_steps "$SFT_GRAD_ACC" \
   --gradient_checkpointing true \
   --vit_gradient_checkpointing "$SFT_VIT_GRADIENT_CHECKPOINTING" \
-  --sequence_parallel_size 1 \
+  --sequence_parallel_size "$SFT_SEQUENCE_PARALLEL_SIZE" \
   --use_logits_to_keep true \
   --ddp_timeout 86400 \
   --max_length 49152 \
   --truncation_strategy delete \
   --max_steps "$SFT_MAX_STEPS" \
-  --learning_rate 1e-5 \
+  --learning_rate "$SFT_LEARNING_RATE" \
   --lr_scheduler_type cosine \
   --warmup_ratio 0.05 \
   --max_grad_norm 1.0 \
