@@ -96,7 +96,8 @@ for required in \
   "$SFT_BENCHMARK" \
   "$ROOT/scripts/data/normalize_train_multi_sft_format.py" \
   "$ROOT/scripts/data/normalize_train_text_schema.py" \
-  "$ROOT/scripts/sft/swift_sft_plugin.py"; do
+  "$ROOT/scripts/sft/swift_sft_plugin.py" \
+  "$ROOT/scripts/sft/kl_retention_plugin.py"; do
   test -f "$required" || { echo "missing required file: $required" >&2; exit 1; }
 done
 if [[ -x "$SWIFT_BIN" ]]; then
@@ -342,8 +343,8 @@ echo "sample_plan_dir=$SFT_PLAN_DIR epochs=$SFT_EPOCHS max_steps=$SFT_MAX_STEPS"
   --save_only_model true \
   --report_to wandb \
   --run_name "$RUN_ID" \
-  --external_plugins "$ROOT/scripts/sft/swift_sft_plugin.py" \
-  --callbacks finar_log finar_numerics finar_pass_at_8 finar_plan \
+  --external_plugins "$ROOT/scripts/sft/swift_sft_plugin.py" "$ROOT/scripts/sft/kl_retention_plugin.py" \
+  --callbacks finar_log finar_kl finar_numerics finar_pass_at_8 finar_plan \
   --dataset_num_proc "$SFT_DATASET_NUM_PROC" \
   --dataloader_num_workers "$SFT_DATALOADER_NUM_WORKERS" \
   --output_dir "$RUN_DIR"
