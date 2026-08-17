@@ -296,6 +296,42 @@ def _barrier(dist: Any) -> None:
         dist.barrier()
 
 
+def _eval_sync_timeout() -> float:
+    raw = os.environ.get("SFT_EVAL_SYNC_TIMEOUT", "7200")
+    try:
+        timeout = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"SFT_EVAL_SYNC_TIMEOUT must be numeric, got {raw!r}") from exc
+    if timeout <= 0:
+        raise ValueError(f"SFT_EVAL_SYNC_TIMEOUT must be positive, got {timeout}")
+    return timeout
+
+
+def _wait_for_rank_markers(done_dir: Path, *, rank: int, world_size: int) -> None:
+    """用共享文件承担长尾等待，避免先完成的 rank 长时间占住 NCCL collective。"""
+    done_dir.mkdir(parents=True, exist_ok=True)
+    marker = done_dir / f"rank_{rank:04d}.done"
+    marker.write_text(f"{time.time():.6f}\n", encoding="utf-8")
+    deadline = time.monotonic() + _eval_sync_timeout()
+    while True:
+        missing = [
+            other_rank
+            for other_rank in range(world_size)
+            if not (done_dir / f"rank_{other_rank:04d}.done").exists()
+        ]
+        if not missing:
+            return
+        if time.monotonic() >= deadline:
+            preview = ",".join(str(value) for value in missing[:16])
+            suffix = "..." if len(missing) > 16 else ""
+            raise TimeoutError(
+                "timed out waiting for SFT evaluation ranks via shared files: "
+                f"rank={rank} world_size={world_size} missing={preview}{suffix} "
+                f"timeout={_eval_sync_timeout():.1f}s"
+            )
+        time.sleep(1.0)
+
+
 def _broadcast_metrics(metrics: dict[str, Any] | None, dist: Any) -> dict[str, Any]:
     if dist is None:
         return metrics or {}
@@ -577,11 +613,15 @@ def run_distributed_evaluation(
     max_samples: int | None,
 ) -> dict[str, Any]:
     """在当前训练权重上评估；每个 rank 动态领取细粒度任务。"""
-    rank, _, dist = _dist_state()
+    rank, world_size, dist = _dist_state()
     step_dir = output_dir / f"step-{step:06d}"
     queue_dir = step_dir / "queue"
+    done_dir = step_dir / "done"
     status_path = step_dir / "status" / f"rank_{rank:04d}.json"
     if rank == 0:
+        done_dir.mkdir(parents=True, exist_ok=True)
+        for stale_marker in done_dir.glob("rank_*.done"):
+            stale_marker.unlink()
         rows = load_benchmark(benchmark_path, project_root)
         if max_samples is not None:
             rows = sorted(rows, key=lambda item: (-len(item["image_paths"]), item["sample_id"]))[:max_samples]
@@ -600,6 +640,8 @@ def run_distributed_evaluation(
                     "pass_at_1_samples": 1,
                     "pass_at_8_samples": 8,
                     "fixed_seed_across_checkpoints": True,
+                    "eval_sync": "shared_files_then_short_barrier",
+                    "eval_sync_timeout_seconds": _eval_sync_timeout(),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -654,6 +696,7 @@ def run_distributed_evaluation(
     finally:
         if was_training:
             model.train()
+    _wait_for_rank_markers(done_dir, rank=rank, world_size=world_size)
     _barrier(dist)
     metrics: dict[str, Any] | None = None
     if rank == 0:
