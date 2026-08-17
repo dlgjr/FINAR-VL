@@ -44,6 +44,7 @@ def test_dlc_launcher_uses_full_sft_sp2_and_dedicated_reference_gpu():
         '--train-text "$NORMALIZED_TRAIN_TEXT"',
         "--dataset_shuffle false",
         "--train_dataloader_shuffle false",
+        "--lazy_tokenize false",
         '"$ROOT/scripts/sft/sample_plan.py"',
         '--epochs "$SFT_EPOCHS"',
         '--max-steps "$SFT_MAX_STEPS"',
