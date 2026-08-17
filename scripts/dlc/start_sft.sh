@@ -15,6 +15,8 @@ export JUDGE_MODEL="${JUDGE_MODEL:-/mnt/nas/bihaoran/model/qwen30}"
 export TRAIN_MULTI="${TRAIN_MULTI:-$ROOT/data/train_multi/train_multi_sft_minhash_dedup.jsonl}"
 export TRAIN_TEXT="${TRAIN_TEXT:-$ROOT/data/train_text/train_text_sft_minhash_dedup.jsonl}"
 export SFT_BENCHMARK="${SFT_BENCHMARK:-$ROOT/data/benchmark/my_benchmark/all.jsonl}"
+export SFT_MULTI_MEDIA_ROOT="${SFT_MULTI_MEDIA_ROOT:-$(cd "$(dirname "$TRAIN_MULTI")" && pwd -P)}"
+export ROOT_IMAGE_DIR="${ROOT_IMAGE_DIR:-$SFT_MULTI_MEDIA_ROOT}"
 export NPROC_PER_NODE=6
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
 export SFT_REF_GPU="${SFT_REF_GPU:-6}"
@@ -137,6 +139,8 @@ for required in \
   "$ROOT/scripts/sft/kl_retention_plugin.py"; do
   test -f "$required" || { echo "missing required file: $required" >&2; exit 1; }
 done
+test -d "$ROOT_IMAGE_DIR" || { echo "missing ROOT_IMAGE_DIR: $ROOT_IMAGE_DIR" >&2; exit 1; }
+cd "$ROOT_IMAGE_DIR"
 if [[ -x "$SWIFT_BIN" ]]; then
   SWIFT_CMD=("$SWIFT_BIN")
 elif "$PYTHON_BIN" -c 'import swift' >/dev/null 2>&1; then
@@ -250,6 +254,7 @@ if (( NODE_RANK == 0 )); then
   echo "train_multi=$TRAIN_MULTI"
   echo "train_text=$TRAIN_TEXT"
   echo "benchmark=$SFT_BENCHMARK"
+  echo "multi_media_root=$SFT_MULTI_MEDIA_ROOT root_image_dir=$ROOT_IMAGE_DIR"
   echo "max_steps=from_sample_plan max_length=49152 global_batch=$SFT_GLOBAL_BATCH_SIZE per_device_batch=1 grad_accum=$SFT_GRAD_ACC"
   echo "tuner=full"
   echo "learning_rate=$SFT_LEARNING_RATE scheduler=cosine warmup_ratio=0.05 max_grad_norm=1.0"
