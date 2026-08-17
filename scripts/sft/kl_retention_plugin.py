@@ -237,9 +237,12 @@ def _jsonl_record(path: Path, index: int) -> dict[str, Any]:
 
 def _route_record(route: dict[str, Any]) -> tuple[dict[str, Any], Path]:
     modality = str(route.get("modality") or "")
-    index = int(route.get("index", -1))
+    # `index` is the post-filter dataset index used by the training dataloader.
+    # Re-reading the normalized JSONL must use the original non-empty-line index,
+    # otherwise any max-length/encoding deletion before this row shifts the teacher prompt.
+    raw_index = int(route.get("raw_index", route.get("index", -1)))
     path = _data_file_for_modality(modality)
-    return _jsonl_record(path, index), path
+    return _jsonl_record(path, raw_index), path
 
 
 def _local_image_uri(value: str, *, data_file: Path) -> str:
@@ -293,9 +296,10 @@ def _content_with_images(text: str, image_urls: list[str]) -> list[dict[str, Any
         if text:
             parts.append({"type": "text", "text": text})
 
-    while image_index < len(image_urls):
-        parts.insert(0, {"type": "image_url", "image_url": {"url": image_urls[image_index]}})
-        image_index += 1
+    # Preserve source image order if a record contains more images than explicit
+    # placeholders. The previous insert-at-zero loop reversed these extras.
+    for url in image_urls[image_index:]:
+        parts.append({"type": "image_url", "image_url": {"url": url}})
     return parts
 
 
@@ -551,6 +555,7 @@ def _teacher_rollout_for_route(trainer, route: dict[str, Any], record: dict[str,
     payload = _broadcast_teacher(payload)
     payload["modality"] = str(route.get("modality") or "")
     payload["index"] = int(route.get("index", -1))
+    payload["raw_index"] = int(route.get("raw_index", route.get("index", -1)))
     return payload
 
 
@@ -641,6 +646,7 @@ def _generation_distill_loss(model, trainer, route: dict[str, Any], *, return_ou
         "task": "generation",
         "modality": str(route.get("modality") or ""),
         "index": int(route.get("index", -1)),
+        "raw_index": int(route.get("raw_index", route.get("index", -1))),
         "teacher_tokens": len(teacher["token_ids"]),
         "matched_teacher_tokens": int(matched_tokens),
         "local_tokens": int(local_token_count.item()),
@@ -675,6 +681,7 @@ def _current_route_from_plan(trainer) -> tuple[str, bool, dict[str, Any]]:
             "use_kl": bool(use_kl),
             "modality": str(entry.get("modality") or ""),
             "index": int(entry.get("index", -1)),
+            "raw_index": int(entry.get("raw_index", entry.get("index", -1))),
         }
         return task, bool(use_kl), route
 
@@ -683,6 +690,7 @@ def _current_route_from_plan(trainer) -> tuple[str, bool, dict[str, Any]]:
     route = dict(getattr(trainer, "_finar_kl_route", {}) or {})
     route.setdefault("task", task)
     route.setdefault("use_kl", use_kl)
+    route.setdefault("raw_index", route.get("index", -1))
     return task, use_kl, route
 
 
