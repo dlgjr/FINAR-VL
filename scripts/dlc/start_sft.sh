@@ -397,6 +397,7 @@ echo "sample_plan_dir=$SFT_PLAN_DIR epochs=$SFT_EPOCHS max_steps=$SFT_MAX_STEPS"
   --dataset_shuffle false \
   --train_dataloader_shuffle false \
   --strict false \
+  --lazy_tokenize false \
   --tuner_type full \
   --freeze_vit "$SFT_FREEZE_VIT" \
   --freeze_aligner "$SFT_FREEZE_ALIGNER" \
