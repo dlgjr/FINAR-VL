@@ -3,6 +3,7 @@ import json
 import scripts.sft.kl_retention_plugin as kl_plugin
 from scripts.sft.kl_retention_plugin import (
     _content_with_images,
+    _local_image_uri,
     _replace_assistant_with_teacher,
 )
 
@@ -28,6 +29,23 @@ def test_multimodal_teacher_content_keeps_extra_images_in_source_order():
     )
     urls = [part["image_url"]["url"] for part in parts if part["type"] == "image_url"]
     assert urls == ["file:///tmp/a.png", "file:///tmp/b.png", "file:///tmp/c.png"]
+
+
+def test_teacher_relative_image_falls_back_to_current_media_root(monkeypatch, tmp_path):
+    media_root = tmp_path / "train_multi"
+    image = media_root / "assets" / "chart_qa" / "12814.png"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"fake-image-bytes")
+
+    normalized = tmp_path / "runtime" / "train_data" / "train_multi.jsonl"
+    normalized.parent.mkdir(parents=True)
+    normalized.write_text("{}\n", encoding="utf-8")
+
+    monkeypatch.setenv("QWEN3VL_ROOT", str(tmp_path / "repo-root-without-assets"))
+    monkeypatch.setenv("SFT_REF_ALLOWED_MEDIA_PATH", str(tmp_path))
+    monkeypatch.chdir(media_root)
+
+    assert _local_image_uri("assets/chart_qa/12814.png", data_file=normalized) == image.resolve().as_uri()
 
 
 def test_teacher_response_replaces_dataset_assistant_answer():
