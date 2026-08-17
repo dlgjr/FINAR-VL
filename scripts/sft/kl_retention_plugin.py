@@ -141,7 +141,7 @@ def _start_reference_server(trainer) -> None:
         "--dtype",
         "bfloat16",
         "--max-model-len",
-        str(_env_int("SFT_REF_MAX_MODEL_LEN", 49152)),
+        str(_env_int("SFT_REF_MAX_MODEL_LEN", 49153)),
         "--tensor-parallel-size",
         "1",
         "--gpu-memory-utilization",
@@ -230,14 +230,11 @@ def _sp_state():
 
 
 def _gather_rolled_labels(local_labels):
-    """Undo only the SP split; labels remain in ms-swift's already-shifted form.
+    """Undo only the SP split; labels remain in ms-swift's shifted form.
 
     ms-swift sequence parallel prepares SFT labels as:
       pad -> roll(-1) -> split(SP)
-    The model logits on each SP rank are aligned directly with these rolled
-    labels. Gathering reconstructs the full rolled label sequence, which lets
-    SP rank 0 map every supervised prediction position to the corresponding
-    base-model prompt token position (+1).
+    The model logits on each SP rank align directly with these rolled labels.
     """
     sequence_parallel, world_size, _, rp_world_size, _ = _sp_state()
     if world_size <= 1:
@@ -305,12 +302,6 @@ def _reference_logps_for_local_labels(input_ids, local_labels):
     valid = local_global_positions.lt(max(0, input_length - 1))
     local_prediction_positions = local_prediction_positions[valid]
     local_global_positions = local_global_positions[valid]
-    if local_prediction_positions.numel() == 0:
-        # A generation answer may live entirely on the partner SP rank. Return
-        # empty tensors and later create a differentiable zero local loss.
-        return local_prediction_positions, local_labels.new_empty((0,), dtype=torch.long), torch.empty(
-            0, dtype=torch.float32, device=input_ids.device
-        )
 
     target_ids = local_labels[0].index_select(0, local_prediction_positions).long()
     reference_logps = reference_by_prediction_position.index_select(0, local_global_positions.long())
@@ -344,7 +335,7 @@ def _generation_kl_loss(model, inputs: dict[str, Any], trainer, *, return_output
 
     local_prediction_positions, target_ids, reference_logps = _reference_logps_for_local_labels(input_ids, labels)
 
-    # Do not pass labels: generation batches must have exactly zero CE term.
+    # Do not pass labels: generation batches have exactly zero CE term.
     allowed_keys = {
         "input_ids",
         "attention_mask",
@@ -359,44 +350,43 @@ def _generation_kl_loss(model, inputs: dict[str, Any], trainer, *, return_output
     }
     forward_inputs = {key: value for key, value in inputs.items() if key in allowed_keys}
     forward_inputs["use_cache"] = False
+    # Qwen3-VL applies this after ms-swift splits hidden states for the SP rank.
+    # Passing an empty tensor is intentional: every SP rank must still execute
+    # the forward/attention collectives even if its half has zero assistant tokens.
+    forward_inputs["logits_to_keep"] = local_prediction_positions
+    outputs = model(**forward_inputs)
+    logits = getattr(outputs, "logits", None)
+    if logits is None and isinstance(outputs, (tuple, list)) and outputs:
+        logits = outputs[0]
+    if not torch.is_tensor(logits):
+        raise RuntimeError("generation KL forward did not return logits")
+    if logits.ndim != 3 or int(logits.shape[0]) != 1 or int(logits.shape[1]) != int(target_ids.numel()):
+        raise RuntimeError(
+            "generation KL logits/label alignment mismatch: "
+            f"logits={tuple(logits.shape)} targets={int(target_ids.numel())}"
+        )
 
-    # Qwen3-VL applies logits_to_keep after ms-swift has split hidden states for
-    # this SP rank, so these are local prediction positions, not global ones.
-    if local_prediction_positions.numel() > 0:
-        forward_inputs["logits_to_keep"] = local_prediction_positions
-        outputs = model(**forward_inputs)
-        logits = getattr(outputs, "logits", None)
-        if logits is None and isinstance(outputs, (tuple, list)) and outputs:
-            logits = outputs[0]
-        if not torch.is_tensor(logits):
-            raise RuntimeError("generation KL forward did not return logits")
-        if logits.ndim != 3 or int(logits.shape[0]) != 1 or int(logits.shape[1]) != int(target_ids.numel()):
-            raise RuntimeError(
-                "generation KL logits/label alignment mismatch: "
-                f"logits={tuple(logits.shape)} targets={int(target_ids.numel())}"
-            )
+    if target_ids.numel() > 0:
         student_logps = F.log_softmax(logits[0].float(), dim=-1).gather(1, target_ids[:, None]).squeeze(1)
         if student_logps.shape != reference_logps.shape:
             raise RuntimeError(
                 "generation KL student/reference shape mismatch: "
                 f"{tuple(student_logps.shape)} vs {tuple(reference_logps.shape)}"
             )
+        # Same k3 form commonly used for GRPO reference KL.
         log_ratio = (reference_logps.detach() - student_logps).clamp(min=-20.0, max=20.0)
         per_token_kl = torch.exp(log_ratio) - log_ratio - 1.0
         local_kl_sum = per_token_kl.sum()
         local_token_count = torch.tensor(float(per_token_kl.numel()), device=local_kl_sum.device)
     else:
-        # Keep this rank in the same collective path even when all assistant
-        # tokens fell on its SP partner. The zero remains connected to student
-        # parameters so backward is valid on every rank.
-        anchor = next(parameter for parameter in model.parameters() if parameter.requires_grad)
-        local_kl_sum = anchor.reshape(-1)[0] * 0.0
-        local_token_count = torch.zeros((), dtype=torch.float32, device=anchor.device)
-        outputs = None
+        # logits.sum() keeps the zero connected to this rank's forward graph.
+        local_kl_sum = logits.float().sum() * 0.0
+        local_token_count = torch.zeros((), dtype=torch.float32, device=logits.device)
 
-    # Each SP rank sees only its local assistant tokens. Convert the local sum
-    # to a global per-sample mean while preserving gradients on the local sum.
-    sequence_parallel, world_size, _, _, _ = _sp_state()
+    # Normalize over all assistant tokens in this unique SP sample. ms-swift's
+    # own GatherLoss multiplies SP gradients by world size to compensate rank
+    # averaging; do the same for this custom scalar loss.
+    sequence_parallel, world_size, sp_world_size, _, _ = _sp_state()
     total_token_count = local_token_count.detach().clone()
     if world_size > 1:
         import torch.distributed as dist
@@ -405,10 +395,7 @@ def _generation_kl_loss(model, inputs: dict[str, Any], trainer, *, return_output
     if float(total_token_count.item()) <= 0:
         raise RuntimeError("task=generation produced zero KL tokens across the SP group")
 
-    # DDP/DeepSpeed will aggregate gradients from all SP ranks. Multiplying by
-    # SP world size compensates its rank averaging so the resulting gradient is
-    # the gradient of the mean KL over the unique sample's assistant tokens.
-    sp_scale = float(int(getattr(sequence_parallel, "sp_world_size", 1) or 1)) if world_size > 1 else 1.0
+    sp_scale = float(sp_world_size if world_size > 1 else 1)
     beta = _env_float("SFT_KL_BETA", 1.0)
     loss = local_kl_sum * (sp_scale / total_token_count) * beta
 
@@ -423,6 +410,27 @@ def _generation_kl_loss(model, inputs: dict[str, Any], trainer, *, return_output
     return (loss, outputs) if return_outputs else loss
 
 
+def _current_task_from_plan(trainer) -> tuple[str, bool]:
+    """Read the current task directly from the plan tracker when available."""
+    tracker = getattr(trainer, "_finar_plan_tracker", None)
+    if tracker is not None:
+        try:
+            entry = tracker.current_entry()
+        except (AttributeError, AssertionError):
+            entry = None
+        if entry is not None:
+            task = str(entry.get("task") or "")
+            try:
+                from scripts.sft.swift_sft_plugin import use_kl_for_task
+            except ImportError:
+                use_kl = task == "generation"
+            else:
+                use_kl = use_kl_for_task(task)
+            return task, bool(use_kl)
+    task = str(getattr(trainer, "_finar_current_task", "") or "")
+    return task, bool(getattr(trainer, "_finar_use_kl", False))
+
+
 class FinarKLRetentionCallback(TrainerCallback):
     """Replace CE with frozen-base KL only for task == generation."""
 
@@ -433,7 +441,10 @@ class FinarKLRetentionCallback(TrainerCallback):
         original_compute_loss = trainer.compute_loss
 
         def kl_routed_compute_loss(model, inputs, *compute_args, **compute_kwargs):
-            if not bool(getattr(trainer, "_finar_use_kl", False)):
+            task, use_kl = _current_task_from_plan(trainer)
+            trainer._finar_current_task = task
+            trainer._finar_use_kl = use_kl
+            if not use_kl:
                 return original_compute_loss(model, inputs, *compute_args, **compute_kwargs)
             return_outputs = bool(compute_kwargs.pop("return_outputs", False))
             return _generation_kl_loss(model, inputs, trainer, return_outputs=return_outputs)
