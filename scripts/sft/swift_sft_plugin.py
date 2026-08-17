@@ -668,6 +668,17 @@ def _dp_rank() -> tuple[int, int]:
     return 0, 1
 
 
+def _sp_rank_world() -> tuple[int, int]:
+    try:
+        from swift.sequence_parallel import sequence_parallel
+
+        sp_world = int(getattr(sequence_parallel, "sp_world_size", 1) or 1)
+        sp_rank = int(getattr(sequence_parallel, "sp_rank", 0) or 0)
+        return sp_rank, sp_world
+    except (ImportError, AttributeError):
+        return 0, 1
+
+
 def _distributed_barrier() -> None:
     try:
         import torch.distributed as dist
@@ -734,6 +745,7 @@ class _PlanRuntimeTracker:
         self.output_dir = Path(output_dir) / "sample_distribution"
         self.rank = _global_rank()
         self.dp_rank, self.dp_world = _dp_rank()
+        self.sp_rank, self.sp_world = _sp_rank_world()
         self.meta = json.loads((self.plan_dir / "meta.json").read_text(encoding="utf-8"))
         self.entries: list[dict[str, Any]] = []
         self.planned: dict[int, dict[str, Any]] = {}
@@ -766,14 +778,15 @@ class _PlanRuntimeTracker:
             raise AssertionError("rank-local plan cursor exhausted before training ended")
         return self.entries[self.cursor]
 
-    def consume(self, labels) -> None:
+    def consume(self, labels, *, token_count: int | None = None) -> None:
         if labels is None:
             raise AssertionError("planned SFT batch must contain labels")
         if getattr(labels, "ndim", None) != 2 or int(labels.shape[0]) != 1:
             raise AssertionError("sample plan actual accounting requires batch dimension 1")
         entry = self.current_entry()
-        token_count = int(labels.ne(-100).sum().item())
-        _add_distribution(self.actual[int(entry["block"])], entry, token_count)
+        if token_count is None:
+            token_count = int(labels.ne(-100).sum().item())
+        _add_distribution(self.actual[int(entry["block"])], entry, int(token_count))
         self.cursor += 1
 
     def write_rank_block(self, block_id: int) -> None:
@@ -783,6 +796,9 @@ class _PlanRuntimeTracker:
         payload = {
             "block_id": block_id,
             "rank": self.rank,
+            "dp_rank": self.dp_rank,
+            "sp_rank": self.sp_rank,
+            "sp_world": self.sp_world,
             "planned": planned,
             "actual": actual,
             "difference": _distribution_difference(planned, actual),
@@ -790,21 +806,57 @@ class _PlanRuntimeTracker:
         path = self.output_dir / f"block_{block_id:04d}.rank_{self.rank:04d}.json"
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
+    @staticmethod
+    def _merge_full_distribution(target: dict[str, Any], source: dict[str, Any]) -> None:
+        target["samples"] += int(source["samples"])
+        target["assistant_tokens"] += int(source["assistant_tokens"])
+        for group in ("tasks", "families"):
+            for name, values in source[group].items():
+                target[group].setdefault(name, {"samples": 0, "assistant_tokens": 0})
+                target[group][name]["samples"] += int(values["samples"])
+                target[group][name]["assistant_tokens"] += int(values["assistant_tokens"])
+
+    @staticmethod
+    def _merge_actual_sp_group(target: dict[str, Any], members: list[dict[str, Any]]) -> None:
+        representative = min(members, key=lambda payload: int(payload.get("sp_rank", 0)))
+        source = representative["actual"]
+        target["samples"] += int(source["samples"])
+        for group in ("tasks", "families"):
+            for name, values in source[group].items():
+                target[group].setdefault(name, {"samples": 0, "assistant_tokens": 0})
+                target[group][name]["samples"] += int(values["samples"])
+        for payload in members:
+            source = payload["actual"]
+            target["assistant_tokens"] += int(source["assistant_tokens"])
+            for group in ("tasks", "families"):
+                for name, values in source[group].items():
+                    target[group].setdefault(name, {"samples": 0, "assistant_tokens": 0})
+                    target[group][name]["assistant_tokens"] += int(values["assistant_tokens"])
+
     def merge_block(self, block_id: int) -> None:
         merged = {"block_id": block_id, "planned": _empty_distribution(), "actual": _empty_distribution()}
-        for rank in range(self.dp_world):
-            path = self.output_dir / f"block_{block_id:04d}.rank_{rank:04d}.json"
+        rank_paths = sorted(self.output_dir.glob(f"block_{block_id:04d}.rank_*.json"))
+        groups: dict[int, list[dict[str, Any]]] = {}
+        for path in rank_paths:
             payload = json.loads(path.read_text(encoding="utf-8"))
-            for key in ("planned", "actual"):
-                source = payload[key]
-                target = merged[key]
-                target["samples"] += int(source["samples"])
-                target["assistant_tokens"] += int(source["assistant_tokens"])
-                for group in ("tasks", "families"):
-                    for name, values in source[group].items():
-                        target[group].setdefault(name, {"samples": 0, "assistant_tokens": 0})
-                        target[group][name]["samples"] += int(values["samples"])
-                        target[group][name]["assistant_tokens"] += int(values["assistant_tokens"])
+            groups.setdefault(int(payload.get("dp_rank", payload["rank"])), []).append(payload)
+        if set(groups) != set(range(self.dp_world)):
+            raise RuntimeError(
+                f"sample-distribution rank files do not cover all DP ranks: "
+                f"expected={list(range(self.dp_world))} actual={sorted(groups)}"
+            )
+        for dp_rank in range(self.dp_world):
+            members = groups[dp_rank]
+            expected_sp_world = max(int(payload.get("sp_world", 1)) for payload in members)
+            sp_ranks = {int(payload.get("sp_rank", 0)) for payload in members}
+            if len(members) != expected_sp_world or sp_ranks != set(range(expected_sp_world)):
+                raise RuntimeError(
+                    f"sample-distribution SP files incomplete for dp_rank={dp_rank}: "
+                    f"expected_sp_world={expected_sp_world} sp_ranks={sorted(sp_ranks)}"
+                )
+            representative = min(members, key=lambda payload: int(payload.get("sp_rank", 0)))
+            self._merge_full_distribution(merged["planned"], representative["planned"])
+            self._merge_actual_sp_group(merged["actual"], members)
         merged["planned"] = _finalize_distribution(merged["planned"])
         merged["actual"] = _finalize_distribution(merged["actual"])
         merged["difference"] = _distribution_difference(merged["planned"], merged["actual"])
@@ -890,12 +942,18 @@ class FinarPlanCallback(TrainerCallback):
                     "use_kl": trainer._finar_use_kl,
                     "modality": str(entry.get("modality") or ""),
                     "index": int(entry.get("index", -1)),
+                    "raw_index": int(entry.get("raw_index", entry.get("index", -1))),
                 }
                 result = original_compute_loss(model, inputs, *compute_args, **compute_kwargs)
                 loss = result[0] if isinstance(result, tuple) else result
                 if not math.isfinite(float(loss.item())):
                     return result
-                self._tracker.consume(labels)
+                actual_token_count = None
+                if trainer._finar_use_kl:
+                    kl_info = getattr(trainer, "_finar_last_kl", None)
+                    if isinstance(kl_info, dict) and str(kl_info.get("task") or "") == task:
+                        actual_token_count = int(kl_info.get("local_tokens", 0))
+                self._tracker.consume(labels, token_count=actual_token_count)
                 return result
 
             trainer.compute_loss = tracked_compute_loss
