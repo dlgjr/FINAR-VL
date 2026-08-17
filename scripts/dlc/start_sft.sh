@@ -33,6 +33,7 @@ export SFT_VIT_GRADIENT_CHECKPOINTING="${SFT_VIT_GRADIENT_CHECKPOINTING:-false}"
 export SFT_SEQUENCE_PARALLEL_SIZE="${SFT_SEQUENCE_PARALLEL_SIZE:-2}"
 export SFT_GRAD_ACC="${SFT_GRAD_ACC:-5}"
 export SFT_LEARNING_RATE="${SFT_LEARNING_RATE:-3e-6}"
+export SFT_KL_TASKS="${SFT_KL_TASKS:-generation}"
 if (( NPROC_PER_NODE % SFT_SEQUENCE_PARALLEL_SIZE != 0 )); then
   echo "NPROC_PER_NODE=$NPROC_PER_NODE must be divisible by SFT_SEQUENCE_PARALLEL_SIZE=$SFT_SEQUENCE_PARALLEL_SIZE" >&2
   exit 1
@@ -212,6 +213,7 @@ if (( NODE_RANK == 0 )); then
   echo "max_steps=from_sample_plan max_length=49152 global_batch=$SFT_GLOBAL_BATCH_SIZE per_device_batch=1 grad_accum=$SFT_GRAD_ACC"
   echo "tuner=full"
   echo "learning_rate=$SFT_LEARNING_RATE scheduler=cosine warmup_ratio=0.05 max_grad_norm=1.0"
+  echo "kl_tasks=$SFT_KL_TASKS"
   echo "eval_step0=true eval_steps=$SFT_EVAL_STEPS save_steps=$SFT_SAVE_STEPS"
   echo "pass_at_1=greedy pass_at_8_temperature=$SFT_PASS_AT_8_TEMPERATURE"
   echo "training_gpus_per_node=$NPROC_PER_NODE judge_gpus_per_node=1 nodes=$NODE_WORLD_SIZE"
@@ -323,7 +325,7 @@ echo "sample_plan_dir=$SFT_PLAN_DIR epochs=$SFT_EPOCHS max_steps=$SFT_MAX_STEPS"
   --gradient_checkpointing true \
   --vit_gradient_checkpointing "$SFT_VIT_GRADIENT_CHECKPOINTING" \
   --sequence_parallel_size "$SFT_SEQUENCE_PARALLEL_SIZE" \
-  --use_logits_to_keep true \
+  --use_logits_to_keep false \
   --ddp_timeout 86400 \
   --max_length 49152 \
   --truncation_strategy delete \
