@@ -34,6 +34,7 @@ def test_dlc_launcher_uses_full_sft_sp2_and_dedicated_reference_gpu():
         'export SFT_SEQUENCE_PARALLEL_SIZE="${SFT_SEQUENCE_PARALLEL_SIZE:-2}"',
         'export SFT_GRAD_ACC="${SFT_GRAD_ACC:-5}"',
         'export SFT_LEARNING_RATE="${SFT_LEARNING_RATE:-5e-6}"',
+        'export SFT_FREEZE_VIT="${SFT_FREEZE_VIT:-true}"',
         "export SFT_KL_TASKS=generation",
         '"$ROOT/scripts/data/normalize_train_multi_sft_format.py" "$NORMALIZED_TRAIN_MULTI"',
         '"$ROOT/scripts/data/normalize_train_text_schema.py" "$TRAIN_TEXT" "$NORMALIZED_TRAIN_TEXT"',
