@@ -300,7 +300,7 @@ REF_PID=$!
     --host 127.0.0.1 \
     --port "$SFT_JUDGE_PORT" \
     --dtype bfloat16 \
-    --max-model-llen 8192 \
+    --max-model-len 8192 \
     --tensor-parallel-size 1 \
     --gpu-memory-utilization 0.70 \
     --max-num-seqs 8 \
