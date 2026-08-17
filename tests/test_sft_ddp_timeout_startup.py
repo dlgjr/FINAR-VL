@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
+import types
 from datetime import timedelta
 from pathlib import Path
 
@@ -43,6 +45,79 @@ def test_timeout_patch_handles_positional_timeout() -> None:
     assert args[0] == "nccl"
     assert args[2] == minimum
     assert kwargs == {}
+
+
+def test_deepspeed_timeout_patch_handles_keyword_and_positional_timeout() -> None:
+    minimum = timedelta(seconds=7200)
+
+    def init_distributed(
+        dist_backend=None,
+        auto_mpi_discovery=True,
+        distributed_port=29500,
+        verbose=True,
+        timeout=timedelta(seconds=600),
+        init_method=None,
+    ):
+        return dist_backend, timeout
+
+    args, kwargs = MODULE._apply_named_min_timeout(init_distributed, (), {}, minimum)
+    assert args == ()
+    assert kwargs["timeout"] == minimum
+
+    args, kwargs = MODULE._apply_named_min_timeout(
+        init_distributed,
+        (),
+        {"timeout": timedelta(seconds=600)},
+        minimum,
+    )
+    assert kwargs["timeout"] == minimum
+
+    positional = ("nccl", False, 29500, True, timedelta(seconds=600), None)
+    args, kwargs = MODULE._apply_named_min_timeout(init_distributed, positional, {}, minimum)
+    assert args[4] == minimum
+    assert kwargs == {}
+
+    larger = timedelta(seconds=86400)
+    args, kwargs = MODULE._apply_named_min_timeout(init_distributed, (), {"timeout": larger}, minimum)
+    assert kwargs["timeout"] == larger
+
+
+def test_deepspeed_timeout_patch_updates_all_public_aliases(monkeypatch) -> None:
+    calls = []
+
+    def init_distributed(
+        dist_backend=None,
+        auto_mpi_discovery=True,
+        distributed_port=29500,
+        verbose=True,
+        timeout=timedelta(seconds=600),
+        init_method=None,
+    ):
+        calls.append(timeout)
+        return timeout
+
+    deepspeed = types.ModuleType("deepspeed")
+    deepspeed_comm = types.ModuleType("deepspeed.comm")
+    deepspeed_comm_impl = types.ModuleType("deepspeed.comm.comm")
+
+    deepspeed_comm_impl.init_distributed = init_distributed
+    deepspeed_comm.init_distributed = init_distributed
+    deepspeed_comm.comm = deepspeed_comm_impl
+    deepspeed.comm = deepspeed_comm
+    deepspeed.init_distributed = init_distributed
+
+    monkeypatch.setitem(sys.modules, "deepspeed", deepspeed)
+    monkeypatch.setitem(sys.modules, "deepspeed.comm", deepspeed_comm)
+    monkeypatch.setitem(sys.modules, "deepspeed.comm.comm", deepspeed_comm_impl)
+
+    minimum = timedelta(seconds=7200)
+    assert MODULE._install_deepspeed_timeout_patch(minimum)
+
+    assert deepspeed.init_distributed is deepspeed_comm.init_distributed
+    assert deepspeed_comm.init_distributed is deepspeed_comm_impl.init_distributed
+
+    assert deepspeed_comm.init_distributed(timeout=timedelta(seconds=600)) == minimum
+    assert calls[-1] == minimum
 
 
 def test_sft_launcher_exposes_repo_root_for_sitecustomize() -> None:
