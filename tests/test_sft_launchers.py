@@ -130,6 +130,7 @@ def test_dlc_launcher_uses_full_sft_sp2_and_dedicated_reference_gpu():
         "--deepspeed zero2_offload",
         "--attn_impl sdpa",
         "--lazy_tokenize false",
+        "--reasoning-parser",
     ):
         assert forbidden not in text
 

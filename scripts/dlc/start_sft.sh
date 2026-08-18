@@ -317,7 +317,6 @@ REF_PID=$!
     --gpu-memory-utilization 0.70 \
     --max-num-seqs 8 \
     --enforce-eager \
-    --reasoning-parser qwen3 \
     --generation-config vllm
 ) >"$JUDGE_LOG" 2>&1 &
 JUDGE_PID=$!

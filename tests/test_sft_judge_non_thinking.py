@@ -27,7 +27,7 @@ def _row():
     }
 
 
-def test_model_judge_disables_thinking_and_uses_short_output(monkeypatch):
+def test_instruct_model_judge_uses_short_output(monkeypatch):
     payloads = []
 
     def fake_urlopen(request, timeout):
@@ -41,7 +41,8 @@ def test_model_judge_disables_thinking_and_uses_short_output(monkeypatch):
 
     assert evaluator._judge_with_server("http://judge", _row(), "标准答案", "标准答案") is True
     assert len(payloads) == 1
-    assert payloads[0]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert payloads[0]["model"] == "qwen30-judge"
+    assert "chat_template_kwargs" not in payloads[0]
     assert payloads[0]["max_tokens"] == 64
 
 
@@ -63,7 +64,4 @@ def test_model_judge_retry_stays_short(monkeypatch):
 
     assert evaluator._judge_with_server("http://judge", _row(), "标准答案", "错误答案") is False
     assert [payload["max_tokens"] for payload in payloads] == [64, 128]
-    assert all(
-        payload["chat_template_kwargs"] == {"enable_thinking": False}
-        for payload in payloads
-    )
+    assert all("chat_template_kwargs" not in payload for payload in payloads)

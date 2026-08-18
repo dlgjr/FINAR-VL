@@ -472,7 +472,6 @@ def _judge_with_server(judge_url: str, row: dict[str, Any], reference: str, cand
                 ],
                 "temperature": 0.0,
                 "max_tokens": max_tokens,
-                "chat_template_kwargs": {"enable_thinking": False},
             },
             ensure_ascii=False,
         ).encode("utf-8")
