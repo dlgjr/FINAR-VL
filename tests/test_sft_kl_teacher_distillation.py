@@ -1,8 +1,11 @@
 import json
 
+import pytest
+
 import scripts.sft.kl_retention_plugin as kl_plugin
 from scripts.sft.kl_retention_plugin import (
     _content_with_images,
+    _inject_teacher_token_ids,
     _local_image_uri,
     _replace_assistant_with_teacher,
 )
@@ -77,3 +80,48 @@ def test_teacher_route_reloads_jsonl_by_raw_index(monkeypatch, tmp_path):
 
     assert returned_path == path
     assert record["id"] == "raw-2"
+
+
+def test_teacher_token_ids_replace_retokenized_supervised_span_exactly():
+    encoded = {
+        "input_ids": [10, 11, 20, 21, 22, 99],
+        "labels": [-100, -100, 20, 21, 22, 99],
+        "loss_scale": [0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+        "attention_mask": [1, 1, 1, 1, 1, 1],
+        "mm_token_type_ids": [1, 1, 0, 0, 0, 0],
+        "position_ids": [0, 1, 2, 3, 4, 5],
+    }
+    teacher_ids = [20, 777, 888, 889, 2]
+
+    updated = _inject_teacher_token_ids(encoded, teacher_ids)
+
+    assert updated["input_ids"] == [10, 11, *teacher_ids]
+    assert updated["labels"] == [-100, -100, *teacher_ids]
+    assert updated["loss_scale"] == [0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    assert updated["attention_mask"] == [1, 1, 1, 1, 1, 1, 1]
+    assert updated["mm_token_type_ids"] == [1, 1, 0, 0, 0, 0, 0]
+    assert "position_ids" not in updated
+
+
+def test_teacher_token_ids_preserve_masked_suffix_outside_response_span():
+    encoded = {
+        "input_ids": [10, 11, 20, 21, 90],
+        "labels": [-100, -100, 20, 21, -100],
+        "loss_scale": [0.0, 0.0, 1.0, 1.0, 0.0],
+    }
+
+    updated = _inject_teacher_token_ids(encoded, [31, 32, 33])
+
+    assert updated["input_ids"] == [10, 11, 31, 32, 33, 90]
+    assert updated["labels"] == [-100, -100, 31, 32, 33, -100]
+    assert updated["loss_scale"] == [0.0, 0.0, 1.0, 1.0, 1.0, 0.0]
+
+
+def test_teacher_token_ids_reject_noncontiguous_supervision():
+    encoded = {
+        "input_ids": [10, 20, 30, 40],
+        "labels": [-100, 20, -100, 40],
+    }
+
+    with pytest.raises(RuntimeError, match="non-contiguous"):
+        _inject_teacher_token_ids(encoded, [50, 51])
