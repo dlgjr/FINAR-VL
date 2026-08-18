@@ -40,6 +40,7 @@ def test_dlc_launcher_uses_full_sft_sp2_and_dedicated_reference_gpu():
         'export SFT_GRAD_ACC="${SFT_GRAD_ACC:-5}"',
         'export SFT_LEARNING_RATE="${SFT_LEARNING_RATE:-5e-6}"',
         'export SFT_FREEZE_VIT="${SFT_FREEZE_VIT:-true}"',
+        'export SFT_DDP_TIMEOUT="${SFT_DDP_TIMEOUT:-86400}"',
         "export SFT_KL_TASKS=generation",
         '"$ROOT/scripts/data/normalize_train_multi_sft_format.py" "$NORMALIZED_TRAIN_MULTI"',
         '"$ROOT/scripts/data/normalize_train_text_schema.py" "$TRAIN_TEXT" "$NORMALIZED_TRAIN_TEXT"',
@@ -49,8 +50,12 @@ def test_dlc_launcher_uses_full_sft_sp2_and_dedicated_reference_gpu():
         '--train-text "$NORMALIZED_TRAIN_TEXT"',
         "--dataset_shuffle false",
         "--train_dataloader_shuffle false",
-        "--lazy_tokenize false",
+        "--lazy_tokenize true",
         '"$ROOT/scripts/sft/sample_plan.py"',
+        '"$ROOT/scripts/sft/materialize_lazy_plan_indices.py"',
+        'RAW_PLAN_READY="$SFT_PLAN_DIR/.raw_indices_ready"',
+        '--plan-dir "$SFT_PLAN_DIR"',
+        'index_mode=raw',
         '--epochs "$SFT_EPOCHS"',
         '--max-steps "$SFT_MAX_STEPS"',
         '--steps-per-block 200',
@@ -63,7 +68,8 @@ def test_dlc_launcher_uses_full_sft_sp2_and_dedicated_reference_gpu():
         "CELOSS_PARALLEL_SIZE=4096",
         '--sequence_parallel_size "$SFT_SEQUENCE_PARALLEL_SIZE"',
         "--per_device_train_batch_size 1",
-        "--ddp_timeout 86400",
+        '--ddp_timeout "$SFT_DDP_TIMEOUT"',
+        "export FINAR_SFT_DDP_TIMEOUT_PATCH=1",
         "--max_length 49152",
         "--attn_impl flash_attn",
         "--truncation_strategy delete",
@@ -112,6 +118,8 @@ def test_dlc_launcher_uses_full_sft_sp2_and_dedicated_reference_gpu():
     ):
         assert required in text
     assert text.index('cd "$ROOT_IMAGE_DIR"') < text.index('"$PYTHON_BIN" "$ROOT/scripts/sft/sample_plan.py"')
+    assert text.index('"$ROOT/scripts/sft/sample_plan.py"') < text.index('"$ROOT/scripts/sft/materialize_lazy_plan_indices.py"')
+    assert text.index('"$ROOT/scripts/sft/materialize_lazy_plan_indices.py"') < text.index('"${SWIFT_CMD[@]}" sft')
     for forbidden in (
         "--tuner_type lora",
         "--target_modules all-linear",
@@ -121,6 +129,7 @@ def test_dlc_launcher_uses_full_sft_sp2_and_dedicated_reference_gpu():
         "SFT_PASS_AT_1_TEMPERATURE",
         "--deepspeed zero2_offload",
         "--attn_impl sdpa",
+        "--lazy_tokenize false",
     ):
         assert forbidden not in text
 
