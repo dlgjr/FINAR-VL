@@ -7,9 +7,10 @@ For generation samples:
   1. Ignore the dataset-provided assistant answer.
   2. Ask the frozen base model on GPU 6 to generate a fresh answer from the
      original prompt, including all images.
-  3. Re-encode the sample with the generated answer through the normal
-     ms-swift train template/data collator so multimodal preprocessing, M-RoPE
-     position ids and sequence-parallel label preparation are identical to SFT.
+  3. Re-encode the sample through the normal ms-swift train template for
+     multimodal preprocessing, replace the supervised response span with the
+     exact teacher token IDs, then run the normal data collator so M-RoPE
+     position ids and sequence-parallel labels remain identical to SFT.
   4. Optimize only a sampled forward KL, KL(base || student), on the teacher
      tokens. No SFT cross-entropy term is evaluated.
 
@@ -454,11 +455,112 @@ def _replace_assistant_with_teacher(record: dict[str, Any], teacher_text: str) -
     return updated
 
 
-def _prepare_teacher_inputs(trainer, record: dict[str, Any], teacher_text: str) -> dict[str, Any]:
-    """Re-encode through the normal train template so multimodal/SP state stays correct."""
+def _sequence_values(value: Any) -> list[Any]:
+    """Return a flat Python view of a one-dimensional sequence/tensor."""
+    try:
+        import torch
+    except ImportError:
+        torch = None
+    if torch is not None and torch.is_tensor(value):
+        if value.ndim != 1:
+            raise RuntimeError(f"expected a 1D encoded sequence, got shape={tuple(value.shape)}")
+        return value.detach().cpu().tolist()
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, list):
+        return list(value)
+    raise RuntimeError(f"unsupported encoded sequence type: {type(value).__name__}")
+
+
+def _splice_sequence_value(value: Any, start: int, end: int, replacement: list[Any]) -> Any:
+    """Splice a 1D list/tuple/tensor while preserving its container type."""
+    try:
+        import torch
+    except ImportError:
+        torch = None
+    if torch is not None and torch.is_tensor(value):
+        if value.ndim != 1:
+            raise RuntimeError(f"expected a 1D encoded sequence, got shape={tuple(value.shape)}")
+        middle = torch.tensor(replacement, dtype=value.dtype, device=value.device)
+        return torch.cat((value[:start], middle, value[end:]), dim=0)
+    values = _sequence_values(value)
+    spliced = values[:start] + list(replacement) + values[end:]
+    return tuple(spliced) if isinstance(value, tuple) else spliced
+
+
+def _inject_teacher_token_ids(encoded: dict[str, Any], teacher_token_ids: list[int]) -> dict[str, Any]:
+    """Replace the whole supervised assistant span with the exact vLLM trajectory IDs.
+
+    `message.content` is only a decoded rendering of vLLM's sampled token IDs and
+    is not guaranteed to tokenize back to the same IDs. The KL reference logps
+    are attached to the sampled IDs, so the student trajectory must use those
+    exact IDs. Qwen3-VL computes M-RoPE position IDs in the data collator, after
+    this function runs, which keeps multimodal positions correct even when the
+    replacement changes sequence length.
+    """
+    teacher_ids = [int(value) for value in teacher_token_ids]
+    if not teacher_ids:
+        raise RuntimeError("teacher rollout token IDs are empty")
+
+    if "input_ids" not in encoded or "labels" not in encoded:
+        raise RuntimeError("encoded teacher sample is missing input_ids/labels")
+    input_ids = _sequence_values(encoded["input_ids"])
+    labels = _sequence_values(encoded["labels"])
+    if len(input_ids) != len(labels):
+        raise RuntimeError(
+            "teacher encoded input_ids/labels length mismatch before token injection: "
+            f"input_ids={len(input_ids)} labels={len(labels)}"
+        )
+
+    supervised = [index for index, value in enumerate(labels) if int(value) != -100]
+    if not supervised:
+        raise RuntimeError("teacher-generated generation sample has no supervised response span")
+    start = supervised[0]
+    end = supervised[-1] + 1
+    if any(int(labels[index]) == -100 for index in range(start, end)):
+        raise RuntimeError("teacher-generated response supervision is non-contiguous")
+
+    old_length = len(input_ids)
+    updated = dict(encoded)
+    updated["input_ids"] = _splice_sequence_value(encoded["input_ids"], start, end, teacher_ids)
+    updated["labels"] = _splice_sequence_value(encoded["labels"], start, end, teacher_ids)
+
+    # These optional fields are sequence-aligned before the Qwen3-VL collator.
+    # Teacher response tokens are ordinary text tokens, not multimodal tokens.
+    side_field_fill = {
+        "loss_scale": 1.0,
+        "attention_mask": 1,
+        "token_type_ids": 0,
+        "mm_token_type_ids": 0,
+    }
+    for key, default_fill in side_field_fill.items():
+        value = encoded.get(key)
+        if value is None:
+            continue
+        values = _sequence_values(value)
+        if len(values) != old_length:
+            continue
+        fill = values[start] if key == "loss_scale" and start < len(values) else default_fill
+        updated[key] = _splice_sequence_value(value, start, end, [fill] * len(teacher_ids))
+
+    # Position IDs, when present in an encoded row, are stale after a length
+    # change. Qwen3-VL's data collator recomputes them from input_ids + grids.
+    updated.pop("position_ids", None)
+    updated.pop("text_position_ids", None)
+    return updated
+
+
+def _prepare_teacher_inputs(
+    trainer,
+    record: dict[str, Any],
+    teacher_text: str,
+    teacher_token_ids: list[int],
+) -> dict[str, Any]:
+    """Build the teacher trajectory with exact sampled IDs before SP sharding."""
     encoded = trainer.template.encode(_replace_assistant_with_teacher(record, teacher_text))
     if not isinstance(encoded, dict) or "input_ids" not in encoded or "labels" not in encoded:
         raise RuntimeError("template.encode failed for teacher-generated generation sample")
+    encoded = _inject_teacher_token_ids(encoded, teacher_token_ids)
     batch = trainer.data_collator([encoded])
     prepared = trainer._prepare_inputs(batch)
     if not isinstance(prepared, dict):
@@ -508,10 +610,9 @@ def _teacher_alignment(local_labels, teacher_token_ids: list[int], teacher_logps
         if length == len(teacher_ids):
             break
 
-    min_required = max(1, len(teacher_ids) - 2)
-    if best_start < 0 or best_length < min_required:
+    if best_start < 0 or best_length != len(teacher_ids):
         raise RuntimeError(
-            "teacher/student response tokenization mismatch: "
+            "teacher token injection/alignment mismatch: "
             f"teacher_tokens={len(teacher_ids)} best_match={best_length}"
         )
 
@@ -576,7 +677,13 @@ def _generation_distill_loss(model, trainer, route: dict[str, Any], *, return_ou
 
     record, data_file = _route_record(route)
     teacher = _teacher_rollout_for_route(trainer, route, record, data_file)
-    teacher_inputs = _prepare_teacher_inputs(trainer, record, str(teacher["text"]))
+    teacher_token_ids = [int(value) for value in teacher["token_ids"]]
+    teacher_inputs = _prepare_teacher_inputs(
+        trainer,
+        record,
+        str(teacher["text"]),
+        teacher_token_ids,
+    )
 
     input_ids = teacher_inputs.get("input_ids")
     labels = teacher_inputs.get("labels")
@@ -593,7 +700,7 @@ def _generation_distill_loss(model, trainer, route: dict[str, Any], *, return_ou
 
     local_positions, target_ids, reference_logps, matched_tokens = _teacher_alignment(
         labels,
-        [int(value) for value in teacher["token_ids"]],
+        teacher_token_ids,
         [float(value) for value in teacher["logps"]],
     )
 
@@ -657,7 +764,7 @@ def _generation_distill_loss(model, trainer, route: dict[str, Any], *, return_ou
         "modality": str(route.get("modality") or ""),
         "index": int(route.get("index", -1)),
         "raw_index": int(route.get("raw_index", route.get("index", -1))),
-        "teacher_tokens": len(teacher["token_ids"]),
+        "teacher_tokens": len(teacher_token_ids),
         "matched_teacher_tokens": int(matched_tokens),
         "local_tokens": int(local_token_count.item()),
         "group_tokens": int(total_token_count.item()),
