@@ -9,6 +9,7 @@ NODE_WORLD_SIZE="${WORLD_SIZE:?DLC must provide WORLD_SIZE}"
 NODE_RANK="${RANK:?DLC must provide RANK}"
 export SFT_MAX_STEPS="${SFT_MAX_STEPS:-50000}"
 source "$ROOT/scripts/dlc/dlc_env.sh"
+export SFT_DDP_TIMEOUT="${SFT_DDP_TIMEOUT:-86400}"
 
 export BASE_MODEL="$ROOT/models/qwen4"
 export JUDGE_MODEL="${JUDGE_MODEL:-/mnt/nas/bihaoran/model/qwen30}"
@@ -404,6 +405,12 @@ fi
 SFT_MAX_STEPS="$("$PYTHON_BIN" -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["max_steps"])' "$SFT_PLAN_DIR/meta.json")"
 echo "sample_plan_dir=$SFT_PLAN_DIR epochs=$SFT_EPOCHS max_steps=$SFT_MAX_STEPS"
 
+if [[ ! "$SFT_DDP_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "SFT_DDP_TIMEOUT must be a positive integer number of seconds, got: $SFT_DDP_TIMEOUT" >&2
+  exit 1
+fi
+export FINAR_SFT_DDP_TIMEOUT_PATCH=1
+echo "sft_ddp_timeout=$SFT_DDP_TIMEOUT timeout_patch=$FINAR_SFT_DDP_TIMEOUT_PATCH"
 
 "${SWIFT_CMD[@]}" sft \
   --model "$BASE_MODEL" \
@@ -427,7 +434,7 @@ echo "sample_plan_dir=$SFT_PLAN_DIR epochs=$SFT_EPOCHS max_steps=$SFT_MAX_STEPS"
   --vit_gradient_checkpointing "$SFT_VIT_GRADIENT_CHECKPOINTING" \
   --sequence_parallel_size "$SFT_SEQUENCE_PARALLEL_SIZE" \
   --use_logits_to_keep false \
-  --ddp_timeout 86400 \
+  --ddp_timeout "$SFT_DDP_TIMEOUT" \
   --max_length 49152 \
   --truncation_strategy delete \
   --max_steps "$SFT_MAX_STEPS" \
