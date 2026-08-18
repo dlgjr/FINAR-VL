@@ -1,3 +1,4 @@
+import importlib
 import json
 import types
 from pathlib import Path
@@ -142,3 +143,15 @@ def test_runtime_replacement_is_deferred_until_train_dataloader(monkeypatch, tmp
     assert [event for event in events if event[0] == "replacement"] == [
         ("replacement", tmp_path, tracker, "ready")
     ]
+
+
+def test_runtime_replacement_shim_reload_keeps_true_original_installers():
+    original_runtime = sft_plugin._impl._finar_original_install_runtime_replacement
+    original_plan = sft_plugin._impl._finar_original_install_plan_dataloader
+
+    reloaded = importlib.reload(sft_plugin)
+
+    assert reloaded._ORIGINAL_INSTALL_RUNTIME_REPLACEMENT is original_runtime
+    assert reloaded._ORIGINAL_INSTALL_PLAN_DATALOADER is original_plan
+    assert reloaded._impl._install_runtime_replacement is reloaded._defer_runtime_replacement
+    assert reloaded._impl._install_plan_dataloader is reloaded._install_plan_dataloader_deferred
