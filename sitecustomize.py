@@ -19,6 +19,7 @@ _DEFAULT_SFT_DDP_TIMEOUT_SECONDS = 86400
 _TORCH_PATCH_ATTR = "_finar_sft_ddp_timeout_patch"
 _DEEPSPEED_PATCH_ATTR = "_finar_sft_deepspeed_timeout_patch"
 _MISSING = object()
+_VERIFIED_TIMEOUT_LOGGED = False
 
 
 def _is_swift_sft_process(argv: list[str] | tuple[str, ...] | None = None) -> bool:
@@ -194,6 +195,8 @@ def _raise_backend_timeout(backend: Any, minimum: timedelta) -> Any:
 
 def _enforce_existing_default_pg_timeout(minimum: timedelta) -> Any:
     """Verify/fix the actual NCCL backend after the default PG is initialized."""
+    global _VERIFIED_TIMEOUT_LOGGED
+
     try:
         import torch
         import torch.distributed as dist
@@ -208,7 +211,8 @@ def _enforce_existing_default_pg_timeout(minimum: timedelta) -> Any:
         pg = distributed_c10d._get_default_group()
         if not torch.cuda.is_available():
             return None
-        device = torch.device("cuda", torch.cuda.current_device())
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        device = torch.device("cuda", local_rank)
         backend = pg._get_backend(device)
     except (AttributeError, RuntimeError, ValueError):
         return None
@@ -219,6 +223,13 @@ def _enforce_existing_default_pg_timeout(minimum: timedelta) -> Any:
             "[FINAR-SFT] default NCCL process group still has a short timeout "
             f"after enforcement: observed={observed!r} required>={minimum!r}"
         )
+    if observed is not None and not _VERIFIED_TIMEOUT_LOGGED:
+        print(
+            f"[FINAR-SFT] default NCCL process-group timeout verified: {observed!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+        _VERIFIED_TIMEOUT_LOGGED = True
     return observed
 
 
