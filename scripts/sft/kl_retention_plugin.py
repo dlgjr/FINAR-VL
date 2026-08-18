@@ -196,12 +196,13 @@ def _ensure_reference_server(trainer) -> None:
 
 
 def _data_file_for_modality(modality: str) -> Path:
+    temp_root = Path(os.environ.get("TMPDIR", "/tmp"))
     if modality == "multi":
         explicit = os.environ.get("NORMALIZED_TRAIN_MULTI")
-        fallback = Path(os.environ["TMPDIR"]) / "train_data" / "train_multi.jsonl"
+        fallback = temp_root / "train_data" / "train_multi.jsonl"
     elif modality == "text":
         explicit = os.environ.get("NORMALIZED_TRAIN_TEXT")
-        fallback = Path(os.environ["TMPDIR"]) / "train_data" / "train_text.jsonl"
+        fallback = temp_root / "train_data" / "train_text.jsonl"
     else:
         raise RuntimeError(f"unknown sample-plan modality for online distillation: {modality!r}")
     path = Path(explicit).expanduser() if explicit else fallback
@@ -414,8 +415,6 @@ def _sp_state():
 
 
 def _broadcast_teacher(payload: dict[str, Any] | None) -> dict[str, Any]:
-    import torch.distributed as dist
-
     sequence_parallel, world_size, _, rp_world_size, sp_rank = _sp_state()
     if rp_world_size != 1:
         raise RuntimeError(
@@ -426,6 +425,8 @@ def _broadcast_teacher(payload: dict[str, Any] | None) -> dict[str, Any]:
         if payload is None:
             raise RuntimeError("teacher payload missing without sequence parallel")
         return payload
+
+    import torch.distributed as dist
 
     group = sequence_parallel.sp_group
     if group is None:
@@ -669,6 +670,20 @@ def _generation_distill_loss(model, trainer, route: dict[str, Any], *, return_ou
 
 
 def _current_route_from_plan(trainer) -> tuple[str, bool, dict[str, Any]]:
+    runtime_route = getattr(trainer, "_finar_runtime_route", None)
+    if isinstance(runtime_route, dict):
+        task = str(runtime_route.get("task") or "")
+        try:
+            from scripts.sft.swift_sft_plugin import use_kl_for_task
+        except ImportError:
+            use_kl = task == "generation"
+        else:
+            use_kl = use_kl_for_task(task)
+        route = dict(runtime_route)
+        route["task"] = task
+        route["use_kl"] = bool(use_kl)
+        route.setdefault("raw_index", route.get("index", -1))
+        return task, bool(use_kl), route
     tracker = getattr(trainer, "_finar_plan_tracker", None)
     entry = None
     if tracker is not None:
@@ -713,6 +728,9 @@ class FinarKLRetentionCallback(TrainerCallback):
         original_compute_loss = trainer.compute_loss
 
         def kl_routed_compute_loss(model, inputs, *compute_args, **compute_kwargs):
+            runtime_route = inputs.pop("_finar_runtime_route", None)
+            if isinstance(runtime_route, dict):
+                trainer._finar_runtime_route = runtime_route
             task, use_kl, route = _current_route_from_plan(trainer)
             trainer._finar_current_task = task
             trainer._finar_use_kl = use_kl

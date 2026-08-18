@@ -1,15 +1,7 @@
-"""Convert an SFT sample plan to stable raw JSONL row indices for lazy tokenization.
+"""Keep legacy compressed SFT plans compatible with lazy raw-index datasets.
 
-The sample-plan scanner deliberately excludes rows that fail template encoding or
-max-length checks.  Its normal ``index`` field is therefore a compressed
-post-filter index.  That is correct for eager tokenization, where ms-swift
-physically deletes those rows, but wrong for ``--lazy_tokenize true`` because the
-training dataset keeps the original JSONL row order.
-
-This utility preserves the scanner's eligibility decisions while replacing each
-planned ``index`` with its already-recorded ``raw_index`` and changing the text
-dataset offset (``N_multi``) to the raw multimodal row count.  The original
-compressed counts/indices are kept for diagnostics.
+New plans are written in raw-index mode directly.  Older plans may still use
+compressed post-filter indices and are converted here before training.
 """
 
 from __future__ import annotations

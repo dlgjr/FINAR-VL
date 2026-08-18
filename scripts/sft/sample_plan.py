@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import copy
 import json
 import multiprocessing
 import os
@@ -17,7 +18,6 @@ DEFAULT_MULTI_RATIO = 0.36
 ALPHA_SCHEDULE = ((0, 1000, 0.65), (1000, 3000, 0.60), (3000, float("inf"), 0.55))
 TOKEN_LENGTH_BETA = 0.5
 MIN_ASSISTANT_TOKENS_FOR_WEIGHT = 8
-MAX_MULTI_EFFECTIVE_TOKEN_RATIO = 0.60
 MULTI_UPWEIGHT = {
     "cross_modal_multi_hop": 1.15,
     "multimodal_financial_knowledge": 1.20,
@@ -391,7 +391,7 @@ def scan_task_index(path: Path) -> tuple[dict[str, list[int]], int]:
     return task_index, total
 
 
-def _load_training_template(model: str, model_type: str, max_length: int):
+def _load_training_template(model: str, model_type: str, max_length: int | None = None):
     from swift.model import get_model_processor
     from swift.template import get_template
 
@@ -400,7 +400,7 @@ def _load_training_template(model: str, model_type: str, max_length: int):
     # scan_encoded_index drops the resulting MaxLengthError rows.
     template = get_template(
         processor,
-        max_length=max_length,
+        max_length=None,
         truncation_strategy="raise",
         loss_scale="default",
     )
@@ -408,33 +408,39 @@ def _load_training_template(model: str, model_type: str, max_length: int):
     return template
 
 
-def _token_counts(template, row: dict[str, Any]) -> tuple[int, int]:
-    encoded = template.encode(row)
+def _text_only_row(row: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(row)
+    result["images"] = []
+    result["videos"] = []
+    result["audios"] = []
+    for message in result.get("messages") or []:
+        content = message.get("content")
+        if isinstance(content, str):
+            for marker in ("<image>", "<video>", "<audio>"):
+                content = content.replace(marker, "")
+            message["content"] = content
+    return result
+
+
+def _flatten_values(values: Any) -> list[Any]:
+    if hasattr(values, "reshape"):
+        values = values.reshape(-1)
+    if hasattr(values, "tolist"):
+        values = values.tolist()
+    result = values if isinstance(values, list) else [values]
+    while result and isinstance(result[0], list):
+        result = [item for nested in result for item in nested]
+    return result
+
+
+def _assistant_token_count(template, row: dict[str, Any]) -> int:
+    encoded = template.encode(_text_only_row(row))
     if isinstance(encoded, list):
         raise ValueError("truncation produced multiple encoded rows")
-    input_ids = encoded.get("input_ids")
-    if input_ids is None:
-        effective_token_count = 0
-    else:
-        if hasattr(input_ids, "reshape"):
-            input_ids = input_ids.reshape(-1)
-        if hasattr(input_ids, "tolist"):
-            input_ids = input_ids.tolist()
-        input_values = input_ids if isinstance(input_ids, list) else [input_ids]
-        while input_values and isinstance(input_values[0], list):
-            input_values = [item for nested in input_values for item in nested]
-        effective_token_count = len(input_values)
     labels = encoded.get("labels")
     if labels is None:
-        return 0, effective_token_count
-    if hasattr(labels, "reshape"):
-        labels = labels.reshape(-1)
-    if hasattr(labels, "tolist"):
-        labels = labels.tolist()
-    values = labels if isinstance(labels, list) else [labels]
-    while values and isinstance(values[0], list):
-        values = [item for nested in values for item in nested]
-    return sum(int(value != -100) for value in values), effective_token_count
+        return 0
+    return sum(int(value != -100) for value in _flatten_values(labels))
 
 
 def _shard_offsets(path: Path, num_proc: int) -> list[tuple[int, int, int]]:
@@ -453,10 +459,10 @@ def _shard_offsets(path: Path, num_proc: int) -> list[tuple[int, int, int]]:
     return shards
 
 
-def _scan_shard_worker(args: tuple) -> tuple[int, list[tuple[int, str, int, int, str]]]:
+def _scan_shard_worker(args: tuple) -> tuple[int, list[tuple[int, str, int, str]]]:
     path, start_offset, count, raw_start, model, model_type, max_length = args
     template = _load_training_template(model, model_type, max_length) if model else None
-    records: list[tuple[int, str, int, int, str]] = []
+    records: list[tuple[int, str, int, str]] = []
     nonempty = 0
     with open(path, "rb") as handle:
         handle.seek(start_offset)
@@ -471,20 +477,13 @@ def _scan_shard_worker(args: tuple) -> tuple[int, list[tuple[int, str, int, int,
             row = json.loads(raw)
             task = str(row.get("task") or UNKNOWN_TASK)
             if template is None:
-                records.append((raw_index, task, 1, 1, "ok"))
+                records.append((raw_index, task, 1, "ok"))
                 continue
             try:
-                token_count, effective_token_count = _token_counts(template, row)
-                records.append((raw_index, task, int(token_count), int(effective_token_count), "ok"))
-            except Exception as exc:
-                try:
-                    from swift.template import MaxLengthError
-                except ImportError:
-                    MaxLengthError = ()
-                if MaxLengthError and isinstance(exc, MaxLengthError):
-                    records.append((raw_index, task, 0, 0, "maxlen"))
-                else:
-                    records.append((raw_index, task, 0, 0, "failed"))
+                token_count = _assistant_token_count(template, row)
+                records.append((raw_index, task, int(token_count), "ok"))
+            except Exception:
+                records.append((raw_index, task, 0, "count_failed"))
     return nonempty, records
 
 
@@ -516,7 +515,7 @@ def _scan_range(
     model_type: str,
     max_length: int,
     num_proc: int,
-) -> tuple[int, list[tuple[int, str, int, int, str]]]:
+) -> tuple[int, list[tuple[int, str, int, str]]]:
     if num_proc <= 1:
         return _scan_shard_worker((str(path), start_offset, count, raw_start, model, model_type, max_length))
     shard_args = [
@@ -526,7 +525,7 @@ def _scan_range(
     with multiprocessing.Pool(num_proc) as pool:
         results = pool.map(_scan_shard_worker, shard_args)
     nonempty = 0
-    records: list[tuple[int, str, int, int, str]] = []
+    records: list[tuple[int, str, int, str]] = []
     for n, shard_records in results:
         nonempty += n
         records.extend(shard_records)
@@ -545,7 +544,7 @@ def _scan_node_partials(
     num_proc: int,
     output_dir: Path,
     wait_timeout: int,
-) -> tuple[int, list[tuple[int, str, int, int, str]]]:
+) -> tuple[int, list[tuple[int, str, int, str]]]:
     """Scan this node's line range, write a partial file; node 0 merges all partials."""
     output_dir.mkdir(parents=True, exist_ok=True)
     node_shards = _shard_offsets(path, node_count)
@@ -571,7 +570,7 @@ def _scan_node_partials(
         if time.monotonic() >= deadline:
             raise RuntimeError(f"timed out waiting for scan partials: {missing} ({path})")
         time.sleep(2)
-    merged: list[tuple[int, str, int, int, str]] = []
+    merged: list[tuple[int, str, int, str]] = []
     for rank in range(node_count):
         with (output_dir / f"partial_{modality}.rank{rank:04d}.jsonl").open(encoding="utf-8") as handle:
             for line in handle:
@@ -589,16 +588,11 @@ def _record_to_index(
     raw_index: int,
     task: str,
     token_count: int,
-    effective_token_count: int,
     kind: str,
 ) -> None:
-    if kind == "maxlen":
-        stats["deleted"] += 1
-        return
-    if kind == "failed":
+    if kind == "count_failed":
         stats["encoding_failed"] += 1
-        return
-    dataset_index = stats["retained"]
+    dataset_index = raw_index
     stats["retained"] += 1
     family = family_for_task(task)
     cache_rows.append(
@@ -609,7 +603,6 @@ def _record_to_index(
             "task": task,
             "family": family,
             "assistant_token_count": int(token_count),
-            "effective_token_count": int(effective_token_count),
             "eligible": bool(token_count > 0),
         }
     )
@@ -619,12 +612,11 @@ def _record_to_index(
     stats["eligible"] += 1
     task_index.setdefault(task, []).append(
         {
-            "index": dataset_index,
+            "index": raw_index,
             "raw_index": raw_index,
             "task": task,
             "family": family,
             "assistant_token_count": int(token_count),
-            "effective_token_count": int(effective_token_count),
         }
     )
 
@@ -646,7 +638,7 @@ def scan_encoded_index(
     task_index: dict[str, list[dict[str, Any]]] = {}
     cache_rows: list[dict[str, Any]] = []
 
-    def records() -> Iterator[tuple[int, str, int, int, str]]:
+    def records() -> Iterator[tuple[int, str, int, str]]:
         if node_count > 1:
             _nonempty, node_records = _scan_node_partials(
                 path,
@@ -671,20 +663,13 @@ def scan_encoded_index(
                     row = json.loads(line)
                     task = str(row.get("task") or UNKNOWN_TASK)
                     if template is None:
-                        yield raw_index, task, 1, 1, "ok"
+                        yield raw_index, task, 1, "ok"
                         continue
                     try:
-                        token_count, effective_token_count = _token_counts(template, row)
-                        yield raw_index, task, int(token_count), int(effective_token_count), "ok"
-                    except Exception as exc:
-                        try:
-                            from swift.template import MaxLengthError
-                        except ImportError:
-                            MaxLengthError = ()
-                        if MaxLengthError and isinstance(exc, MaxLengthError):
-                            yield raw_index, task, 0, 0, "maxlen"
-                        else:
-                            yield raw_index, task, 0, 0, "failed"
+                        token_count = _assistant_token_count(template, row)
+                        yield raw_index, task, int(token_count), "ok"
+                    except Exception:
+                        yield raw_index, task, 0, "count_failed"
         else:
             shard_args = [
                 (str(path), start, count, raw_start, model, model_type, max_length)
@@ -695,7 +680,7 @@ def scan_encoded_index(
             for _nonempty, shard_records in results:
                 yield from shard_records
 
-    for raw_index, task, token_count, effective_token_count, kind in records():
+    for raw_index, task, token_count, kind in records():
         stats["raw"] += 1
         _record_to_index(
             stats,
@@ -705,7 +690,6 @@ def scan_encoded_index(
             raw_index=raw_index,
             task=task,
             token_count=token_count,
-            effective_token_count=effective_token_count,
             kind=kind,
         )
     return task_index, stats["retained"], stats["eligible"], cache_rows, stats
@@ -925,34 +909,25 @@ def _distribution(samples: list[dict[str, Any]]) -> dict[str, Any]:
     families: dict[str, dict[str, int]] = {}
     for entry in samples:
         assistant_tokens = int(entry["assistant_token_count"])
-        effective_tokens = int(entry.get("effective_token_count", assistant_tokens))
         task = entry["task"]
         family = entry["family"]
-        tasks.setdefault(task, {"samples": 0, "assistant_tokens": 0, "effective_tokens": 0})
-        families.setdefault(family, {"samples": 0, "assistant_tokens": 0, "effective_tokens": 0})
+        tasks.setdefault(task, {"samples": 0, "assistant_tokens": 0})
+        families.setdefault(family, {"samples": 0, "assistant_tokens": 0})
         tasks[task]["samples"] += 1
         tasks[task]["assistant_tokens"] += assistant_tokens
-        tasks[task]["effective_tokens"] += effective_tokens
         families[family]["samples"] += 1
         families[family]["assistant_tokens"] += assistant_tokens
-        families[family]["effective_tokens"] += effective_tokens
     total_samples = len(samples)
     total_assistant_tokens = sum(v["assistant_tokens"] for v in tasks.values())
-    total_effective_tokens = sum(v["effective_tokens"] for v in tasks.values())
     for grouped in (tasks, families):
         for values in grouped.values():
             values["sample_ratio"] = values["samples"] / total_samples if total_samples else 0.0
             values["token_ratio"] = values["assistant_tokens"] / total_assistant_tokens if total_assistant_tokens else 0.0
-            values["effective_token_ratio"] = (
-                values["effective_tokens"] / total_effective_tokens if total_effective_tokens else 0.0
-            )
     return {
         "samples": total_samples,
         "assistant_tokens": total_assistant_tokens,
-        "effective_tokens": total_effective_tokens,
         "sample_ratio": 1.0 if total_samples else 0.0,
         "token_ratio": 1.0 if total_assistant_tokens else 0.0,
-        "effective_token_ratio": 1.0 if total_effective_tokens else 0.0,
         "tasks": tasks,
         "families": families,
     }
@@ -1207,7 +1182,6 @@ def build_block(
                     "task": task,
                     "family": family_for_task(task),
                     "assistant_token_count": 1,
-                    "effective_token_count": 1,
                 }
                 for row in rows
             ]
@@ -1221,23 +1195,12 @@ def build_block(
     text_means = {task: sum(row["assistant_token_count"] for row in rows) / len(rows) for task, rows in text_index.items()}
     multi_samples, multi_quotas = _sample_modality(multi_index, multi_quota, alpha, multi_means, tiny_usage, rng, cursor, modality="multi")
     text_samples, text_quotas = _sample_modality(text_index, text_quota, alpha, text_means, tiny_usage, rng, cursor, modality="text")
-    multi_effective_tokens = sum(int(row.get("effective_token_count", row["assistant_token_count"])) for row in multi_samples)
-    text_effective_tokens = sum(int(row.get("effective_token_count", row["assistant_token_count"])) for row in text_samples)
-    effective_total = multi_effective_tokens + text_effective_tokens
-    multi_effective_token_ratio = multi_effective_tokens / effective_total if effective_total else 0.0
-    if multi_effective_token_ratio > MAX_MULTI_EFFECTIVE_TOKEN_RATIO:
-        raise ValueError(
-            f"multimodal effective-token ratio {multi_effective_token_ratio:.4f} exceeds hard cap "
-            f"{MAX_MULTI_EFFECTIVE_TOKEN_RATIO:.2f}; reduce --multi-ratio"
-        )
     micro_steps = steps * grad_acc
     per_micro = dp_world_size * per_device_batch
-    # 长度感知组步：同步训练中微步耗时由组内最长样本决定。
-    # 按 effective_token_count 降序后每 per_micro 条一组，长样本集中且组内长度相近，
-    # 最小化所有微步最长样本之和（即总步时），同时不丢弃任何样本。
+    # Use the known assistant-token count for deterministic block ordering.
     combined = [(row, "multi") for row in multi_samples] + [(row, "text") for row in text_samples]
     combined.sort(
-        key=lambda item: int(item[0].get("effective_token_count", item[0]["assistant_token_count"])),
+        key=lambda item: int(item[0]["assistant_token_count"]),
         reverse=True,
     )
     entries: list[dict[str, Any]] = []
@@ -1254,7 +1217,6 @@ def build_block(
                 "index": row["index"],
                 "raw_index": row.get("raw_index", row["index"]),
                 "assistant_token_count": int(row["assistant_token_count"]),
-                "effective_token_count": int(row.get("effective_token_count", row["assistant_token_count"])),
                 "tiny_pool": bool(row.get("tiny_pool", False)),
                 "pool": _TINY_POOL_KEY if row.get("tiny_pool", False) else "regular",
             })
@@ -1263,7 +1225,6 @@ def build_block(
         "start_step": start_step,
         "steps": steps,
         "alpha": alpha,
-        "multi_effective_token_ratio": multi_effective_token_ratio,
         "quotas": {"multi": multi_quotas, "text": text_quotas},
         "planned": {
             "multi": _distribution([entry for entry in entries if entry["modality"] == "multi"]),
@@ -1332,6 +1293,25 @@ def generate_plan(
     (output_dir / "token_cache_text.jsonl").write_text(
         "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in text_cache), encoding="utf-8"
     )
+    replacement_pools = {
+        "multi": {
+            task: sorted(int(row["raw_index"]) for row in rows)
+            for task, rows in multi_index.items()
+        },
+        "text": {
+            task: sorted(int(row["raw_index"]) for row in rows)
+            for task, rows in text_index.items()
+        },
+    }
+    replacement_pools["multi"]["__all__"] = sorted(
+        index for rows in replacement_pools["multi"].values() for index in rows
+    )
+    replacement_pools["text"]["__all__"] = sorted(
+        index for rows in replacement_pools["text"].values() for index in rows
+    )
+    (output_dir / "replacement_pools.json").write_text(
+        json.dumps(replacement_pools, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     if max_steps is None:
         max_steps = (5 * eligible_n_multi + eligible_n_text) * epochs // global_batch_size
     total_blocks = (max_steps + steps_per_block - 1) // steps_per_block
@@ -1361,7 +1341,9 @@ def generate_plan(
         "per_device_batch": per_device_batch, "grad_acc": grad_acc, "seed": seed,
         "epochs": epochs, "multi_ratio": multi_ratio, "text_ratio": 1.0 - multi_ratio,
         "model": model, "model_type": model_type, "max_length": max_length,
-        "truncation_strategy": "delete",
+        "dataset_index_mode": "raw",
+        "replacement_pools": "replacement_pools.json",
+        "truncation_strategy": "raise_at_runtime",
         "image_max_token_num": os.environ.get("IMAGE_MAX_TOKEN_NUM", "512"),
         "family_cap": FAMILY_CAP, "blocks": blocks,
         "tiny_usage": {f"{modality}:{index}": count for (modality, index), count in tiny_usage.items()},
@@ -1424,9 +1406,10 @@ def main(argv: list[str] | None = None) -> int:
         partial_wait_timeout=args.partial_wait_timeout,
     )
     print(
-        f"sample_plan n_multi={meta['N_multi']} n_text={meta['N_text']} "
+        f"sample_plan mode={meta['dataset_index_mode']} n_multi={meta['N_multi']} n_text={meta['N_text']} "
         f"eligible_multi={meta['eligible_N_multi']} eligible_text={meta['eligible_N_text']} "
-        f"max_steps={meta['max_steps']} blocks={meta['total_blocks']} dir={args.output_dir}", flush=True
+        f"max_steps={meta['max_steps']} blocks={meta['total_blocks']} "
+        f"replacement_pools={args.output_dir / meta['replacement_pools']} dir={args.output_dir}", flush=True
     )
     return 0
 

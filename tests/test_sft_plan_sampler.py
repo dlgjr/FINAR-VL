@@ -100,41 +100,23 @@ def test_install_plan_dataloader_disabled_without_env(monkeypatch):
     assert _install_plan_dataloader(object()) is False
 
 
-def test_plan_sampler_per_device_batch(tmp_path: Path):
+def test_plan_sampler_rejects_per_device_batch_above_one(tmp_path: Path):
     from scripts.sft.sample_plan import generate_plan
-    from scripts.sft.swift_sft_plugin import PlanSampler
 
     multi = tmp_path / "multi.jsonl"
     text = tmp_path / "text.jsonl"
     _write_rows(multi, [f"m{i}" for i in range(10)], 50)
     _write_rows(text, [f"t{i}" for i in range(10)], 50)
     output = tmp_path / "plan"
-    generate_plan(
-        train_multi=multi,
-        train_text=text,
-        output_dir=output,
-        global_batch_size=8,
-        dp_world_size=2,
-        per_device_batch=2,
-        grad_acc=2,
-        seed=42,
-        max_steps=2,
-    )
-    meta = json.loads((output / "meta.json").read_text(encoding="utf-8"))
-    dataset_len = meta["N_multi"] + meta["N_text"]
-    entries = [
-        json.loads(line)
-        for line in (output / "block_0000.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
-    sampler = PlanSampler(plan_dir=output, rank=0, dataset_len=dataset_len)
-    expected = [
-        (
-            entry["index"]
-            if entry["modality"] == "multi"
-            else meta["N_multi"] + entry["index"]
+    with pytest.raises(ValueError, match="per_device_batch=1"):
+        generate_plan(
+            train_multi=multi,
+            train_text=text,
+            output_dir=output,
+            global_batch_size=8,
+            dp_world_size=2,
+            per_device_batch=2,
+            grad_acc=2,
+            seed=42,
+            max_steps=2,
         )
-        for entry in entries
-        if 0 <= entry["position_in_micro_step"] < 2
-    ]
-    assert list(sampler) == expected
-    assert len(sampler) == len(expected)

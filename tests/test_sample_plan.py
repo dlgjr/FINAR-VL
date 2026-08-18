@@ -38,12 +38,81 @@ def sample_data(tmp_path: Path):
 def test_alpha_schedule_boundaries():
     from scripts.sft.sample_plan import alpha_for_step
 
-    assert alpha_for_step(0) == 0.55
-    assert alpha_for_step(799) == 0.55
-    assert alpha_for_step(800) == 0.50
-    assert alpha_for_step(1999) == 0.50
-    assert alpha_for_step(2000) == 0.45
-    assert alpha_for_step(99999) == 0.45
+    assert alpha_for_step(0) == 0.65
+    assert alpha_for_step(999) == 0.65
+    assert alpha_for_step(1000) == 0.60
+    assert alpha_for_step(2999) == 0.60
+    assert alpha_for_step(3000) == 0.55
+    assert alpha_for_step(99999) == 0.55
+
+
+def test_text_only_scan_uses_assistant_labels_and_keeps_raw_rows(monkeypatch, tmp_path: Path):
+    import scripts.sft.sample_plan as sample_plan
+
+    class Template:
+        def encode(self, row):
+            assert row["images"] == []
+            assert row["videos"] == []
+            assert row["audios"] == []
+            assert all("<image>" not in message["content"] for message in row["messages"])
+            if row["task"] == "zero":
+                return {"labels": [-100, -100]}
+            return {"labels": [-100, 3, -100, 4]}
+
+    monkeypatch.setattr(sample_plan, "_load_training_template", lambda *args: Template())
+    path = tmp_path / "multi.jsonl"
+    rows = [
+        {"task": "generation", "messages": [{"content": "<image> answer"}], "images": ["missing.jpg"]},
+        {"task": "zero", "messages": [{"content": "text"}], "images": ["missing.jpg"]},
+        {"task": "other", "messages": [{"content": "text"}], "images": ["missing.jpg"]},
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    task_index, retained, eligible, cache, stats = sample_plan.scan_encoded_index(
+        path,
+        modality="multi",
+        model="test-model",
+        max_length=1,
+    )
+
+    assert retained == 3
+    assert eligible == 2
+    assert stats["deleted"] == 0
+    assert stats["encoding_failed"] == 0
+    assert [row["raw_index"] for row in cache] == [0, 1, 2]
+    assert [row["assistant_token_count"] for row in cache] == [2, 0, 2]
+    assert list(task_index) == ["generation", "other"]
+    assert rows[0]["images"] == ["missing.jpg"]
+
+
+def test_generate_plan_uses_raw_indices_and_writes_candidate_pools(tmp_path: Path):
+    from scripts.sft.sample_plan import generate_plan
+
+    multi = tmp_path / "multi.jsonl"
+    text = tmp_path / "text.jsonl"
+    _write_rows(multi, ["generation"], 2)
+    _write_rows(text, ["dialogue"], 2)
+    plan_dir = tmp_path / "plan"
+    meta = generate_plan(
+        train_multi=multi,
+        train_text=text,
+        output_dir=plan_dir,
+        global_batch_size=2,
+        dp_world_size=1,
+        grad_acc=2,
+        seed=17,
+        multi_ratio=0.5,
+        max_steps=1,
+    )
+
+    pools = json.loads((plan_dir / "replacement_pools.json").read_text(encoding="utf-8"))
+    entries = [json.loads(line) for line in (plan_dir / "block_0000.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert meta["dataset_index_mode"] == "raw"
+    assert meta["replacement_pools"] == "replacement_pools.json"
+    assert pools["multi"]["generation"] == [0, 1]
+    assert pools["text"]["dialogue"] == [0, 1]
+    assert all(entry["index"] == entry["raw_index"] for entry in entries)
+    assert all("effective_token_count" not in entry for entry in entries)
 
 
 def test_generate_plan_blocks_align_with_alpha_boundaries(tmp_path: Path):
@@ -65,8 +134,8 @@ def test_generate_plan_blocks_align_with_alpha_boundaries(tmp_path: Path):
     )
     assert meta["steps_per_block"] == 200
     assert meta["total_blocks"] == 11
-    assert [(block["start_step"], block["alpha"]) for block in meta["blocks"]][4] == (800, 0.50)
-    assert [(block["start_step"], block["alpha"]) for block in meta["blocks"]][10] == (2000, 0.45)
+    assert [(block["start_step"], block["alpha"]) for block in meta["blocks"]][4] == (800, 0.65)
+    assert [(block["start_step"], block["alpha"]) for block in meta["blocks"]][10] == (2000, 0.60)
 
 
 def test_task_b_weight_defaults_and_tables():
@@ -74,14 +143,14 @@ def test_task_b_weight_defaults_and_tables():
 
     assert task_b_weight("unlisted_task", "multi") == 1.0
     assert task_b_weight("unlisted_task", "text") == 1.0
-    assert task_b_weight("financial_headline_classification", "text") == 0.20
-    assert task_b_weight("financial_event_extraction", "text") == 0.35
-    assert task_b_weight("stock_movement_prediction", "text") == 0.15
-    assert task_b_weight("multi_step_numerical_reasoning", "multi") == 2.4
-    assert task_b_weight("multi_step_numerical_reasoning", "text") == 2.0
-    assert task_b_weight("evidence_retrieval", "multi") == 2.2
-    assert task_b_weight("evidence_retrieval", "text") == 1.2
-    assert task_b_weight("image_caption", "multi") == 0.25
+    assert task_b_weight("financial_headline_classification", "text") == 0.55
+    assert task_b_weight("financial_event_extraction", "text") == 0.55
+    assert task_b_weight("stock_movement_prediction", "text") == 0.55
+    assert task_b_weight("multi_step_numerical_reasoning", "multi") == 0.90
+    assert task_b_weight("multi_step_numerical_reasoning", "text") == 0.90
+    assert task_b_weight("evidence_retrieval", "multi") == 1.05
+    assert task_b_weight("evidence_retrieval", "text") == 0.85
+    assert task_b_weight("image_caption", "multi") == 0.80
 
 
 def test_allocate_quotas_respects_caps_and_sum():
@@ -103,7 +172,7 @@ def test_allocate_quotas_tiny_size_boundary():
 
     assert task_cap("ordinary", 99, 6000) == int(6000 * 0.005)
     assert task_cap("ordinary", 100, 6000) == int(6000 * 0.02)
-    assert task_cap("financial_counterfactual_inference", 499, 6000) == int(6000 * 0.04)
+    assert task_cap("financial_counterfactual_inference", 499, 6000) == int(6000 * 0.02)
     assert task_cap("ordinary", 499, 6000) == int(6000 * 0.02)
     assert task_cap("ordinary", 500, 6000) == int(6000 * 0.05)
 
@@ -132,8 +201,8 @@ def test_generate_plan_block_layout_and_ratio(tmp_path: Path, sample_data):
             ).splitlines()
         ]
         assert len(entries) == 200 * 24
-        assert sum(entry["modality"] == "multi" for entry in entries) == 1920
-        assert sum(entry["modality"] == "text" for entry in entries) == 2880
+        assert sum(entry["modality"] == "multi" for entry in entries) == 1728
+        assert sum(entry["modality"] == "text" for entry in entries) == 3072
         by_micro = {}
         for entry in entries:
             by_micro.setdefault(entry["micro_step"], []).append(entry)
@@ -141,8 +210,9 @@ def test_generate_plan_block_layout_and_ratio(tmp_path: Path, sample_data):
         for micro_entries in by_micro.values():
             assert len(micro_entries) == 12
             assert len({entry["position_in_micro_step"] for entry in micro_entries}) == 12
-            tokens = [entry["effective_token_count"] for entry in micro_entries]
+            tokens = [entry["assistant_token_count"] for entry in micro_entries]
             assert tokens == sorted(tokens, reverse=True)
+            assert all("effective_token_count" not in entry for entry in micro_entries)
         for rank in range(12):
             assert sum(
                 entry["position_in_micro_step"] == rank for entry in entries
@@ -160,7 +230,6 @@ def test_build_block_groups_long_samples_together():
                 "task": task,
                 "family": task,
                 "assistant_token_count": base - index,
-                "effective_token_count": base - index,
             }
             for index in range(count)
         ]
@@ -193,17 +262,17 @@ def test_build_block_groups_long_samples_together():
     for micro_entries in by_micro.values():
         assert len(micro_entries) == 12
         assert sorted(entry["position_in_micro_step"] for entry in micro_entries) == list(range(12))
-        tokens = [entry["effective_token_count"] for entry in micro_entries]
+        tokens = [entry["assistant_token_count"] for entry in micro_entries]
         assert tokens == sorted(tokens, reverse=True)
     # 组步按长度降序：微步最大值跨微步不增，全局最长样本位于第 0 个微步的 position 0。
     maxima = [
-        max(entry["effective_token_count"] for entry in micro_entries)
+        max(entry["assistant_token_count"] for entry in micro_entries)
         for micro_entries in by_micro.values()
     ]
     assert maxima == sorted(maxima, reverse=True)
     first = sorted(by_micro[0], key=lambda entry: entry["position_in_micro_step"])
-    assert first[0]["effective_token_count"] == max(
-        entry["effective_token_count"] for entry in entries
+    assert first[0]["assistant_token_count"] == max(
+        entry["assistant_token_count"] for entry in entries
     )
 
 
@@ -381,7 +450,6 @@ def test_generate_plan_per_device_batch_is_rejected(tmp_path: Path, sample_data)
 
 def test_finance_family_mapping_and_sampling_constants():
     from scripts.sft.sample_plan import (
-        MAX_MULTI_EFFECTIVE_TOKEN_RATIO,
         MAX_TASK_RATIO,
         MIN_ASSISTANT_TOKENS_FOR_WEIGHT,
         TOKEN_LENGTH_BETA,
@@ -402,4 +470,3 @@ def test_finance_family_mapping_and_sampling_constants():
     assert MAX_TASK_RATIO == 0.05
     assert TOKEN_LENGTH_BETA == 0.5
     assert MIN_ASSISTANT_TOKENS_FOR_WEIGHT == 8
-    assert MAX_MULTI_EFFECTIVE_TOKEN_RATIO == 0.60

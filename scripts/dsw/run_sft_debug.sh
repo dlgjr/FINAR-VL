@@ -79,7 +79,7 @@ echo "===== SFT DSW DEBUG CONFIG ====="
 echo "model=$BASE_MODEL benchmark=$SFT_BENCHMARK"
 echo "max_steps=5 max_length=$SFT_DEBUG_MAX_LENGTH gpus=0 sequence_parallel=1 deepspeed=zero2 fixed_batch=1 grad_accum=2 eval_samples=1"
 echo "tuner=lora rank=16 alpha=32 dropout=0.05 target_modules=all-linear learning_rate=1e-5 warmup_ratio=0.05 max_grad_norm=1.0"
-echo "sample_plan_dir=$SFT_PLAN_DIR"
+echo "sample_plan_dir=$SFT_PLAN_DIR index_mode=raw replacement_pools=$SFT_PLAN_DIR/replacement_pools.json runtime_rejected=$RUN_DIR/runtime_rejected"
 
 exec "$SWIFT_BIN" sft \
   --model "$BASE_MODEL" \
@@ -89,6 +89,7 @@ exec "$SWIFT_BIN" sft \
   --dataset_shuffle false \
   --train_dataloader_shuffle false \
   --strict false \
+  --lazy_tokenize true \
   --tuner_type lora \
   --freeze_vit true \
   --freeze_aligner false \
@@ -106,6 +107,7 @@ exec "$SWIFT_BIN" sft \
   --deepspeed zero2 \
   --sequence_parallel_size 1 \
   --max_length "$SFT_DEBUG_MAX_LENGTH" \
+  --truncation_strategy delete \
   --max_steps 5 \
   --learning_rate 1e-5 \
   --lr_scheduler_type cosine \

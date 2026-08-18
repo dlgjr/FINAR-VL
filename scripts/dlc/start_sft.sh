@@ -166,6 +166,10 @@ mkdir -p \
   "$HUGGINGFACE_HUB_CACHE" \
   "$MODELSCOPE_CACHE" \
   "$TRITON_CACHE_DIR"
+OUTPUT_PROBE="$RUN_DIR/.output_dir_write_probe.rank_${NODE_RANK}"
+printf 'writable\n' >"$OUTPUT_PROBE"
+rm -f "$OUTPUT_PROBE"
+echo "output_dir=$RUN_DIR writable=1 nas_root=$ROOT"
 
 "$PYTHON_BIN" - "$MODELSCOPE_CACHE" <<'PY'
 import os
@@ -428,6 +432,7 @@ fi
 
 SFT_MAX_STEPS="$("$PYTHON_BIN" -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["max_steps"])' "$SFT_PLAN_DIR/meta.json")"
 echo "sample_plan_dir=$SFT_PLAN_DIR epochs=$SFT_EPOCHS max_steps=$SFT_MAX_STEPS index_mode=raw"
+echo "replacement_pools=$SFT_PLAN_DIR/replacement_pools.json runtime_rejected=$RUN_DIR/runtime_rejected"
 
 if [[ ! "$SFT_DDP_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
   echo "SFT_DDP_TIMEOUT must be a positive integer number of seconds, got: $SFT_DDP_TIMEOUT" >&2

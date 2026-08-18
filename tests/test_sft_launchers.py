@@ -162,7 +162,7 @@ def test_dsw_launcher_runs_five_steps_without_wandb_and_limits_eval_to_one_sampl
         "PYTORCH_ALLOC_CONF=expandable_segments:True",
         'export SFT_ATTN_IMPL="${SFT_ATTN_IMPL:-sdpa}"',
         'export SFT_CELOSS_PARALLEL_SIZE="${SFT_CELOSS_PARALLEL_SIZE:-4096}"',
-        'export SFT_DEBUG_MAX_LENGTH="${SFT_DEBUG_MAX_LENGTH:-81920}"',
+        'export SFT_DEBUG_MAX_LENGTH="${SFT_DEBUG_MAX_LENGTH:-49152}"',
         'export CELOSS_PARALLEL_SIZE="$SFT_CELOSS_PARALLEL_SIZE"',
         "--per_device_train_batch_size 1",
         "--tuner_type lora",
@@ -182,6 +182,7 @@ def test_dsw_launcher_runs_five_steps_without_wandb_and_limits_eval_to_one_sampl
         '--max_length "$SFT_DEBUG_MAX_LENGTH"',
         "--logging_nan_inf_filter false",
         "--strict false",
+        "--lazy_tokenize true",
         "--report_to none",
         "--callbacks finar_log finar_numerics finar_pass_at_8 finar_plan",
     ):

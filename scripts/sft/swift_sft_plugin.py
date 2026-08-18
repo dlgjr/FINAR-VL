@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import json
+import hashlib
 import math
 import subprocess
 import time
@@ -650,6 +651,151 @@ class PlanSampler(_SAMPLER_BASE):
         return self._length()
 
 
+_RUNTIME_ROUTE_KEY = "_finar_runtime_route"
+
+
+class RuntimeReplacementDataset:
+    def __init__(
+        self,
+        dataset,
+        template,
+        *,
+        plan_dir: Path,
+        n_multi: int,
+        seed: int,
+        rejection_dir: Path,
+    ) -> None:
+        self.dataset = dataset
+        self.template = template
+        self.n_multi = int(n_multi)
+        self.seed = int(seed)
+        self.rejection_dir = Path(rejection_dir)
+        pool_path = Path(plan_dir) / "replacement_pools.json"
+        if pool_path.is_file():
+            self.pools = json.loads(pool_path.read_text(encoding="utf-8"))
+        else:
+            self.pools = {
+                "multi": {"__all__": list(range(self.n_multi))},
+                "text": {"__all__": list(range(max(0, len(dataset) - self.n_multi)))},
+            }
+        self._rejection_path = self.rejection_dir / (
+            f"runtime_rejected.rank_{_global_rank():04d}.pid_{os.getpid()}.jsonl"
+        )
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def _split_index(self, index: int) -> tuple[str, int]:
+        if index < self.n_multi:
+            return "multi", int(index)
+        return "text", int(index - self.n_multi)
+
+    def _dataset_index(self, modality: str, raw_index: int) -> int:
+        return int(raw_index) if modality == "multi" else self.n_multi + int(raw_index)
+
+    def _candidate_indices(self, modality: str, task: str, raw_index: int) -> list[int]:
+        modality_pools = self.pools.get(modality, {})
+        same_task = [int(value) for value in modality_pools.get(task, [])]
+        all_candidates = [int(value) for value in modality_pools.get("__all__", [])]
+        ordered: list[int] = [raw_index]
+        digest = hashlib.sha256(
+            f"{self.seed}:{modality}:{task}:{raw_index}".encode("utf-8")
+        ).digest()
+        remainder = [value for value in same_task if value != raw_index]
+        if remainder:
+            offset = int.from_bytes(digest[:8], "big") % len(remainder)
+            ordered.extend(remainder[offset:] + remainder[:offset])
+        fallback = [value for value in all_candidates if value not in ordered]
+        if fallback:
+            offset = int.from_bytes(digest[8:16], "big") % len(fallback)
+            fallback = fallback[offset:] + fallback[:offset]
+        ordered.extend(fallback)
+        return ordered
+
+    def _write_rejection(
+        self,
+        *,
+        modality: str,
+        task: str,
+        raw_index: int,
+        candidate_raw_index: int,
+        reason: str,
+        error: Exception,
+    ) -> None:
+        self.rejection_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "modality": modality,
+            "task": task,
+            "raw_index": int(raw_index),
+            "candidate_raw_index": int(candidate_raw_index),
+            "resolved_raw_index": int(candidate_raw_index),
+            "reason": reason,
+            "error": f"{type(error).__name__}: {error}",
+        }
+        with self._rejection_path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def _failure_reason(error: Exception) -> str:
+        if "MaxLengthError" in type(error).__name__:
+            return "max_length"
+        return "encode_failed"
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        if isinstance(index, str):
+            return self.dataset[index]
+        modality, raw_index = self._split_index(int(index))
+        original_row = self.dataset[int(index)]
+        task = str(original_row.get("task") or "__unknown__")
+        candidates = self._candidate_indices(modality, task, raw_index)
+        last_error: Exception | None = None
+        replacement_reason = "original"
+        for candidate_raw_index in candidates:
+            candidate_index = self._dataset_index(modality, candidate_raw_index)
+            row = original_row if candidate_index == int(index) else self.dataset[candidate_index]
+            candidate_task = str(row.get("task") or "__unknown__")
+            try:
+                encoded = self.template.encode(row, return_length=True)
+                if isinstance(encoded, list):
+                    raise ValueError("runtime encode produced multiple rows")
+                try:
+                    from scripts.sft.sample_plan import family_for_task
+                except ImportError:
+                    family = candidate_task
+                else:
+                    family = family_for_task(candidate_task)
+                encoded[_RUNTIME_ROUTE_KEY] = {
+                    "task": candidate_task,
+                    "family": family,
+                    "modality": modality,
+                    "index": int(candidate_raw_index),
+                    "raw_index": int(candidate_raw_index),
+                    "planned_raw_index": int(raw_index),
+                    "replaced": bool(candidate_raw_index != raw_index),
+                    "replacement_reason": replacement_reason,
+                }
+                return encoded
+            except Exception as error:
+                last_error = error
+                if candidate_raw_index == raw_index:
+                    replacement_reason = self._failure_reason(error)
+                self._write_rejection(
+                    modality=modality,
+                    task=task,
+                    raw_index=raw_index,
+                    candidate_raw_index=candidate_raw_index,
+                    reason=self._failure_reason(error),
+                    error=error,
+                )
+        if last_error is None:
+            raise ValueError(
+                f"no runtime replacement candidate for modality={modality} task={task} raw_index={raw_index}"
+            )
+        raise ValueError(
+            f"runtime replacement exhausted for modality={modality} task={task} raw_index={raw_index}"
+        ) from last_error
+
+
 def _dp_rank() -> tuple[int, int]:
     try:
         from swift.sequence_parallel import sequence_parallel
@@ -778,7 +924,13 @@ class _PlanRuntimeTracker:
             raise AssertionError("rank-local plan cursor exhausted before training ended")
         return self.entries[self.cursor]
 
-    def consume(self, labels, *, token_count: int | None = None) -> None:
+    def consume(
+        self,
+        labels,
+        *,
+        token_count: int | None = None,
+        runtime_route: dict[str, Any] | None = None,
+    ) -> None:
         if labels is None:
             raise AssertionError("planned SFT batch must contain labels")
         if getattr(labels, "ndim", None) != 2 or int(labels.shape[0]) != 1:
@@ -786,7 +938,18 @@ class _PlanRuntimeTracker:
         entry = self.current_entry()
         if token_count is None:
             token_count = int(labels.ne(-100).sum().item())
-        _add_distribution(self.actual[int(entry["block"])], entry, int(token_count))
+        actual_entry = dict(entry)
+        if runtime_route:
+            actual_entry.update(
+                {
+                    "task": str(runtime_route.get("task") or entry["task"]),
+                    "family": str(runtime_route.get("family") or entry["family"]),
+                    "modality": str(runtime_route.get("modality") or entry["modality"]),
+                    "index": int(runtime_route.get("index", entry["index"])),
+                    "raw_index": int(runtime_route.get("raw_index", entry.get("raw_index", entry["index"]))),
+                }
+            )
+        _add_distribution(self.actual[int(entry["block"])], actual_entry, int(token_count))
         self.cursor += 1
 
     def write_rank_block(self, block_id: int) -> None:
@@ -908,6 +1071,29 @@ def _install_plan_dataloader(trainer) -> bool:
     return True
 
 
+def _install_runtime_replacement(trainer, plan_dir: Path, tracker: _PlanRuntimeTracker) -> None:
+    dataset = trainer.train_dataset
+    base_dataset = getattr(dataset, "dataset", dataset)
+    trainer.train_dataset = RuntimeReplacementDataset(
+        base_dataset,
+        trainer.template,
+        plan_dir=plan_dir,
+        n_multi=int(tracker.meta["N_multi"]),
+        seed=int(tracker.meta.get("seed", 42)),
+        rejection_dir=Path(args_output_dir(trainer.args)) / "runtime_rejected",
+    )
+    original_collator = trainer.data_collator
+
+    def runtime_collator(batch):
+        routes = [item.pop(_RUNTIME_ROUTE_KEY, None) for item in batch]
+        result = original_collator(batch)
+        if len(routes) == 1 and routes[0] is not None:
+            result[_RUNTIME_ROUTE_KEY] = routes[0]
+        return result
+
+    trainer.data_collator = runtime_collator
+
+
 class FinarPlanCallback(TrainerCallback):
     """启用全局采样计划：替换训练 dataloader 并在 block 边界打印配额统计。"""
 
@@ -926,23 +1112,27 @@ class FinarPlanCallback(TrainerCallback):
                 raise AssertionError("sample plan actual accounting requires per_device_batch=1")
             self._blocks = meta.get("blocks", [])
             self._steps_per_block = int(meta.get("steps_per_block", 200))
-            _install_plan_dataloader(trainer)
             self._tracker = _PlanRuntimeTracker(plan_dir, args_output_dir(args))
             trainer._finar_plan_tracker = self._tracker
+            _install_runtime_replacement(trainer, Path(plan_dir), self._tracker)
+            _install_plan_dataloader(trainer)
             original_compute_loss = trainer.compute_loss
 
             def tracked_compute_loss(model, inputs, *compute_args, **compute_kwargs):
+                runtime_route = inputs.pop(_RUNTIME_ROUTE_KEY, None)
+                trainer._finar_runtime_route = runtime_route if isinstance(runtime_route, dict) else None
                 labels = inputs.get("labels")
                 entry = self._tracker.current_entry()
-                task = str(entry.get("task") or "")
+                route = trainer._finar_runtime_route or entry
+                task = str(route.get("task") or "")
                 trainer._finar_current_task = task
                 trainer._finar_use_kl = use_kl_for_task(task)
                 trainer._finar_kl_route = {
                     "task": task,
                     "use_kl": trainer._finar_use_kl,
-                    "modality": str(entry.get("modality") or ""),
-                    "index": int(entry.get("index", -1)),
-                    "raw_index": int(entry.get("raw_index", entry.get("index", -1))),
+                    "modality": str(route.get("modality") or ""),
+                    "index": int(route.get("index", -1)),
+                    "raw_index": int(route.get("raw_index", route.get("index", -1))),
                 }
                 result = original_compute_loss(model, inputs, *compute_args, **compute_kwargs)
                 loss = result[0] if isinstance(result, tuple) else result
@@ -953,7 +1143,11 @@ class FinarPlanCallback(TrainerCallback):
                     kl_info = getattr(trainer, "_finar_last_kl", None)
                     if isinstance(kl_info, dict) and str(kl_info.get("task") or "") == task:
                         actual_token_count = int(kl_info.get("local_tokens", 0))
-                self._tracker.consume(labels, token_count=actual_token_count)
+                self._tracker.consume(
+                    labels,
+                    token_count=actual_token_count,
+                    runtime_route=trainer._finar_runtime_route,
+                )
                 return result
 
             trainer.compute_loss = tracked_compute_loss
