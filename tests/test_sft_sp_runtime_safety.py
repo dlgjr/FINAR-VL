@@ -1,9 +1,11 @@
 import json
+import types
 from pathlib import Path
 
 import pytest
 
 import scripts.sft.kl_retention_plugin as kl_plugin
+import scripts.sft.swift_sft_plugin as sft_plugin
 from scripts.sft.swift_sft_plugin import _PlanRuntimeTracker
 
 
@@ -90,3 +92,53 @@ def test_plan_merge_counts_each_dp_sample_once_and_sums_sp_token_shards(tmp_path
     assert merged["actual"]["tasks"]["a"]["assistant_tokens"] == 10
     assert merged["actual"]["tasks"]["b"]["samples"] == 1
     assert merged["actual"]["tasks"]["b"]["assistant_tokens"] == 20
+
+
+def test_runtime_replacement_is_deferred_until_train_dataloader(monkeypatch, tmp_path: Path):
+    class Trainer:
+        pass
+
+    trainer = Trainer()
+    tracker = object()
+    events = []
+
+    # This is the callback-construction phase that crashed in DLC: the trainer
+    # does not have train_dataset yet. Deferral must not touch that attribute.
+    sft_plugin._defer_runtime_replacement(trainer, tmp_path, tracker)
+    assert not hasattr(trainer, "train_dataset")
+    assert trainer._finar_runtime_replacement_pending == (tmp_path, tracker)
+    assert trainer._finar_runtime_replacement_installed is False
+
+    def fake_install_plan_dataloader(target):
+        def planned_get_train_dataloader(self, skip_batches=0):
+            events.append(("planned", self.train_dataset, int(skip_batches)))
+            return "loader"
+
+        target.get_train_dataloader = types.MethodType(planned_get_train_dataloader, target)
+        return True
+
+    def fake_install_runtime_replacement(target, plan_dir, seen_tracker):
+        events.append(("replacement", Path(plan_dir), seen_tracker, target.train_dataset))
+        target.train_dataset = "wrapped"
+
+    monkeypatch.setattr(sft_plugin, "_ORIGINAL_INSTALL_PLAN_DATALOADER", fake_install_plan_dataloader)
+    monkeypatch.setattr(sft_plugin, "_ORIGINAL_INSTALL_RUNTIME_REPLACEMENT", fake_install_runtime_replacement)
+
+    assert sft_plugin._install_plan_dataloader_deferred(trainer) is True
+    # Trainer.__init__ finishes after callback construction.
+    trainer.train_dataset = "ready"
+
+    assert trainer.get_train_dataloader(skip_batches=2) == "loader"
+    assert events == [
+        ("replacement", tmp_path, tracker, "ready"),
+        ("planned", "wrapped", 2),
+    ]
+    assert trainer._finar_runtime_replacement_installed is True
+    assert trainer._finar_runtime_replacement_pending is None
+
+    # Rebuilding a dataloader for resume/epoch transitions must not wrap twice.
+    assert trainer.get_train_dataloader(skip_batches=3) == "loader"
+    assert events[-1] == ("planned", "wrapped", 3)
+    assert [event for event in events if event[0] == "replacement"] == [
+        ("replacement", tmp_path, tracker, "ready")
+    ]
