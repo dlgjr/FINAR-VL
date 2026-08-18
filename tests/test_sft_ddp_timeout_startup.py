@@ -21,8 +21,24 @@ def test_timeout_patch_is_sft_only() -> None:
     assert not MODULE._is_swift_sft_process(("/site-packages/swift/cli/rlhf.py", "--model", "qwen"))
 
 
+def test_explicit_launcher_marker_controls_timeout_patch() -> None:
+    assert MODULE._sft_timeout_patch_enabled(
+        ("/opt/ac2/bin/python", "worker.py"),
+        {"FINAR_SFT_DDP_TIMEOUT_PATCH": "1"},
+    )
+    assert not MODULE._sft_timeout_patch_enabled(
+        ("/opt/ac2/bin/swift", "sft"),
+        {"FINAR_SFT_DDP_TIMEOUT_PATCH": "0"},
+    )
+    assert MODULE._sft_timeout_patch_enabled(("/opt/ac2/bin/swift", "sft"), {})
+
+
+def test_default_sft_ddp_timeout_is_24_hours() -> None:
+    assert MODULE._DEFAULT_SFT_DDP_TIMEOUT_SECONDS == 86400
+
+
 def test_timeout_patch_raises_missing_or_short_keyword_timeout() -> None:
-    minimum = timedelta(seconds=7200)
+    minimum = timedelta(seconds=86400)
 
     args, kwargs = MODULE._apply_min_timeout((), {}, minimum)
     assert args == ()
@@ -32,14 +48,14 @@ def test_timeout_patch_raises_missing_or_short_keyword_timeout() -> None:
     assert args == ()
     assert kwargs["timeout"] == minimum
 
-    larger = timedelta(seconds=86400)
+    larger = timedelta(seconds=172800)
     args, kwargs = MODULE._apply_min_timeout((), {"timeout": larger}, minimum)
     assert args == ()
     assert kwargs["timeout"] == larger
 
 
 def test_timeout_patch_handles_positional_timeout() -> None:
-    minimum = timedelta(seconds=7200)
+    minimum = timedelta(seconds=86400)
     args, kwargs = MODULE._apply_min_timeout(("nccl", None, timedelta(seconds=600), 24, 3), {}, minimum)
 
     assert args[0] == "nccl"
@@ -47,8 +63,23 @@ def test_timeout_patch_handles_positional_timeout() -> None:
     assert kwargs == {}
 
 
+def test_existing_backend_timeout_is_raised_after_pg_creation() -> None:
+    class Options:
+        _timeout = timedelta(seconds=600)
+
+    class Backend:
+        options = Options()
+
+    backend = Backend()
+    minimum = timedelta(seconds=86400)
+    observed = MODULE._raise_backend_timeout(backend, minimum)
+
+    assert observed == minimum
+    assert backend.options._timeout == minimum
+
+
 def test_deepspeed_timeout_patch_handles_keyword_and_positional_timeout() -> None:
-    minimum = timedelta(seconds=7200)
+    minimum = timedelta(seconds=86400)
 
     def init_distributed(
         dist_backend=None,
@@ -77,7 +108,7 @@ def test_deepspeed_timeout_patch_handles_keyword_and_positional_timeout() -> Non
     assert args[4] == minimum
     assert kwargs == {}
 
-    larger = timedelta(seconds=86400)
+    larger = timedelta(seconds=172800)
     args, kwargs = MODULE._apply_named_min_timeout(init_distributed, (), {"timeout": larger}, minimum)
     assert kwargs["timeout"] == larger
 
@@ -110,7 +141,7 @@ def test_deepspeed_timeout_patch_updates_all_public_aliases(monkeypatch) -> None
     monkeypatch.setitem(sys.modules, "deepspeed.comm", deepspeed_comm)
     monkeypatch.setitem(sys.modules, "deepspeed.comm.comm", deepspeed_comm_impl)
 
-    minimum = timedelta(seconds=7200)
+    minimum = timedelta(seconds=86400)
     assert MODULE._install_deepspeed_timeout_patch(minimum)
 
     assert deepspeed.init_distributed is deepspeed_comm.init_distributed
@@ -120,9 +151,13 @@ def test_deepspeed_timeout_patch_updates_all_public_aliases(monkeypatch) -> None
     assert calls[-1] == minimum
 
 
-def test_sft_launcher_exposes_repo_root_for_sitecustomize() -> None:
+def test_sft_launcher_forces_timeout_patch_on_torchrun_workers() -> None:
     launcher = (ROOT / "scripts/dlc/start_sft.sh").read_text(encoding="utf-8")
     env_script = (ROOT / "scripts/dlc/dlc_env.sh").read_text(encoding="utf-8")
 
     assert 'source "$ROOT/scripts/dlc/dlc_env.sh"' in launcher
     assert 'export PYTHONPATH="$QWEN3VL_ROOT:$PYTHON_USER_SITE' in env_script
+    assert 'export SFT_DDP_TIMEOUT="${SFT_DDP_TIMEOUT:-86400}"' in launcher
+    assert 'export FINAR_SFT_DDP_TIMEOUT_PATCH=1' in launcher
+    assert '--ddp_timeout "$SFT_DDP_TIMEOUT"' in launcher
+    assert launcher.index('export FINAR_SFT_DDP_TIMEOUT_PATCH=1') < launcher.index('"${SWIFT_CMD[@]}" sft')
