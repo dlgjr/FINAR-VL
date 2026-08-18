@@ -43,6 +43,7 @@ def test_instruct_model_judge_uses_short_output(monkeypatch):
     assert len(payloads) == 1
     assert payloads[0]["model"] == "qwen30-judge"
     assert "chat_template_kwargs" not in payloads[0]
+    assert payloads[0]["structured_outputs"] == {"choice": ["CORRECT", "INCORRECT"]}
     assert payloads[0]["max_tokens"] == 64
 
 
@@ -65,3 +66,7 @@ def test_model_judge_retry_stays_short(monkeypatch):
     assert evaluator._judge_with_server("http://judge", _row(), "标准答案", "错误答案") is False
     assert [payload["max_tokens"] for payload in payloads] == [64, 128]
     assert all("chat_template_kwargs" not in payload for payload in payloads)
+    assert all(
+        payload["structured_outputs"] == {"choice": ["CORRECT", "INCORRECT"]}
+        for payload in payloads
+    )
