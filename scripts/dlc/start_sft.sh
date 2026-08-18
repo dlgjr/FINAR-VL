@@ -136,6 +136,8 @@ for required in \
   "$SFT_BENCHMARK" \
   "$ROOT/scripts/data/normalize_train_multi_sft_format.py" \
   "$ROOT/scripts/data/normalize_train_text_schema.py" \
+  "$ROOT/scripts/sft/sample_plan.py" \
+  "$ROOT/scripts/sft/materialize_lazy_plan_indices.py" \
   "$ROOT/scripts/sft/swift_sft_plugin.py" \
   "$ROOT/scripts/sft/kl_retention_plugin.py"; do
   test -f "$required" || { echo "missing required file: $required" >&2; exit 1; }
@@ -402,8 +404,30 @@ if (( NODE_RANK != 0 )); then
     exit 1
   }
 fi
+
+RAW_PLAN_READY="$SFT_PLAN_DIR/.raw_indices_ready"
+if (( NODE_RANK == 0 )); then
+  rm -f "$RAW_PLAN_READY"
+  "$PYTHON_BIN" "$ROOT/scripts/sft/materialize_lazy_plan_indices.py" \
+    --plan-dir "$SFT_PLAN_DIR" \
+    --train-multi "$NORMALIZED_TRAIN_MULTI" \
+    --train-text "$NORMALIZED_TRAIN_TEXT"
+  printf 'raw\n' >"$RAW_PLAN_READY"
+else
+  for attempt in $(seq 1 900); do
+    if [[ -f "$RAW_PLAN_READY" ]]; then
+      break
+    fi
+    sleep 2
+  done
+  test -f "$RAW_PLAN_READY" || {
+    echo "raw-index sample plan did not become ready within 1800 seconds" >&2
+    exit 1
+  }
+fi
+
 SFT_MAX_STEPS="$("$PYTHON_BIN" -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["max_steps"])' "$SFT_PLAN_DIR/meta.json")"
-echo "sample_plan_dir=$SFT_PLAN_DIR epochs=$SFT_EPOCHS max_steps=$SFT_MAX_STEPS"
+echo "sample_plan_dir=$SFT_PLAN_DIR epochs=$SFT_EPOCHS max_steps=$SFT_MAX_STEPS index_mode=raw"
 
 if [[ ! "$SFT_DDP_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
   echo "SFT_DDP_TIMEOUT must be a positive integer number of seconds, got: $SFT_DDP_TIMEOUT" >&2
@@ -420,7 +444,7 @@ echo "sft_ddp_timeout=$SFT_DDP_TIMEOUT timeout_patch=$FINAR_SFT_DDP_TIMEOUT_PATC
   --dataset_shuffle false \
   --train_dataloader_shuffle false \
   --strict false \
-  --lazy_tokenize false \
+  --lazy_tokenize true \
   --tuner_type full \
   --freeze_vit "$SFT_FREEZE_VIT" \
   --freeze_aligner "$SFT_FREEZE_ALIGNER" \
