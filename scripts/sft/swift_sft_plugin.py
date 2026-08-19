@@ -214,6 +214,7 @@ class FinarMixedKLPlanCallback(_ORIGINAL_PLAN_CALLBACK):
             task = str(getattr(trainer, "_finar_current_task", "") or "")
             policy = _mixed_kl_policy(task)
             if policy is None:
+                trainer._finar_last_mixed_kl = None
                 return result
             route = dict(getattr(trainer, "_finar_runtime_route", {}) or getattr(trainer, "_finar_kl_route", {}) or {})
             route.setdefault("task", task)
@@ -267,6 +268,7 @@ class FinarMixedKLPlanCallback(_ORIGINAL_PLAN_CALLBACK):
                     f"ce={metrics['ce_loss']:.4f} kl={metrics['kl_loss']:.4f} total={metrics['total_loss']:.4f}",
                     flush=True,
                 )
+            self.trainer._finar_last_mixed_kl = None
         return control
 
 
