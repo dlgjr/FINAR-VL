@@ -66,41 +66,50 @@ _COMPLETENESS_INSTRUCTIONS = {
 # still wins, but repeated encounters otherwise use the same greedy base answer.
 os.environ.setdefault("SFT_TEACHER_TEMPERATURE", "0")
 
+# `task == generation` is a pure online-distillation objective (CE=0). Keep its
+# anchor strong but below the historical beta=1.0, and decouple it from mixed
+# retention so summary/visual/insufficient KL can use their own scale.
+os.environ.setdefault("SFT_GENERATION_KL_BETA", "0.7")
+os.environ.setdefault("SFT_MIXED_KL_BETA", "1.0")
+os.environ["SFT_KL_BETA"] = os.environ["SFT_GENERATION_KL_BETA"]
+
 # Group retention by benchmark-relevant semantic capability rather than exact
-# task name. Probabilities are deliberately smaller for the large OCR/chart
-# proxy pools so teacher-forward cost does not scale with raw corpus size.
-# Values are (probability, lambda) for CE + lambda * KL(base || student).
+# task name. Values are (probability, KL lambda, CE scale). The three abilities
+# that are strong at step0 but regress sharply under SFT are deliberately
+# retention-first: reduced CE on every sample plus high KL on a fixed cohort.
+# OCR/chart remain adaptation-first: CE stays at 1.0 with moderate KL only.
 _RETENTION_FAMILIES = {
     "summary": {
-        "financial_summarization": (0.30, 0.15),
-        "document_summarization": (0.50, 0.15),
-        "summary_announcement": (0.50, 0.12),
+        "financial_summarization": (0.60, 0.80, 0.45),
+        "document_summarization": (0.60, 0.60, 0.55),
+        "summary_announcement": (0.60, 0.50, 0.60),
     },
     "visual_description": {
-        "financial_visual_description": (0.50, 0.15),
-        "image_caption": (0.15, 0.15),
-        "financial_data_description": (0.50, 0.12),
+        "financial_visual_description": (0.60, 0.70, 0.50),
+        # Keep caption adaptation active: this proxy pool is large and short
+        # captions should not dominate full financial visual descriptions.
+        "image_caption": (0.20, 0.15, 1.00),
+        "financial_data_description": (0.60, 0.50, 0.60),
     },
     "insufficient_information": {
-        "insufficient_information_detection": (0.35, 0.12),
-        # Adjacent "is this claim supported/true?" supervision is useful, but
-        # the pool is large, so retain only a small deterministic cohort.
-        "financial_truthfulness_qa": (0.04, 0.08),
+        "insufficient_information_detection": (0.60, 0.70, 0.50),
+        # Adjacent truthfulness QA is only a weak proxy, so do not suppress CE.
+        "financial_truthfulness_qa": (0.04, 0.08, 1.00),
     },
     "ocr": {
-        "financial_ocr": (0.04, 0.05),
-        "financial_ocr_transcription": (0.05, 0.05),
+        "financial_ocr": (0.06, 0.12, 1.00),
+        "financial_ocr_transcription": (0.08, 0.12, 1.00),
     },
     "chart": {
-        "candlestick_time_series": (0.03, 0.05),
-        "chart_arithmetic_reasoning": (0.03, 0.05),
-        "chart_counting": (0.03, 0.05),
-        "chart_data_extraction": (0.03, 0.05),
-        "chart_legend_identification": (0.03, 0.05),
-        "chart_statement_verification": (0.03, 0.05),
-        "chart_trend_inference": (0.03, 0.05),
-        "chart_visual_property_reasoning": (0.03, 0.05),
-        "multimodal_financial_chart_reasoning_v5": (0.03, 0.05),
+        "candlestick_time_series": (0.03, 0.10, 1.00),
+        "chart_arithmetic_reasoning": (0.03, 0.10, 1.00),
+        "chart_counting": (0.03, 0.10, 1.00),
+        "chart_data_extraction": (0.03, 0.10, 1.00),
+        "chart_legend_identification": (0.03, 0.10, 1.00),
+        "chart_statement_verification": (0.03, 0.10, 1.00),
+        "chart_trend_inference": (0.03, 0.10, 1.00),
+        "chart_visual_property_reasoning": (0.03, 0.10, 1.00),
+        "multimodal_financial_chart_reasoning_v5": (0.03, 0.10, 1.00),
     },
 }
 _RETENTION_TASK_TO_FAMILY = {
@@ -115,7 +124,7 @@ _DEFAULT_MIXED_KL_POLICY = {
 }
 
 
-def _mixed_kl_policy(task: str) -> tuple[float, float] | None:
+def _mixed_kl_policy(task: str) -> tuple[float, float, float] | None:
     default = _DEFAULT_MIXED_KL_POLICY.get(task)
     if default is None:
         return None
@@ -126,16 +135,21 @@ def _mixed_kl_policy(task: str) -> tuple[float, float] | None:
 
     family_probability = os.environ.get(f"SFT_MIXED_KL_PROB_FAMILY_{family_key}")
     family_weight = os.environ.get(f"SFT_MIXED_KL_WEIGHT_FAMILY_{family_key}")
+    family_ce_scale = os.environ.get(f"SFT_MIXED_CE_SCALE_FAMILY_{family_key}")
     probability_default = default[0] if family_probability is None else float(family_probability)
     weight_default = default[1] if family_weight is None else float(family_weight)
+    ce_scale_default = default[2] if family_ce_scale is None else float(family_ce_scale)
 
     probability = float(os.environ.get(f"SFT_MIXED_KL_PROB_{task_key}", str(probability_default)))
     weight = float(os.environ.get(f"SFT_MIXED_KL_WEIGHT_{task_key}", str(weight_default)))
+    ce_scale = float(os.environ.get(f"SFT_MIXED_CE_SCALE_{task_key}", str(ce_scale_default)))
     if not 0.0 <= probability <= 1.0:
         raise ValueError(f"mixed KL probability for {task} must be in [0,1], got {probability}")
     if weight < 0.0:
         raise ValueError(f"mixed KL weight for {task} must be non-negative, got {weight}")
-    return probability, weight
+    if ce_scale < 0.0:
+        raise ValueError(f"mixed CE scale for {task} must be non-negative, got {ce_scale}")
+    return probability, weight, ce_scale
 
 
 def _should_apply_mixed_kl(trainer, task: str, route: dict, probability: float) -> bool:
@@ -260,7 +274,7 @@ def _install_plan_dataloader_deferred(trainer) -> bool:
 
 
 class FinarMixedKLPlanCallback(_ORIGINAL_PLAN_CALLBACK):
-    """Keep normal CE and add a small, sampled retention KL on selected tasks."""
+    """Apply task-level CE scaling plus sampled semantic retention KL."""
 
     def __init__(self, args, trainer):
         super().__init__(args, trainer)
@@ -273,12 +287,20 @@ class FinarMixedKLPlanCallback(_ORIGINAL_PLAN_CALLBACK):
             if policy is None:
                 trainer._finar_last_mixed_kl = None
                 return result
+
+            if isinstance(result, tuple):
+                ce_loss, outputs = result
+            else:
+                ce_loss, outputs = result, None
+
             route = dict(getattr(trainer, "_finar_runtime_route", {}) or getattr(trainer, "_finar_kl_route", {}) or {})
             route.setdefault("task", task)
             route.setdefault("raw_index", route.get("index", -1))
-            probability, weight = policy
-            applied = weight > 0.0 and _should_apply_mixed_kl(trainer, task, route, probability)
+            probability, weight, ce_scale = policy
             family = _RETENTION_TASK_TO_FAMILY[task]
+            scaled_ce_loss = ce_scale * ce_loss
+            applied = weight > 0.0 and _should_apply_mixed_kl(trainer, task, route, probability)
+
             if not applied:
                 trainer._finar_last_mixed_kl = {
                     "task": task,
@@ -286,26 +308,39 @@ class FinarMixedKLPlanCallback(_ORIGINAL_PLAN_CALLBACK):
                     "applied": False,
                     "probability": probability,
                     "weight": weight,
+                    "ce_scale": ce_scale,
+                    "raw_ce_loss": float(ce_loss.detach().item()),
+                    "scaled_ce_loss": float(scaled_ce_loss.detach().item()),
                 }
-                return result
+                return (scaled_ce_loss, outputs) if isinstance(result, tuple) else scaled_ce_loss
 
             # Import lazily so the original KL plugin remains the single owner of
             # teacher rollout, multimodal re-encoding, SP alignment, and KL math.
             from scripts.sft import kl_retention_plugin as _kl
 
-            kl_loss = _kl._generation_distill_loss(model, trainer, route, return_outputs=False)
-            if isinstance(result, tuple):
-                ce_loss, outputs = result
-            else:
-                ce_loss, outputs = result, None
-            total_loss = ce_loss + weight * kl_loss
+            # `_generation_distill_loss` reads SFT_KL_BETA internally. Temporarily
+            # switch to a dedicated mixed-retention beta so task=generation can
+            # stay at beta=0.7 without shrinking the semantic retention KL.
+            generation_beta = os.environ.get("SFT_KL_BETA")
+            os.environ["SFT_KL_BETA"] = os.environ.get("SFT_MIXED_KL_BETA", "1.0")
+            try:
+                kl_loss = _kl._generation_distill_loss(model, trainer, route, return_outputs=False)
+            finally:
+                if generation_beta is None:
+                    os.environ.pop("SFT_KL_BETA", None)
+                else:
+                    os.environ["SFT_KL_BETA"] = generation_beta
+
+            total_loss = scaled_ce_loss + weight * kl_loss
             metrics = {
                 "task": task,
                 "family": family,
                 "applied": True,
                 "probability": probability,
                 "weight": weight,
-                "ce_loss": float(ce_loss.detach().item()),
+                "ce_scale": ce_scale,
+                "raw_ce_loss": float(ce_loss.detach().item()),
+                "scaled_ce_loss": float(scaled_ce_loss.detach().item()),
                 "kl_loss": float(kl_loss.detach().item()),
                 "total_loss": float(total_loss.detach().item()),
             }
@@ -326,7 +361,10 @@ class FinarMixedKLPlanCallback(_ORIGINAL_PLAN_CALLBACK):
                     "INFO     | >> mixed_kl "
                     f"task={metrics['task']} family={metrics['family']} "
                     f"p={metrics['probability']:.2f} lambda={metrics['weight']:.3f} "
-                    f"ce={metrics['ce_loss']:.4f} kl={metrics['kl_loss']:.4f} total={metrics['total_loss']:.4f}",
+                    f"ce_scale={metrics['ce_scale']:.2f} "
+                    f"ce_raw={metrics['raw_ce_loss']:.4f} "
+                    f"ce_scaled={metrics['scaled_ce_loss']:.4f} "
+                    f"kl={metrics['kl_loss']:.4f} total={metrics['total_loss']:.4f}",
                     flush=True,
                 )
             self.trainer._finar_last_mixed_kl = None
