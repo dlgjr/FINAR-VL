@@ -62,16 +62,56 @@ _COMPLETENESS_INSTRUCTIONS = {
     "financial_visual_description": "请完整描述图中的主要标题、文字、图表、关键数值与趋势，不要只输出标题或单个短语。",
 }
 
-# (probability, lambda) for CE + lambda * KL(base || student).
-# These are retention-only tasks: normal SFT CE is always kept. The existing
-# task=generation route remains KL-only in kl_retention_plugin.py.
+# Keep teacher trajectories stable by default. An explicit environment override
+# still wins, but repeated encounters otherwise use the same greedy base answer.
+os.environ.setdefault("SFT_TEACHER_TEMPERATURE", "0")
+
+# Group retention by benchmark-relevant semantic capability rather than exact
+# task name. Probabilities are deliberately smaller for the large OCR/chart
+# proxy pools so teacher-forward cost does not scale with raw corpus size.
+# Values are (probability, lambda) for CE + lambda * KL(base || student).
+_RETENTION_FAMILIES = {
+    "summary": {
+        "financial_summarization": (0.30, 0.15),
+        "document_summarization": (0.50, 0.15),
+        "summary_announcement": (0.50, 0.12),
+    },
+    "visual_description": {
+        "financial_visual_description": (0.50, 0.15),
+        "image_caption": (0.15, 0.15),
+        "financial_data_description": (0.50, 0.12),
+    },
+    "insufficient_information": {
+        "insufficient_information_detection": (0.35, 0.12),
+        # Adjacent "is this claim supported/true?" supervision is useful, but
+        # the pool is large, so retain only a small deterministic cohort.
+        "financial_truthfulness_qa": (0.04, 0.08),
+    },
+    "ocr": {
+        "financial_ocr": (0.04, 0.05),
+        "financial_ocr_transcription": (0.05, 0.05),
+    },
+    "chart": {
+        "candlestick_time_series": (0.03, 0.05),
+        "chart_arithmetic_reasoning": (0.03, 0.05),
+        "chart_counting": (0.03, 0.05),
+        "chart_data_extraction": (0.03, 0.05),
+        "chart_legend_identification": (0.03, 0.05),
+        "chart_statement_verification": (0.03, 0.05),
+        "chart_trend_inference": (0.03, 0.05),
+        "chart_visual_property_reasoning": (0.03, 0.05),
+        "multimodal_financial_chart_reasoning_v5": (0.03, 0.05),
+    },
+}
+_RETENTION_TASK_TO_FAMILY = {
+    task: family
+    for family, tasks in _RETENTION_FAMILIES.items()
+    for task in tasks
+}
 _DEFAULT_MIXED_KL_POLICY = {
-    "financial_summarization": (0.30, 0.15),
-    "document_summarization": (0.20, 0.10),
-    "summary_announcement": (0.15, 0.05),
-    "image_caption": (0.30, 0.15),
-    "financial_data_description": (0.20, 0.10),
-    "financial_ocr": (0.10, 0.05),
+    task: policy
+    for tasks in _RETENTION_FAMILIES.values()
+    for task, policy in tasks.items()
 }
 
 
@@ -79,9 +119,18 @@ def _mixed_kl_policy(task: str) -> tuple[float, float] | None:
     default = _DEFAULT_MIXED_KL_POLICY.get(task)
     if default is None:
         return None
-    env_key = task.upper().replace("-", "_")
-    probability = float(os.environ.get(f"SFT_MIXED_KL_PROB_{env_key}", str(default[0])))
-    weight = float(os.environ.get(f"SFT_MIXED_KL_WEIGHT_{env_key}", str(default[1])))
+
+    family = _RETENTION_TASK_TO_FAMILY[task]
+    task_key = task.upper().replace("-", "_")
+    family_key = family.upper().replace("-", "_")
+
+    family_probability = os.environ.get(f"SFT_MIXED_KL_PROB_FAMILY_{family_key}")
+    family_weight = os.environ.get(f"SFT_MIXED_KL_WEIGHT_FAMILY_{family_key}")
+    probability_default = default[0] if family_probability is None else float(family_probability)
+    weight_default = default[1] if family_weight is None else float(family_weight)
+
+    probability = float(os.environ.get(f"SFT_MIXED_KL_PROB_{task_key}", str(probability_default)))
+    weight = float(os.environ.get(f"SFT_MIXED_KL_WEIGHT_{task_key}", str(weight_default)))
     if not 0.0 <= probability <= 1.0:
         raise ValueError(f"mixed KL probability for {task} must be in [0,1], got {probability}")
     if weight < 0.0:
@@ -94,13 +143,13 @@ def _should_apply_mixed_kl(trainer, task: str, route: dict, probability: float) 
         return False
     if probability >= 1.0:
         return True
-    state = getattr(trainer, "state", None)
-    step = int(getattr(state, "global_step", 0) or 0) + 1
+
+    # Intentionally omit global_step: the same raw sample belongs to the same
+    # retention cohort every time it is drawn. Changing p gives nested cohorts.
     seed = int(os.environ.get("SFT_PLAN_SEED", "42"))
     payload = ":".join(
         [
             str(seed),
-            str(step),
             task,
             str(route.get("modality") or ""),
             str(route.get("raw_index", route.get("index", -1))),
@@ -160,7 +209,15 @@ def _merge_plan_block_with_actual_log(self, block_id: int) -> None:
     payload = json.loads((self.output_dir / f"block_{block_id:04d}.json").read_text(encoding="utf-8"))
     actual = payload["actual"]
     parts = [f"block={block_id}"]
-    for task in ("financial_ocr", "financial_summarization", "financial_visual_description", "image_caption", "accounting_audit_reasoning"):
+    for task in (
+        "financial_ocr",
+        "financial_ocr_transcription",
+        "financial_summarization",
+        "financial_visual_description",
+        "image_caption",
+        "insufficient_information_detection",
+        "accounting_audit_reasoning",
+    ):
         values = actual["tasks"].get(task)
         if values is not None:
             parts.append(f"{task}={values['samples']}")
@@ -221,9 +278,11 @@ class FinarMixedKLPlanCallback(_ORIGINAL_PLAN_CALLBACK):
             route.setdefault("raw_index", route.get("index", -1))
             probability, weight = policy
             applied = weight > 0.0 and _should_apply_mixed_kl(trainer, task, route, probability)
+            family = _RETENTION_TASK_TO_FAMILY[task]
             if not applied:
                 trainer._finar_last_mixed_kl = {
                     "task": task,
+                    "family": family,
                     "applied": False,
                     "probability": probability,
                     "weight": weight,
@@ -242,6 +301,7 @@ class FinarMixedKLPlanCallback(_ORIGINAL_PLAN_CALLBACK):
             total_loss = ce_loss + weight * kl_loss
             metrics = {
                 "task": task,
+                "family": family,
                 "applied": True,
                 "probability": probability,
                 "weight": weight,
@@ -264,7 +324,8 @@ class FinarMixedKLPlanCallback(_ORIGINAL_PLAN_CALLBACK):
             if isinstance(metrics, dict) and metrics.get("applied"):
                 print(
                     "INFO     | >> mixed_kl "
-                    f"task={metrics['task']} p={metrics['probability']:.2f} lambda={metrics['weight']:.3f} "
+                    f"task={metrics['task']} family={metrics['family']} "
+                    f"p={metrics['probability']:.2f} lambda={metrics['weight']:.3f} "
                     f"ce={metrics['ce_loss']:.4f} kl={metrics['kl_loss']:.4f} total={metrics['total_loss']:.4f}",
                     flush=True,
                 )

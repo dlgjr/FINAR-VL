@@ -25,22 +25,28 @@ _impl.TOKEN_LENGTH_BETA = 0.25
 # Mild task weights remain useful inside the guaranteed quota.
 _impl.MULTI_UPWEIGHT["accounting_audit_reasoning"] = 1.20
 _impl.TEXT_UPWEIGHT["accounting_audit_reasoning"] = 1.20
+_impl.MULTI_DOWNWEIGHT["image_caption"] = 1.00
 _impl.TASK_TO_FAMILY["accounting_audit_reasoning"] = "accounting_valuation"
 _impl.TASK_TO_FAMILY["financial_visual_description"] = "document_perception"
+_impl.TASK_TO_FAMILY["financial_ocr_transcription"] = "document_perception"
 
-# Explicit minimum sample quotas within each modality. image_caption is the training-side
-# analogue of the benchmark financial_visual_description task in the current corpus.
+# Explicit minimum sample quotas within each modality. The visual/OCR proxies are
+# protected together with the exact benchmark-side tasks, while the 1% insufficient-
+# information floor is intentionally smaller because it exists in both modalities.
 TASK_MIN_RATIO = {
     "financial_ocr": 0.04,
+    "financial_ocr_transcription": 0.02,
     "financial_summarization": 0.02,
     "financial_visual_description": 0.02,
     "image_caption": 0.02,
+    "insufficient_information_detection": 0.01,
     "accounting_audit_reasoning": 0.02,
 }
 
-# Leave enough family headroom for the protected tasks to survive token-based cap repair.
+# Leave enough family headroom for protected minima to survive token-based cap repair.
 _impl.FAMILY_CAP["document_perception"] = max(_impl.FAMILY_CAP["document_perception"], 0.16)
 _impl.FAMILY_CAP["generation_dialogue"] = max(_impl.FAMILY_CAP["generation_dialogue"], 0.15)
+_impl.FAMILY_CAP["retrieval_grounding"] = max(_impl.FAMILY_CAP["retrieval_grounding"], 0.12)
 _impl.FAMILY_CAP["accounting_valuation"] = max(_impl.FAMILY_CAP["accounting_valuation"], 0.16)
 
 _ORIGINAL_ALLOCATE_QUOTAS = _impl.allocate_quotas
@@ -85,6 +91,9 @@ def build_block(**kwargs):
         family = block_info["planned"][modality]["families"].get("document_perception")
         if family is not None:
             parts.append(f"{modality}:document_perception={family['samples']}({family['sample_ratio']:.3f})")
+        retrieval = block_info["planned"][modality]["families"].get("retrieval_grounding")
+        if retrieval is not None:
+            parts.append(f"{modality}:retrieval_grounding={retrieval['samples']}({retrieval['sample_ratio']:.3f})")
     print("SFT_QUOTA | " + " ".join(parts), flush=True)
     return entries, block_info, tiny_usage
 
