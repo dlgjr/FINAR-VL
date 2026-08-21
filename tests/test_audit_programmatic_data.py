@@ -1,0 +1,29 @@
+from scripts.rl.audit_programmatic_data import audit_record
+
+
+def test_hard_negative_without_independent_verifier_is_suspicious():
+    row = {
+        "messages": [{"role": "user", "content": "1+1?"}, {"role": "assistant", "content": "2"}],
+        "output_format": "number_or_free_text",
+        "_pass_at_k": {"correct_count": 0, "result_index": "x"},
+    }
+    result = audit_record(row, 1)
+    assert result["status"] == "suspicious"
+    assert "hard_negative_without_independent_verifier" in result["reasons"]
+
+
+def test_bad_program_reference_is_broken():
+    row = {
+        "messages": [{"role": "user", "content": "average?"}, {"role": "assistant", "content": "5399"}],
+        "output_format": "numeric_or_short_text",
+        "metadata": {
+            "program": "add(2074, 1622), add(1703, #0)",
+            "operation_count": 2,
+            "program_execution_result": "5399.0",
+            "gold_execution_answer": "5399.0",
+            "gold_readable_answer": "1799.7",
+        },
+    }
+    result = audit_record(row, 1)
+    assert result["status"] == "broken"
+    assert result["reasons"] == ["gold_readable_answer_mismatch"]
