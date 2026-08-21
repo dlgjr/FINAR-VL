@@ -54,13 +54,89 @@ _ORIGINAL_SUMMARIZE_RESULTS = _pass_at_8_eval._finar_original_summarize_results
 _ORIGINAL_MERGE_PLAN_BLOCK = _impl._finar_original_merge_plan_block
 _ORIGINAL_PLAN_CALLBACK = _impl._finar_original_plan_callback
 
+# These instructions are applied to both the supervised CE prompt and, for
+# mixed-retention samples, the frozen-teacher prompt. Keeping the two prompt
+# conditions identical is essential: otherwise the CE objective can ask for a
+# complete answer while the KL objective anchors the student on a shorter raw
+# prompt distribution.
 _COMPLETENESS_INSTRUCTIONS = {
     "financial_relation_extraction": "请完整输出所有符合要求的关系，不要只输出部分关系或首条关系。",
     "financial_entity_extraction": "请完整输出所有符合要求的实体及其类型，不要遗漏已出现的实体。",
     "entity_extraction_classification": "请完整输出所有符合要求的实体及其分类，不要只输出部分结果。",
-    "image_caption": "请完整描述图中的主要标题、文字、图表、关键数值与趋势，不要只输出标题或单个短语。",
-    "financial_visual_description": "请完整描述图中的主要标题、文字、图表、关键数值与趋势，不要只输出标题或单个短语。",
+    "financial_summarization": (
+        "请输出完整的金融摘要：概括核心经营和财务趋势，区分一次性或非经营性因素，"
+        "评价利润与现金流质量及其可持续性，并结合管理层指引指出主要前瞻风险；"
+        "不要只罗列数字或单一事实。"
+    ),
+    "document_summarization": (
+        "请完整概括材料中的核心经营和财务变化、一次性因素、现金流或盈利质量、"
+        "管理层指引及主要前瞻风险，不要只摘录个别数字。"
+    ),
+    "summary_announcement": (
+        "请完整总结公告的核心变化、主要驱动、一次性因素、可持续性和后续风险，"
+        "不要只复述标题或单一指标。"
+    ),
+    "financial_visual_description": (
+        "请完整描述图中的主要标题、文字、图表类型、关键数值、趋势或结构及其含义；"
+        "不要只输出标题、图表类别或单个短语。"
+    ),
+    "financial_data_description": (
+        "请完整描述图表或数据中的关键字段、数值、趋势和相互关系，不要只给出图表名称或单个数字。"
+    ),
+    "insufficient_information_detection": (
+        "请先判断现有材料是否足以唯一回答问题。若信息足够，必须给出可确定的结果和必要计算；"
+        "只有信息确实不足时才回答无法确定，并明确指出缺失的具体变量、时点或假设以及其必要性。"
+        "不要默认选择信息不足。"
+    ),
+    "financial_ocr": (
+        "请按图中原文精确读取目标内容，保留正负号、小数位、千分位、百分号、货币符号和单位等关键信息，"
+        "不要只给出近似数值。"
+    ),
+    "financial_ocr_transcription": (
+        "请按图中原文精确转写，保留正负号、小数位、千分位、百分号、货币符号和单位等格式信息。"
+    ),
 }
+
+
+def _append_retention_instruction(messages, task: str):
+    """Append the task instruction to the last user turn, once."""
+    instruction = _COMPLETENESS_INSTRUCTIONS.get(str(task or ""))
+    if instruction is None:
+        return messages
+
+    for message in reversed(messages or []):
+        if str(message.get("role") or "") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            if instruction not in content:
+                message["content"] = content.rstrip() + "\n" + instruction
+            return messages
+        if isinstance(content, list):
+            already_present = any(
+                isinstance(item, dict)
+                and str(item.get("type") or "") == "text"
+                and instruction in str(item.get("text") or "")
+                for item in content
+            )
+            if not already_present:
+                content.append({"type": "text", "text": "\n" + instruction})
+            return messages
+    return messages
+
+
+def _patch_kl_teacher_prompt(kl_module) -> None:
+    """Make mixed-KL teacher prompts use the same task instruction as CE."""
+    if not hasattr(kl_module, "_finar_original_teacher_messages"):
+        kl_module._finar_original_teacher_messages = kl_module._teacher_messages
+    original_teacher_messages = kl_module._finar_original_teacher_messages
+
+    def teacher_messages_with_retention(record, *, data_file):
+        messages = original_teacher_messages(record, data_file=data_file)
+        return _append_retention_instruction(messages, str(record.get("task") or ""))
+
+    kl_module._teacher_messages = teacher_messages_with_retention
+
 
 # Keep teacher trajectories stable by default. An explicit environment override
 # still wins, but repeated encounters otherwise use the same greedy base answer.
@@ -74,22 +150,24 @@ os.environ.setdefault("SFT_MIXED_KL_BETA", "1.0")
 os.environ["SFT_KL_BETA"] = os.environ["SFT_GENERATION_KL_BETA"]
 
 # Group retention by benchmark-relevant semantic capability rather than exact
-# task name. Values are (probability, KL lambda, CE scale). The three abilities
-# that are strong at step0 but regress sharply under SFT are deliberately
-# retention-first: reduced CE on every sample plus high KL on a fixed cohort.
-# OCR/chart remain adaptation-first: CE stays at 1.0 with moderate KL only.
+# task name. Values are (probability, KL lambda, CE scale).
+# Summary and full visual description are retention-first because step-0 is
+# already strong but later SFT collapses completeness/stability. Insufficient
+# information keeps the previous strength after recovering close to base, while
+# OCR receives a moderate retention increase without suppressing adaptation.
 _RETENTION_FAMILIES = {
     "summary": {
-        "financial_summarization": (0.60, 0.80, 0.45),
-        "document_summarization": (0.60, 0.60, 0.55),
-        "summary_announcement": (0.60, 0.50, 0.60),
+        "financial_summarization": (1.00, 1.00, 0.25),
+        "document_summarization": (0.90, 0.90, 0.35),
+        "summary_announcement": (0.90, 0.80, 0.40),
     },
     "visual_description": {
-        "financial_visual_description": (0.60, 0.70, 0.50),
-        # Keep caption adaptation active: this proxy pool is large and short
-        # captions should not dominate full financial visual descriptions.
-        "image_caption": (0.20, 0.15, 1.00),
-        "financial_data_description": (0.60, 0.50, 0.60),
+        "financial_visual_description": (1.00, 1.00, 0.20),
+        # Keep short-caption adaptation active. Do not attach the long-form
+        # completeness instruction to image_caption because its CE targets are
+        # intentionally short and would otherwise contradict the prompt.
+        "image_caption": (0.10, 0.10, 1.00),
+        "financial_data_description": (0.90, 0.80, 0.35),
     },
     "insufficient_information": {
         "insufficient_information_detection": (0.60, 0.70, 0.50),
@@ -97,8 +175,8 @@ _RETENTION_FAMILIES = {
         "financial_truthfulness_qa": (0.04, 0.08, 1.00),
     },
     "ocr": {
-        "financial_ocr": (0.06, 0.12, 1.00),
-        "financial_ocr_transcription": (0.08, 0.12, 1.00),
+        "financial_ocr": (0.30, 0.35, 0.85),
+        "financial_ocr_transcription": (0.30, 0.30, 0.90),
     },
     "chart": {
         "candlestick_time_series": (0.03, 0.10, 1.00),
@@ -184,14 +262,11 @@ class _CompletenessDataset:
         row = self.dataset[index]
         if isinstance(index, str) or not isinstance(row, dict):
             return row
-        instruction = _COMPLETENESS_INSTRUCTIONS.get(str(row.get("task") or ""))
-        if instruction is None:
+        task = str(row.get("task") or "")
+        if task not in _COMPLETENESS_INSTRUCTIONS:
             return row
         row = copy.deepcopy(row)
-        for message in row.get("messages") or []:
-            if message.get("role") == "user" and isinstance(message.get("content"), str):
-                message["content"] = message["content"].rstrip() + "\n" + instruction
-                break
+        _append_retention_instruction(row.get("messages") or [], task)
         return row
 
 
@@ -317,6 +392,11 @@ class FinarMixedKLPlanCallback(_ORIGINAL_PLAN_CALLBACK):
             # Import lazily so the original KL plugin remains the single owner of
             # teacher rollout, multimodal re-encoding, SP alignment, and KL math.
             from scripts.sft import kl_retention_plugin as _kl
+
+            # Mixed-retention teacher and CE must see the same task-level
+            # instruction. Generation has no entry in the instruction table, so
+            # its standalone pure-KL behavior remains unchanged.
+            _patch_kl_teacher_prompt(_kl)
 
             # `_generation_distill_loss` reads SFT_KL_BETA internally. Temporarily
             # switch to a dedicated mixed-retention beta so task=generation can
