@@ -1,26 +1,39 @@
-"""Pure reward functions shared by DSW tests and the DLC reward plugin.
-
-The module deliberately has no dependency on Swift, vLLM, or a GPU service so
-that parsing and scoring can be tested before a DLC submission.
-"""
+"""Pure reward functions shared by DSW tests and the DLC reward plugin."""
 
 from __future__ import annotations
 
 import json
 import re
 import unicodedata
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 _ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.IGNORECASE | re.DOTALL)
 _ANSWER_PREFIX_RE = re.compile(r"答案\s*[:：][ \t]*([^\r\n]*)")
-_NUMBER_RE = re.compile(r"[-+]?(?:\d{1,3}(?:[,，]\d{3})+|\d+)(?:\.\d+)?(?:\s*(?:%|％|元|人民币|美元|\$|¥|￥|亿元|万元|万|亿))?", re.IGNORECASE)
+_NUMBER_TOKEN_RE = re.compile(
+    r"(?P<prefix>[\$￥¥€£])?\s*"
+    r"(?P<number>[-+]?(?:(?:\d{1,3}(?:[,，]\d{3})+|\d+)(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d+)?)\s*"
+    r"(?P<suffix>万亿元|亿美元|万美元|亿元|万元|港元|人民币|美元|元|HKD|USD|CNY|RMB|billion|million|thousand|[%％]|倍|家|项|个|点|万|亿)?",
+    re.IGNORECASE,
+)
+_EDGE_PUNCTUATION = " \t\r\n.,;:!?，。；：！？、\"'“”‘’`()[]{}<>《》"
+
+
+@dataclass(frozen=True)
+class NumericValue:
+    value: Decimal
+    unit: str
+    dimension: str
+    factor: Decimal
+
+    @property
+    def base_value(self) -> Decimal:
+        return self.value * self.factor
 
 
 def extract_last_answer(completion: Any) -> str | None:
-    """Return the final non-empty complete answer block, or ``None``."""
-
     if completion is None:
         return None
     if isinstance(completion, Mapping):
@@ -33,12 +46,6 @@ def extract_last_answer(completion: Any) -> str | None:
 
 
 def extract_prefixed_answer(completion: Any) -> str | None:
-    """Return text after the last ``答案：``/``答案:`` prefix.
-
-    ``None`` means that no prefix exists; an empty string means the prefix is
-    present but has no answer on the same line.
-    """
-
     if completion is None:
         return None
     if isinstance(completion, Mapping):
@@ -53,41 +60,73 @@ def _fold_text(value: str) -> str:
     return re.sub(r"\s+", " ", value)
 
 
-def _unit(value: str) -> str:
-    value = _fold_text(value).lower()
-    if "%" in value or "％" in value:
-        return "%"
-    if any(token in value for token in ("美元", "$")):
-        return "美元"
-    if any(token in value for token in ("元", "人民币", "¥", "￥")):
-        return "元"
-    if "亿元" in value:
-        return "亿元"
-    if "万元" in value:
-        return "万元"
-    if "亿" in value:
-        return "亿"
-    if "万" in value:
-        return "万"
-    return ""
+def _unit_descriptor(prefix: str, suffix: str) -> tuple[str, str, Decimal]:
+    prefix = _fold_text(prefix or "")
+    suffix = _fold_text(suffix or "").lower()
+    currency = {
+        "$": ("美元", "USD"),
+        "usd": ("美元", "USD"),
+        "美元": ("美元", "USD"),
+        "￥": ("元", "CNY"),
+        "¥": ("元", "CNY"),
+        "cny": ("元", "CNY"),
+        "rmb": ("元", "CNY"),
+        "人民币": ("元", "CNY"),
+        "元": ("元", "CNY"),
+        "港元": ("港元", "HKD"),
+        "hkd": ("港元", "HKD"),
+    }
+    direct = {
+        "万亿元": ("万亿元", "CNY", Decimal("1e12")),
+        "亿元": ("亿元", "CNY", Decimal("1e8")),
+        "万元": ("万元", "CNY", Decimal("1e4")),
+        "亿美元": ("亿美元", "USD", Decimal("1e8")),
+        "万美元": ("万美元", "USD", Decimal("1e4")),
+        "%": ("%", "percent", Decimal("0.01")),
+        "倍": ("倍", "multiple", Decimal(1)),
+        "count": ("count", "count", Decimal(1)),
+        "家": ("count", "count", Decimal(1)),
+        "项": ("count", "count", Decimal(1)),
+        "个": ("count", "count", Decimal(1)),
+        "点": ("点", "point", Decimal(1)),
+        "万": ("万", "scalar", Decimal("1e4")),
+        "亿": ("亿", "scalar", Decimal("1e8")),
+        "thousand": ("thousand", "scalar", Decimal("1e3")),
+        "million": ("million", "scalar", Decimal("1e6")),
+        "billion": ("billion", "scalar", Decimal("1e9")),
+    }
+    if suffix in direct:
+        label, dimension, factor = direct[suffix]
+        if prefix in currency and dimension == "scalar":
+            base_label, base_dimension = currency[prefix]
+            return f"{suffix}{base_label}", base_dimension, factor
+        return label, dimension, factor
+    if suffix in currency:
+        label, dimension = currency[suffix]
+        return label, dimension, Decimal(1)
+    if prefix in currency:
+        label, dimension = currency[prefix]
+        return label, dimension, Decimal(1)
+    return "", "scalar", Decimal(1)
+
+
+def _parse_numeric(value: str) -> NumericValue:
+    text = _fold_text(value)
+    match = _NUMBER_TOKEN_RE.search(text)
+    if not match:
+        raise ValueError(f"no numeric value: {value!r}")
+    raw = match.group("number").replace(",", "")
+    try:
+        number = Decimal(raw)
+    except InvalidOperation as exc:
+        raise ValueError(f"invalid numeric value: {value!r}") from exc
+    unit, dimension, factor = _unit_descriptor(match.group("prefix") or "", match.group("suffix") or "")
+    return NumericValue(number, unit, dimension, factor)
 
 
 def normalize_numeric(value: str) -> tuple[float, str]:
-    """Parse a number and its explicit unit, normalizing common formatting."""
-
-    text = _fold_text(value).replace("$", "美元").replace("¥", "元").replace("￥", "元")
-    match = re.search(r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", text)
-    if not match:
-        raise ValueError(f"no numeric value: {value!r}")
-    try:
-        number = float(Decimal(match.group(0).replace(",", "")))
-    except (InvalidOperation, ValueError) as exc:
-        raise ValueError(f"invalid numeric value: {value!r}") from exc
-    return number, _unit(text)
-
-
-def _question_unit(question: str) -> str:
-    return _unit(question or "")
+    parsed = _parse_numeric(value)
+    return float(parsed.value), parsed.unit
 
 
 def _split_atoms(answer: str, verifier_type: str) -> list[str]:
@@ -95,14 +134,15 @@ def _split_atoms(answer: str, verifier_type: str) -> list[str]:
     if verifier_type == "page_numbers":
         return list(dict.fromkeys(re.findall(r"\d+", text)))
     if verifier_type == "true_false":
-        lowered = text.lower()
-        if any(x in lowered for x in ("true", "yes", "是", "正确", "对")):
+        normalized = text.casefold().strip(_EDGE_PUNCTUATION)
+        truthy = {"true", "yes", "是", "正确", "对", "a"}
+        falsy = {"false", "no", "否", "错误", "错", "不正确", "不是", "不对", "b"}
+        if normalized in truthy:
             return ["true"]
-        if any(x in lowered for x in ("false", "no", "否", "错误", "错")):
+        if normalized in falsy:
             return ["false"]
         return []
     if verifier_type in {"single_choice", "multiple_choice", "choice"}:
-        # Keep option labels and numeric labels, while ignoring prose around them.
         tokens = re.findall(r"(?<![A-Za-z])[A-H](?![A-Za-z])|(?<!\d)\d+(?!\d)", text.upper())
         return list(dict.fromkeys(tokens))
     pieces = re.split(r"[,;\n|/]+", text)
@@ -110,23 +150,79 @@ def _split_atoms(answer: str, verifier_type: str) -> list[str]:
 
 
 def _numeric_atoms(value: str) -> list[str]:
-    return list(dict.fromkeys(match.group(0) for match in _NUMBER_RE.finditer(_fold_text(value))))
+    return list(dict.fromkeys(match.group(0).strip() for match in _NUMBER_TOKEN_RE.finditer(_fold_text(value))))
 
 
-def _numeric_match(pred: str, gold: str, question: str) -> bool:
+def numeric_gold_from_text(value: str) -> list[dict[str, str]]:
+    atoms = _numeric_atoms(value)
+    if not atoms:
+        raise ValueError(f"no numeric gold in {value!r}")
+    parsed = _parse_numeric(atoms[-1])
+    return [{"value": str(parsed.value), "unit": parsed.unit}]
+
+
+def _structured_numeric(value: Mapping[str, Any]) -> NumericValue:
+    if "value" not in value:
+        raise ValueError("numeric gold missing value")
     try:
-        pred_number, pred_unit = normalize_numeric(pred)
-        gold_number, gold_unit = normalize_numeric(gold)
-    except ValueError:
+        number = Decimal(str(value["value"]))
+    except InvalidOperation as exc:
+        raise ValueError("invalid numeric gold value") from exc
+    unit = str(value.get("unit") or "")
+    canonical = {
+        "": ("scalar", Decimal(1)),
+        "%": ("percent", Decimal("0.01")),
+        "元": ("CNY", Decimal(1)),
+        "万元": ("CNY", Decimal("1e4")),
+        "亿元": ("CNY", Decimal("1e8")),
+        "万亿元": ("CNY", Decimal("1e12")),
+        "美元": ("USD", Decimal(1)),
+        "万美元": ("USD", Decimal("1e4")),
+        "亿美元": ("USD", Decimal("1e8")),
+        "港元": ("HKD", Decimal(1)),
+        "count": ("count", Decimal(1)),
+        "倍": ("multiple", Decimal(1)),
+        "点": ("point", Decimal(1)),
+        "万": ("scalar", Decimal("1e4")),
+        "亿": ("scalar", Decimal("1e8")),
+        "thousand": ("scalar", Decimal("1e3")),
+        "million": ("scalar", Decimal("1e6")),
+        "billion": ("scalar", Decimal("1e9")),
+        "thousand美元": ("USD", Decimal("1e3")),
+        "million美元": ("USD", Decimal("1e6")),
+        "billion美元": ("USD", Decimal("1e9")),
+        "thousand元": ("CNY", Decimal("1e3")),
+        "million元": ("CNY", Decimal("1e6")),
+        "billion元": ("CNY", Decimal("1e9")),
+    }
+    if unit not in canonical:
+        raise ValueError(f"invalid numeric gold unit: {unit!r}")
+    dimension, factor = canonical[unit]
+    return NumericValue(number, unit, dimension, factor)
+
+
+def _numeric_tolerance(gold: NumericValue) -> tuple[Decimal, Decimal]:
+    if gold.dimension == "count":
+        return Decimal(0), Decimal(0)
+    if gold.dimension == "percent":
+        return Decimal("1e-5"), Decimal("1e-6")
+    if gold.dimension in {"CNY", "USD", "HKD"}:
+        return Decimal("0.01"), Decimal("1e-8")
+    if gold.dimension in {"multiple", "point"}:
+        return Decimal("1e-6"), Decimal("1e-6")
+    if abs(gold.base_value) < 1:
+        return Decimal("1e-4"), Decimal("1e-5")
+    return Decimal("1e-4"), Decimal("1e-8")
+
+
+def _numeric_match(pred: NumericValue, gold: NumericValue) -> bool:
+    if pred.dimension != gold.dimension:
         return False
-    inherited = _question_unit(question)
-    effective_pred_unit = pred_unit or inherited
-    effective_gold_unit = gold_unit or inherited
-    if gold_unit and not pred_unit and not inherited:
-        return False
-    if effective_pred_unit and effective_gold_unit and effective_pred_unit != effective_gold_unit:
-        return False
-    return abs(pred_number - gold_number) <= 0.01 + 1e-12
+    abs_tol, rel_tol = _numeric_tolerance(gold)
+    delta = abs(pred.base_value - gold.base_value)
+    if delta <= abs_tol:
+        return True
+    return delta <= abs(gold.base_value) * rel_tol
 
 
 def score_programmatic_answer(
@@ -134,23 +230,41 @@ def score_programmatic_answer(
     gold_atoms: Sequence[str],
     verifier_type: str,
     question: str = "",
+    gold_numeric: Sequence[Mapping[str, Any]] | None = None,
 ) -> float:
-    """Score the last prefixed answer using set-Jaccard semantics."""
+    """Score the last prefixed answer using deterministic verifier semantics."""
 
+    del question
     answer = extract_prefixed_answer(completion)
     if answer is None:
         return -0.1
-    if not answer or not gold_atoms:
+    if not answer:
         return 0.0
     if verifier_type in {"numeric", "number_or_free_text", "numeric_or_short_text"}:
         pred_atoms = _numeric_atoms(answer)
-        gold = list(dict.fromkeys(str(x) for x in gold_atoms))
         if not pred_atoms:
             return 0.0
-        matched = sum(any(_numeric_match(pred, expected, question) for expected in gold) for pred in pred_atoms)
-        matched = min(matched, len(gold))
-        union = len(set(pred_atoms)) + len(gold) - matched
-        return matched / union if union else 0.0
+        try:
+            pred_values = [_parse_numeric(atom) for atom in pred_atoms]
+            gold_values = (
+                [_structured_numeric(item) for item in gold_numeric]
+                if gold_numeric
+                else [_parse_numeric(str(atom)) for atom in gold_atoms]
+            )
+        except ValueError:
+            return 0.0
+        if not gold_values:
+            return 0.0
+        matched_gold: set[int] = set()
+        matched_pred = 0
+        for pred in pred_values:
+            for index, gold in enumerate(gold_values):
+                if index not in matched_gold and _numeric_match(pred, gold):
+                    matched_gold.add(index)
+                    matched_pred += 1
+                    break
+        union = len(pred_values) + len(gold_values) - matched_pred
+        return matched_pred / union if union else 0.0
     pred = set(_split_atoms(answer, verifier_type))
     gold = set(_split_atoms(";".join(map(str, gold_atoms)), verifier_type))
     if not pred or not gold:
@@ -182,8 +296,6 @@ def score_judge_result(result: Any, gold_claim_ids: Sequence[str]) -> float:
 
 
 class MixedReward:
-    """Single reward-plugin interface for structured and model-judged samples."""
-
     def __init__(self, judge: Callable[[str, Mapping[str, Any]], Any] | None = None):
         self.judge = judge
         self.errors: list[dict[str, Any]] = []
@@ -215,5 +327,13 @@ class MixedReward:
                 answer = extract_prefixed_answer(completion)
                 if isinstance(record, dict):
                     record["_parser_result"] = {"answer": answer, "verifier_type": record.get("verifier_type", "")}
-                rewards.append(score_programmatic_answer(completion, record.get("gold_atoms", []), record.get("verifier_type", ""), record.get("question", "")))
+                rewards.append(
+                    score_programmatic_answer(
+                        completion,
+                        record.get("gold_atoms", []),
+                        record.get("verifier_type", ""),
+                        record.get("question", ""),
+                        record.get("gold_numeric", []),
+                    )
+                )
         return rewards
