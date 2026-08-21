@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import random
-import re
-from collections import Counter
+from collections import Counter, defaultdict
 from typing import Any, Iterable, Mapping
 
 from .gspo_reward import extract_prefixed_answer
+
+
+DEFAULT_AUDIT_COUNT = 32
 
 
 def analyze_completion(completion: Any, *, max_completion_length: int = 2048) -> dict[str, Any]:
@@ -29,8 +31,12 @@ def analyze_completion(completion: Any, *, max_completion_length: int = 2048) ->
     }
 
 
-def select_high_reward_samples(records: Iterable[Mapping[str, Any]], *, seed: int, count: int = 4) -> list[dict[str, Any]]:
-    """Select distinct sample IDs from the max-reward pool, then descending fill."""
+def _stratum(record: Mapping[str, Any]) -> tuple[str, str]:
+    return str(record.get("verifier_type") or "unknown"), str(record.get("source") or "unknown")
+
+
+def select_high_reward_samples(records: Iterable[Mapping[str, Any]], *, seed: int, count: int = DEFAULT_AUDIT_COUNT) -> list[dict[str, Any]]:
+    """Select distinct high-reward samples stratified by verifier type and source."""
 
     by_id: dict[str, dict[str, Any]] = {}
     for record in records:
@@ -40,20 +46,42 @@ def select_high_reward_samples(records: Iterable[Mapping[str, Any]], *, seed: in
         candidate = dict(record)
         if sample_id not in by_id or float(candidate.get("reward", 0.0)) > float(by_id[sample_id].get("reward", 0.0)):
             by_id[sample_id] = candidate
-    ranked = sorted(by_id.values(), key=lambda item: (-float(item.get("reward", 0.0)), str(item["sample_id"])))
-    if not ranked:
+    if not by_id:
         return []
-    max_reward = float(ranked[0].get("reward", 0.0))
-    top = [item for item in ranked if float(item.get("reward", 0.0)) == max_reward]
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for item in by_id.values():
+        grouped[_stratum(item)].append(item)
     rng = random.Random(seed)
-    rng.shuffle(top)
-    chosen = top[:count]
-    if len(chosen) < count:
-        chosen.extend(item for item in ranked if item["sample_id"] not in {row["sample_id"] for row in chosen})
-    return chosen[:count]
+    queues: list[tuple[tuple[str, str], list[dict[str, Any]]]] = []
+    for key in sorted(grouped):
+        rows = grouped[key]
+        rng.shuffle(rows)
+        rows.sort(key=lambda item: -float(item.get("reward", 0.0)))
+        queues.append((key, rows))
+    chosen: list[dict[str, Any]] = []
+    while len(chosen) < count:
+        progressed = False
+        for key, rows in queues:
+            if len(chosen) >= count:
+                break
+            if not rows:
+                continue
+            item = rows.pop(0)
+            item["_audit_stratum"] = {"verifier_type": key[0], "source": key[1]}
+            chosen.append(item)
+            progressed = True
+        if not progressed:
+            break
+    return chosen
 
 
-def build_audit_records(records: Iterable[Mapping[str, Any]], *, seed: int, count: int = 4, max_completion_length: int = 2048) -> list[dict[str, Any]]:
+def build_audit_records(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    seed: int,
+    count: int = DEFAULT_AUDIT_COUNT,
+    max_completion_length: int = 2048,
+) -> list[dict[str, Any]]:
     output = []
     for record in select_high_reward_samples(records, seed=seed, count=count):
         item = dict(record)
