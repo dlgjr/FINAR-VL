@@ -85,7 +85,7 @@ def test_validate_checks_page_range_true_false_and_choice_cardinality(tmp_path):
     assert "invalid_single_choice_gold" in message
 
 
-def test_validate_warns_on_unverified_gold_and_can_block_it(tmp_path):
+def test_validate_source_only_gold_is_diagnostic_and_never_blocks(tmp_path):
     row = {
         "sample_id": "hard",
         "messages": [{"role": "user", "content": "q"}],
@@ -100,9 +100,8 @@ def test_validate_warns_on_unverified_gold_and_can_block_it(tmp_path):
     path.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
     report = validate(path)
     assert report["valid"] is True
-    assert report["warnings"][0]["warning"] == "hard_negative_unverified"
-    with pytest.raises(ValueError, match="unverified_gold_blocked"):
-        validate(path, fail_on_unverified=True)
+    assert report["warnings"][0]["warning"] == "source_only"
+    assert validate(path, fail_on_unverified=True)["valid"] is True
 
 
 def test_validate_rejects_output_format_verifier_mismatch(tmp_path):
