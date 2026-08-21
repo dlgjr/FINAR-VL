@@ -45,6 +45,9 @@ export GSPO_EVAL_STEPS="${GSPO_EVAL_STEPS:-200}"
 export GSPO_EVAL_AT_ZERO="${GSPO_EVAL_AT_ZERO:-true}"
 export GSPO_EVAL_MAX_SAMPLES="${GSPO_EVAL_MAX_SAMPLES:-0}"
 export GSPO_AUDIT_SEED="${GSPO_AUDIT_SEED:-42}"
+# Fail closed on source-only or hard-negative programmatic gold. Set true only
+# for an explicit diagnostic run after reviewing the generated validation warnings.
+export GSPO_ALLOW_UNVERIFIED_GOLD="${GSPO_ALLOW_UNVERIFIED_GOLD:-false}"
 export GSPO_USE_VLLM="${GSPO_USE_VLLM:-true}"
 export GSPO_VLLM_MODE="${GSPO_VLLM_MODE:-colocate}"
 export GSPO_VLLM_SLEEP_LEVEL="${GSPO_VLLM_SLEEP_LEVEL:-1}"
