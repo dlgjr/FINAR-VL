@@ -174,7 +174,7 @@ def _ocr_judge(expected: str, actual: str) -> bool:
         actual_percent = "%" in unicodedata.normalize("NFKC", actual)
         if expected_percent != actual_percent and (expected_percent or actual_percent):
             return False
-        return any(_number_matches(expected_numbers[0], number) for number in actual_numbers)
+        return any(number == expected_numbers[0] for number in actual_numbers)
 
     # Non-numeric OCR remains strict on visible text, but ignore Unicode width,
     # whitespace and harmless edge punctuation so equivalent transcriptions do
