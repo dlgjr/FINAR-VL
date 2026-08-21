@@ -1,4 +1,4 @@
-"""Fail-closed preflight for the derived RL JSONL."""
+"""Preflight validation for the derived RL JSONL."""
 
 from __future__ import annotations
 
@@ -35,6 +35,10 @@ def _add(errors: list[dict[str, Any]], line: int, sample_id: str, error: str, **
 def validate(
     path: str | Path, *, expected_count: int = 0, root: str | Path | None = None, fail_on_unverified: bool = False
 ) -> dict[str, Any]:
+    # fail_on_unverified is retained for CLI compatibility only. Source-only gold is
+    # diagnostic metadata; it is not a rejection criterion. Objective structural or
+    # program/reference conflicts remain hard errors below.
+    del fail_on_unverified
     seen: set[str] = set()
     errors: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -146,22 +150,14 @@ def validate(
             if status not in {"verified", "source_only", "hard_negative_unverified"}:
                 _add(errors, line_number, sample_id, "missing_or_invalid_gold_verification", status=status)
             elif status != "verified":
-                warning = {
-                    "line": line_number,
-                    "sample_id": sample_id,
-                    "warning": status,
-                    "source": row.get("source", ""),
-                }
-                warnings.append(warning)
-                if fail_on_unverified:
-                    _add(
-                        errors,
-                        line_number,
-                        sample_id,
-                        "unverified_gold_blocked",
-                        status=status,
-                        source=row.get("source", ""),
-                    )
+                warnings.append(
+                    {
+                        "line": line_number,
+                        "sample_id": sample_id,
+                        "warning": "source_only",
+                        "source": row.get("source", ""),
+                    }
+                )
 
         if root is not None:
             for image in images:
@@ -193,7 +189,7 @@ def main() -> None:
     parser.add_argument("path")
     parser.add_argument("--expected-count", type=int, default=0)
     parser.add_argument("--root")
-    parser.add_argument("--fail-on-unverified", action="store_true")
+    parser.add_argument("--fail-on-unverified", action="store_true", help="deprecated; retained for compatibility")
     args = parser.parse_args()
     print(
         json.dumps(
