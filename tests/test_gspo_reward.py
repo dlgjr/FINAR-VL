@@ -43,10 +43,19 @@ def test_numeric_units_are_longest_match_and_convert_compatible_currency_scales(
     assert score_programmatic_answer("答案：43.48元", [], "numeric", gold_numeric=gold) == 0.0
 
 
-def test_numeric_does_not_inherit_units_from_question():
+def test_numeric_does_not_inherit_units_from_question_and_count_unit_is_optional():
     gold = [{"value": "2", "unit": "count"}]
     assert score_programmatic_answer("答案：2项", [], "numeric", question="阈值为5.4%，有多少项？", gold_numeric=gold) == 1.0
+    assert score_programmatic_answer("答案：2", [], "numeric", question="阈值为5.4%，有多少项？", gold_numeric=gold) == 1.0
     assert score_programmatic_answer("答案：2%", [], "numeric", question="阈值为5.4%，有多少项？", gold_numeric=gold) == 0.0
+
+
+def test_percentage_points_are_not_plain_percentages():
+    assert numeric_gold_from_text("下降2个百分点") == [{"value": "2", "unit": "百分点"}]
+    gold = [{"value": "2", "unit": "百分点"}]
+    assert score_programmatic_answer("答案：2个百分点", [], "numeric", gold_numeric=gold) == 1.0
+    assert score_programmatic_answer("答案：2 percentage points", [], "numeric", gold_numeric=gold) == 1.0
+    assert score_programmatic_answer("答案：2%", [], "numeric", gold_numeric=gold) == 0.0
 
 
 def test_scientific_notation_is_one_numeric_atom():
@@ -60,6 +69,19 @@ def test_ratio_tolerance_is_tighter_than_one_percentage_point():
     gold = [{"value": "0.0859", "unit": ""}]
     assert score_programmatic_answer("答案：0.08595", [], "numeric", gold_numeric=gold) == 1.0
     assert score_programmatic_answer("答案：0.0959", [], "numeric", gold_numeric=gold) == 0.0
+
+
+def test_explicit_tolerance_can_be_tightened_per_gold():
+    gold = [{"value": "100", "unit": "", "abs_tol": "0", "rel_tol": "0"}]
+    assert score_programmatic_answer("答案：100", [], "numeric", gold_numeric=gold) == 1.0
+    assert score_programmatic_answer("答案：100.00001", [], "numeric", gold_numeric=gold) == 0.0
+
+
+def test_verified_numeric_alias_accepts_explicit_program_equivalent_scale():
+    gold = [{"value": "8.59", "unit": "%", "aliases": [{"value": "0.0859", "unit": ""}]}]
+    assert score_programmatic_answer("答案：8.59%", [], "numeric", gold_numeric=gold) == 1.0
+    assert score_programmatic_answer("答案：0.0859", [], "numeric", gold_numeric=gold) == 1.0
+    assert score_programmatic_answer("答案：8.59", [], "numeric", gold_numeric=gold) == 0.0
 
 
 def test_page_and_boolean_programmatic_parsing_is_exact():
