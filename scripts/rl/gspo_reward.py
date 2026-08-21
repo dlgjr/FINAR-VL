@@ -15,7 +15,8 @@ _ANSWER_PREFIX_RE = re.compile(r"答案\s*[:：][ \t]*([^\r\n]*)")
 _NUMBER_TOKEN_RE = re.compile(
     r"(?P<prefix>[\$￥¥€£])?\s*"
     r"(?P<number>[-+]?(?:(?:\d{1,3}(?:[,，]\d{3})+|\d+)(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d+)?)\s*"
-    r"(?P<suffix>万亿元|亿美元|万美元|亿元|万元|港元|人民币|美元|元|HKD|USD|CNY|RMB|billion|million|thousand|[%％]|倍|家|项|个|点|万|亿)?",
+    r"(?P<suffix>万亿元|亿美元|万美元|亿元|万元|港元|人民币|美元|元|HKD|USD|CNY|RMB|"
+    r"percentage\s+points?|个百分点|百分点|billion|million|thousand|[%％]|倍|家|项|个|点|万|亿)?",
     re.IGNORECASE,
 )
 _EDGE_PUNCTUATION = " \t\r\n.,;:!?，。；：！？、\"'“”‘’`()[]{}<>《》"
@@ -83,6 +84,10 @@ def _unit_descriptor(prefix: str, suffix: str) -> tuple[str, str, Decimal]:
         "亿美元": ("亿美元", "USD", Decimal("1e8")),
         "万美元": ("万美元", "USD", Decimal("1e4")),
         "%": ("%", "percent", Decimal("0.01")),
+        "个百分点": ("百分点", "percentage_point", Decimal(1)),
+        "百分点": ("百分点", "percentage_point", Decimal(1)),
+        "percentage point": ("百分点", "percentage_point", Decimal(1)),
+        "percentage points": ("百分点", "percentage_point", Decimal(1)),
         "倍": ("倍", "multiple", Decimal(1)),
         "count": ("count", "count", Decimal(1)),
         "家": ("count", "count", Decimal(1)),
@@ -172,6 +177,7 @@ def _structured_numeric(value: Mapping[str, Any]) -> NumericValue:
     canonical = {
         "": ("scalar", Decimal(1)),
         "%": ("percent", Decimal("0.01")),
+        "百分点": ("percentage_point", Decimal(1)),
         "元": ("CNY", Decimal(1)),
         "万元": ("CNY", Decimal("1e4")),
         "亿元": ("CNY", Decimal("1e8")),
@@ -201,25 +207,44 @@ def _structured_numeric(value: Mapping[str, Any]) -> NumericValue:
     return NumericValue(number, unit, dimension, factor)
 
 
-def _numeric_tolerance(gold: NumericValue) -> tuple[Decimal, Decimal]:
+def _decimal_setting(spec: Mapping[str, Any] | None, key: str) -> Decimal | None:
+    if not spec or spec.get(key) in (None, ""):
+        return None
+    try:
+        value = Decimal(str(spec[key]))
+    except InvalidOperation as exc:
+        raise ValueError(f"invalid {key}: {spec[key]!r}") from exc
+    if value < 0:
+        raise ValueError(f"negative {key}: {value}")
+    return value
+
+
+def _numeric_tolerance(gold: NumericValue, spec: Mapping[str, Any] | None = None) -> tuple[Decimal, Decimal]:
+    abs_override = _decimal_setting(spec, "abs_tol")
+    rel_override = _decimal_setting(spec, "rel_tol")
     if gold.dimension == "count":
-        return Decimal(0), Decimal(0)
-    if gold.dimension == "percent":
-        return Decimal("1e-5"), Decimal("1e-6")
-    if gold.dimension in {"CNY", "USD", "HKD"}:
-        return Decimal("0.01"), Decimal("1e-8")
-    if gold.dimension in {"multiple", "point"}:
-        return Decimal("1e-6"), Decimal("1e-6")
-    if abs(gold.base_value) < 1:
-        return Decimal("1e-4"), Decimal("1e-5")
-    return Decimal("1e-4"), Decimal("1e-8")
+        default_abs, default_rel = Decimal(0), Decimal(0)
+    elif gold.dimension == "percent":
+        default_abs, default_rel = Decimal("1e-5"), Decimal("1e-6")
+    elif gold.dimension in {"percentage_point", "multiple", "point"}:
+        default_abs, default_rel = Decimal("1e-6"), Decimal("1e-6")
+    elif gold.dimension in {"CNY", "USD", "HKD"}:
+        default_abs, default_rel = Decimal("0.01"), Decimal("1e-8")
+    elif abs(gold.base_value) < 1:
+        default_abs, default_rel = Decimal("1e-4"), Decimal("1e-5")
+    else:
+        default_abs, default_rel = Decimal("1e-4"), Decimal("1e-8")
+    return abs_override if abs_override is not None else default_abs, rel_override if rel_override is not None else default_rel
 
 
-def _numeric_match(pred: NumericValue, gold: NumericValue) -> bool:
-    if pred.dimension != gold.dimension:
+def _numeric_match(pred: NumericValue, gold: NumericValue, spec: Mapping[str, Any] | None = None) -> bool:
+    same_dimension = pred.dimension == gold.dimension
+    allow_unitless = bool((spec or {}).get("allow_unitless")) or gold.dimension == "count"
+    if not same_dimension and not (allow_unitless and pred.dimension == "scalar" and pred.unit == ""):
         return False
-    abs_tol, rel_tol = _numeric_tolerance(gold)
-    delta = abs(pred.base_value - gold.base_value)
+    abs_tol, rel_tol = _numeric_tolerance(gold, spec)
+    pred_value = pred.base_value if same_dimension else pred.value
+    delta = abs(pred_value - gold.base_value)
     if delta <= abs_tol:
         return True
     return delta <= abs(gold.base_value) * rel_tol
@@ -246,24 +271,34 @@ def score_programmatic_answer(
             return 0.0
         try:
             pred_values = [_parse_numeric(atom) for atom in pred_atoms]
-            gold_values = (
-                [_structured_numeric(item) for item in gold_numeric]
-                if gold_numeric
-                else [_parse_numeric(str(atom)) for atom in gold_atoms]
-            )
-        except ValueError:
+            if gold_numeric:
+                gold_specs = []
+                for item in gold_numeric:
+                    primary = _structured_numeric(item)
+                    aliases = []
+                    for alias in item.get("aliases", []) or []:
+                        if not isinstance(alias, Mapping):
+                            raise ValueError("numeric alias is not an object")
+                        aliases.append((alias, _structured_numeric(alias)))
+                    gold_specs.append((item, primary, aliases))
+            else:
+                gold_specs = [({}, _parse_numeric(str(atom)), []) for atom in gold_atoms]
+        except (TypeError, ValueError):
             return 0.0
-        if not gold_values:
+        if not gold_specs:
             return 0.0
         matched_gold: set[int] = set()
         matched_pred = 0
         for pred in pred_values:
-            for index, gold in enumerate(gold_values):
-                if index not in matched_gold and _numeric_match(pred, gold):
+            for index, (spec, gold, aliases) in enumerate(gold_specs):
+                if index in matched_gold:
+                    continue
+                candidates = [(spec, gold), *aliases]
+                if any(_numeric_match(pred, candidate, candidate_spec) for candidate_spec, candidate in candidates):
                     matched_gold.add(index)
                     matched_pred += 1
                     break
-        union = len(pred_values) + len(gold_values) - matched_pred
+        union = len(pred_values) + len(gold_specs) - matched_pred
         return matched_pred / union if union else 0.0
     pred = set(_split_atoms(answer, verifier_type))
     gold = set(_split_atoms(";".join(map(str, gold_atoms)), verifier_type))
