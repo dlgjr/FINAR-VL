@@ -6,6 +6,7 @@ import argparse
 import copy
 import json
 import re
+from collections import Counter
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -93,7 +94,7 @@ def _normalize_claims(claims: Sequence[Any]) -> tuple[list[str], list[dict[str, 
 
 def _program_arg(token: str, values: Sequence[Decimal]) -> Decimal:
     token = token.strip()
-    if token.startswith("#"):
+    if (token.startswith("#") or token.startswith("A")) and token[1:].isdigit():
         index = int(token[1:])
         if index >= len(values):
             raise RejectedRecord(f"program references missing intermediate #{index}")
@@ -112,19 +113,33 @@ def _program_arg(token: str, values: Sequence[Decimal]) -> Decimal:
         raise RejectedRecord(f"unsupported program operand {token}") from exc
 
 
-def execute_financial_program(program: str) -> Decimal:
-    values: list[Decimal] = []
+def _program_calls(program: str) -> list[tuple[str, tuple[str, str]]]:
     matches = list(_PROGRAM_CALL_RE.finditer(program or ""))
     if not matches:
         raise RejectedRecord("empty_or_unsupported_program")
     remainder = _PROGRAM_CALL_RE.sub("", program).replace(",", "").strip()
     if remainder:
         raise RejectedRecord(f"unsupported_program_syntax:{remainder}")
+    output: list[tuple[str, tuple[str, str]]] = []
     for match in matches:
-        operation = match.group(1)
         args = [part.strip() for part in match.group(2).split(",")]
         if len(args) != 2:
-            raise RejectedRecord(f"invalid_program_arity:{operation}")
+            raise RejectedRecord(f"invalid_program_arity:{match.group(1)}")
+        normalized = tuple(("#" + arg[1:]) if arg.startswith("A") and arg[1:].isdigit() else arg for arg in args)
+        output.append((match.group(1), (normalized[0], normalized[1])))
+    return output
+
+
+def _program_is_prefix(program: str, reference_program: str) -> bool:
+    current = _program_calls(program)
+    reference = _program_calls(reference_program)
+    return len(current) <= len(reference) and current == reference[: len(current)]
+
+
+def execute_financial_program(program: str) -> Decimal:
+    values: list[Decimal] = []
+    calls = _program_calls(program)
+    for operation, args in calls:
         left, right = (_program_arg(arg, values) for arg in args)
         if operation == "add":
             result = left + right
@@ -162,10 +177,10 @@ def _display_consistent(execution: Decimal, display: Any) -> bool:
     if parsed is None:
         return True
     value, percent, decimals = parsed
-    unit = Decimal(10) ** Decimal(-decimals)
-    candidates = [(value, unit)]
+    precision = Decimal(10) ** Decimal(-decimals)
+    candidates = [(value, precision)]
     if percent:
-        candidates.append((value / Decimal(100), unit / Decimal(100)))
+        candidates.append((value / Decimal(100), precision / Decimal(100)))
     return any(abs(execution - expected) <= tolerance + Decimal("1e-12") for expected, tolerance in candidates)
 
 
@@ -179,38 +194,94 @@ def validate_program_metadata(row: Mapping[str, Any]) -> tuple[Decimal | None, s
     program = metadata.get("program")
     if not program:
         return None, None
-    execution = execute_financial_program(str(program))
+    program = str(program)
+    execution = execute_financial_program(program)
     operation_count = metadata.get("operation_count")
-    if operation_count is not None and int(operation_count) != len(_PROGRAM_CALL_RE.findall(str(program))):
+    if operation_count is not None and int(operation_count) != len(_program_calls(program)):
         return execution, "operation_count_mismatch"
+    original_program = metadata.get("original_program")
+    if original_program and not _program_is_prefix(program, str(original_program)):
+        return execution, "original_program_prefix_mismatch"
+    official_program = metadata.get("official_program")
+    if official_program and _program_calls(program) != _program_calls(str(official_program)):
+        return execution, "official_program_mismatch"
     value = metadata.get("program_execution_result")
     if value not in (None, ""):
         parsed = _first_decimal(value)
         if parsed is not None and not _close_decimal(execution, parsed[0]):
             return execution, "program_execution_result_mismatch"
-    for key in ("gold_execution_answer", "official_answer"):
-        value = metadata.get(key)
-        if value not in (None, "") and not _display_consistent(execution, value):
-            return execution, f"{key}_mismatch"
+    value = metadata.get("gold_execution_answer")
+    if value not in (None, "") and not _display_consistent(execution, value):
+        return execution, "gold_execution_answer_mismatch"
+    value = metadata.get("official_answer")
+    if value not in (None, "") and not _display_consistent(execution, value):
+        return execution, "official_answer_mismatch"
     readable = metadata.get("gold_readable_answer")
     if readable not in (None, "") and not _display_consistent(execution, readable):
         return execution, "gold_readable_answer_mismatch"
     return execution, None
 
 
-def _numeric_gold(row: Mapping[str, Any], solution: str) -> tuple[list[dict[str, str]], str]:
+def _numeric_gold(row: Mapping[str, Any], solution: str) -> tuple[list[dict[str, Any]], str]:
     metadata = row.get("metadata") or {}
     execution, conflict = validate_program_metadata(row)
     if conflict:
         raise RejectedRecord(conflict)
     if execution is not None:
+        # Program execution verifies the arithmetic. Prefer an independently sourced
+        # human-readable/official presentation so unit and scale are explicit.
+        for key in ("gold_readable_answer", "official_answer", "gold_execution_answer"):
+            value = metadata.get(key)
+            if value not in (None, ""):
+                try:
+                    gold: list[dict[str, Any]] = numeric_gold_from_text(str(value))
+                except ValueError as exc:
+                    raise RejectedRecord(f"invalid_{key}") from exc
+                primary = gold[0]
+                execution_alias = {"value": str(execution), "unit": ""}
+                if primary["unit"] != "" or Decimal(primary["value"]) != execution:
+                    primary["aliases"] = [execution_alias]
+                return gold, f"metadata.{key}+program_verified"
         return [{"value": str(execution), "unit": ""}], "metadata.program"
-    for key in ("gold_execution_answer", "official_answer"):
+    for key in ("official_answer", "gold_readable_answer", "gold_execution_answer"):
         value = metadata.get(key)
         if value not in (None, ""):
             return numeric_gold_from_text(str(value)), f"metadata.{key}"
     candidate = _canonical_solution(solution)
     return numeric_gold_from_text(candidate), "assistant.final_answer"
+
+
+def _page_gold(row: Mapping[str, Any], canonical_solution: str) -> tuple[list[str], str]:
+    assistant_pages = _split_atoms(canonical_solution, "page_numbers")
+    evidence_pages = (row.get("metadata") or {}).get("evidence_pages")
+    if evidence_pages not in (None, ""):
+        try:
+            pages = list(dict.fromkeys(str(int(page)) for page in evidence_pages))
+        except (TypeError, ValueError) as exc:
+            raise RejectedRecord("invalid_evidence_pages") from exc
+        if not pages:
+            raise RejectedRecord("empty_evidence_pages")
+        if set(assistant_pages) != set(pages):
+            raise RejectedRecord("evidence_pages_answer_mismatch")
+        return pages, "metadata.evidence_pages"
+    return assistant_pages, "assistant.final_answer"
+
+
+def _gold_verification(row: Mapping[str, Any], verifier_type: str, gold_source: str) -> dict[str, Any]:
+    metadata = row.get("metadata") or {}
+    pass_at_k = row.get("_pass_at_k") or {}
+    independent = False
+    if verifier_type == "page_numbers":
+        independent = bool(metadata.get("evidence_pages"))
+    elif verifier_type == "numeric":
+        independent = any(
+            metadata.get(key) not in (None, "")
+            for key in ("gold_readable_answer", "official_answer", "official_program", "original_program")
+        )
+    status = "verified" if independent else "source_only"
+    if int(pass_at_k.get("correct_count", -1)) == 0 and not independent:
+        status = "hard_negative_unverified"
+    return {"status": status, "independent": independent, "gold_source": gold_source}
 
 
 def prepare_record(row: Mapping[str, Any], line_number: int, claims: Sequence[Any] | None = None) -> dict[str, Any]:
@@ -223,13 +294,16 @@ def prepare_record(row: Mapping[str, Any], line_number: int, claims: Sequence[An
         raise ValueError(f"open answer requires cached gold_claims at line {line_number}")
     claim_ids, claim_details = _normalize_claims(claims or [])
     canonical_solution = _canonical_solution(solution)
-    gold_numeric: list[dict[str, str]] = []
+    gold_numeric: list[dict[str, Any]] = []
     gold_source = "assistant.final_answer"
     if verifier_type == "numeric":
         gold_numeric, gold_source = _numeric_gold(row, solution)
         gold_atoms: list[str] = []
+    elif verifier_type == "page_numbers":
+        gold_atoms, gold_source = _page_gold(row, canonical_solution)
     elif verifier_type == "model_judge":
         gold_atoms = []
+        gold_source = "gold_claims"
     else:
         gold_atoms = _split_atoms(canonical_solution, verifier_type)
     sample_id = (row.get("_pass_at_k") or {}).get("result_index") or f"line:{line_number}"
@@ -254,6 +328,7 @@ def prepare_record(row: Mapping[str, Any], line_number: int, claims: Sequence[An
             "gold_atoms": gold_atoms,
             "gold_numeric": gold_numeric,
             "gold_source": gold_source,
+            "gold_verification": _gold_verification(row, verifier_type, gold_source),
             "gold_claims": claim_ids,
             "gold_claim_details": claim_details,
             "question": question,
@@ -270,18 +345,28 @@ def prepare_record(row: Mapping[str, Any], line_number: int, claims: Sequence[An
     return prepared
 
 
-def prepare_jsonl(input_path: str | Path, output_path: str | Path, audit_path: str | Path, claims_by_id: Mapping[str, Sequence[str]] | None = None) -> dict[str, Any]:
+def prepare_jsonl(
+    input_path: str | Path,
+    output_path: str | Path,
+    audit_path: str | Path,
+    claims_by_id: Mapping[str, Sequence[str]] | None = None,
+) -> dict[str, Any]:
     claims_by_id = claims_by_id or {}
     output_path, audit_path = Path(output_path), Path(audit_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     audit: dict[str, Any] = {"input": str(input_path), "total": 0, "written": 0, "rejected": [], "errors": []}
     sample_ids: set[str] = set()
+    rejected_reasons: Counter[str] = Counter()
     with open(input_path, encoding="utf-8") as source, open(output_path, "w", encoding="utf-8") as target:
         for line_number, line in enumerate(source, 1):
             if not line.strip():
                 continue
             audit["total"] += 1
-            row = json.loads(line)
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                audit["errors"].append({"line": line_number, "error": f"invalid_json:{exc.msg}"})
+                continue
             sample_id = str((row.get("_pass_at_k") or {}).get("result_index") or f"line:{line_number}")
             if sample_id in sample_ids:
                 audit["errors"].append({"line": line_number, "sample_id": sample_id, "error": "duplicate_sample_id"})
@@ -290,7 +375,11 @@ def prepare_jsonl(input_path: str | Path, output_path: str | Path, audit_path: s
             try:
                 prepared = prepare_record(row, line_number, claims_by_id.get(sample_id))
             except RejectedRecord as exc:
-                audit["rejected"].append({"line": line_number, "sample_id": sample_id, "error": str(exc)})
+                reason = str(exc)
+                rejected_reasons[reason] += 1
+                audit["rejected"].append(
+                    {"line": line_number, "sample_id": sample_id, "source": row.get("source", ""), "error": reason}
+                )
                 continue
             except Exception as exc:
                 audit["errors"].append({"line": line_number, "sample_id": sample_id, "error": str(exc)})
@@ -298,6 +387,7 @@ def prepare_jsonl(input_path: str | Path, output_path: str | Path, audit_path: s
             target.write(json.dumps(prepared, ensure_ascii=False) + "\n")
             audit["written"] += 1
     audit["rejected_count"] = len(audit["rejected"])
+    audit["rejected_by_reason"] = dict(rejected_reasons)
     audit["unique_sample_ids"] = len(sample_ids)
     audit_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
     if audit["errors"]:
