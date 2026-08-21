@@ -3,13 +3,13 @@
 # 2 nodes x 8 GPUs x 96GB
 #
 # reward node:
-#   MODE=reward bash run_gspo_2node.sh
+#   MODE=reward bash run_gspo_2node_tp4x2.sh
 #
 # train node:
 #   SFT_MODEL=/path/to/sft \
 #   RL_DATA=/path/to/train_rl_generation.jsonl \
 #   REWARD_HOST=10.x.x.x \
-#   bash run_gspo_2node.sh
+#   bash run_gspo_2node_tp4x2.sh
 
 MODE="${MODE:-train}"
 ROOT="${FINAR_ROOT:-/mnt/nas/bihaoran/qwen3vl}"
