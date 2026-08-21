@@ -19,7 +19,6 @@ export GSPO_OUTPUT_DIR="${GSPO_OUTPUT_DIR:-$ROOT/output/gspo/${GSPO_RUN_ID:-$(da
 export GSPO_REWARD_POOL="${GSPO_REWARD_POOL:-$GSPO_OUTPUT_DIR/reward_pool_rank_${NODE_RANK}.jsonl}"
 export GSPO_REWARD_ERRORS="${GSPO_REWARD_ERRORS:-$GSPO_OUTPUT_DIR/reward_errors_rank_${NODE_RANK}.jsonl}"
 export GSPO_STATUS_DIR="${GSPO_STATUS_DIR:-$GSPO_OUTPUT_DIR/rank_status}"
-export GSPO_PLANNED_ROLLOUTS="${GSPO_PLANNED_ROLLOUTS:-$(( ${GSPO_EXPECTED_COUNT:-6624} * GSPO_NUM_TRAIN_EPOCHS * GSPO_NUM_GENERATIONS / (GSPO_NNODES * GSPO_NPROC_PER_NODE) ))}"
 export REWARD_PLUGIN="${REWARD_PLUGIN:-$ROOT/scripts/dlc/gspo_plugins.py}"
 export TRAINER_PLUGIN="${TRAINER_PLUGIN:-$ROOT/scripts/dlc/gspo_plugins.py}"
 export GSPO_BENCHMARK_ALLOWLIST
@@ -33,11 +32,15 @@ test -f "$ROOT/scripts/dlc/gspo_plugins.py" || { echo "missing GSPO plugin" >&2;
 PYTHON_BIN="${PYTHON_BIN:-/opt/ac2/bin/python}"
 SWIFT_BIN="${SWIFT_BIN:-$PYTHONUSERBASE/bin/swift}"
 if [[ ! -x "$SWIFT_BIN" ]]; then SWIFT_BIN=("$PYTHON_BIN" -m swift.cli); else SWIFT_BIN=("$SWIFT_BIN"); fi
+if [[ -z "${GSPO_EXPECTED_COUNT:-}" ]]; then
+  export GSPO_EXPECTED_COUNT="$(wc -l < "$GSPO_DATA" | tr -d ' ')"
+fi
+export GSPO_PLANNED_ROLLOUTS="${GSPO_PLANNED_ROLLOUTS:-$(( GSPO_EXPECTED_COUNT * GSPO_NUM_TRAIN_EPOCHS * GSPO_NUM_GENERATIONS / (GSPO_NNODES * GSPO_NPROC_PER_NODE) ))}"
 
 RUN_DIR="$GSPO_OUTPUT_DIR"
 mkdir -p "$RUN_DIR" "$WANDB_DIR"
 if [[ "$NODE_RANK" == "0" ]]; then
-  "$PYTHON_BIN" -m scripts.rl.validate_gspo_data "$GSPO_DATA" --expected-count "${GSPO_EXPECTED_COUNT:-6624}" --root "$ROOT" || exit 1
+  "$PYTHON_BIN" -m scripts.rl.validate_gspo_data "$GSPO_DATA" --expected-count "$GSPO_EXPECTED_COUNT" --root "$ROOT" || exit 1
 fi
 
 JUDGE_LOG="$RUN_DIR/judge_node_${NODE_RANK}.log"
@@ -56,7 +59,7 @@ for attempt in $(seq 1 180); do
 done
 
 if [[ "$NODE_RANK" == "0" ]]; then
-  GSPO_EXPECTED_COUNT_VALUE="${GSPO_EXPECTED_COUNT:-6624}"
+  GSPO_EXPECTED_COUNT_VALUE="$GSPO_EXPECTED_COUNT"
   GSPO_GLOBAL_STEPS=$(( (GSPO_EXPECTED_COUNT_VALUE + GSPO_GENERATION_BATCH_SIZE - 1) / GSPO_GENERATION_BATCH_SIZE * GSPO_NUM_TRAIN_EPOCHS ))
   GSPO_CHECKPOINT_COUNT=$(( (GSPO_GLOBAL_STEPS + GSPO_SAVE_STEPS - 1) / GSPO_SAVE_STEPS + GSPO_NUM_TRAIN_EPOCHS + 1 ))
   GSPO_BENCHMARK_GENERATIONS=$(( 94 * 9 * (GSPO_CHECKPOINT_COUNT + 2) ))
