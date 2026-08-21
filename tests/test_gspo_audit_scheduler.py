@@ -1,19 +1,20 @@
-from scripts.rl.gspo_audit import analyze_completion, build_audit_records, select_high_reward_samples
+from scripts.rl.gspo_audit import DEFAULT_AUDIT_COUNT, analyze_completion, build_audit_records, select_high_reward_samples
 from scripts.rl.rollout_scheduler import cost_balanced_batches
 
 
-def test_high_reward_sampling_is_seeded_and_distinct():
+def test_high_reward_sampling_is_seeded_distinct_and_stratified():
     rows = [
-        {"sample_id": "a", "reward": 1.0, "completion": "答案：A"},
-        {"sample_id": "b", "reward": 1.0, "completion": "答案：B"},
-        {"sample_id": "c", "reward": 0.5, "completion": "答案：C"},
-        {"sample_id": "d", "reward": 0.2, "completion": "答案：D"},
+        {"sample_id": "a", "reward": 1.0, "completion": "答案：A", "verifier_type": "numeric", "source": "s1"},
+        {"sample_id": "b", "reward": 0.9, "completion": "答案：B", "verifier_type": "numeric", "source": "s1"},
+        {"sample_id": "c", "reward": 0.8, "completion": "答案：C", "verifier_type": "true_false", "source": "s2"},
+        {"sample_id": "d", "reward": 0.7, "completion": "答案：D", "verifier_type": "single_choice", "source": "s3"},
     ]
     first = select_high_reward_samples(rows, seed=7, count=3)
     second = select_high_reward_samples(rows, seed=7, count=3)
     assert [row["sample_id"] for row in first] == [row["sample_id"] for row in second]
     assert len({row["sample_id"] for row in first}) == 3
-    assert {row["sample_id"] for row in first[:2]} == {"a", "b"}
+    assert len({(row["_audit_stratum"]["verifier_type"], row["_audit_stratum"]["source"]) for row in first}) == 3
+    assert DEFAULT_AUDIT_COUNT == 32
 
 
 def test_completion_anomaly_metrics():
