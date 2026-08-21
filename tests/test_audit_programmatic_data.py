@@ -1,16 +1,16 @@
 from scripts.rl.audit_programmatic_data import audit_record
 
 
-def test_hard_negative_without_independent_verifier_is_suspicious():
+def test_pass_at_k_does_not_affect_programmatic_data_acceptance():
     row = {
         "messages": [{"role": "user", "content": "1+1?"}, {"role": "assistant", "content": "2"}],
         "output_format": "number_or_free_text",
         "_pass_at_k": {"correct_count": 0, "result_index": "x"},
     }
     result = audit_record(row, 1)
-    assert result["status"] == "suspicious"
-    assert "hard_negative_without_independent_verifier" in result["reasons"]
-    assert result["gold_verification"]["status"] == "hard_negative_unverified"
+    assert result["status"] == "clean"
+    assert result["reasons"] == []
+    assert result["has_independent_reference"] is False
 
 
 def test_convfinqa_original_program_prefix_counts_as_independent_verification():
@@ -26,7 +26,7 @@ def test_convfinqa_original_program_prefix_counts_as_independent_verification():
     }
     result = audit_record(row, 1)
     assert result["status"] == "clean"
-    assert result["gold_verification"]["independent"] is True
+    assert result["has_independent_reference"] is True
 
 
 def test_bad_program_reference_is_broken():
