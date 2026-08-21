@@ -2,13 +2,27 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 from typing import Any
-import argparse
+
+from .gspo_reward import _structured_numeric
+from .prepare_gspo_data import validate_program_metadata
 
 
-def validate(path: str | Path, *, expected_count: int = 6624, root: str | Path | None = None) -> dict[str, Any]:
+def _image_slots(messages: list[dict[str, Any]]) -> int:
+    count = 0
+    for message in messages:
+        content = message.get("content", "")
+        if isinstance(content, str):
+            count += content.count("<image>")
+        elif isinstance(content, list):
+            count += sum(isinstance(item, dict) and item.get("type") == "image" for item in content)
+    return count
+
+
+def validate(path: str | Path, *, expected_count: int = 0, root: str | Path | None = None) -> dict[str, Any]:
     seen: set[str] = set()
     errors: list[dict[str, Any]] = []
     count = 0
@@ -18,19 +32,50 @@ def validate(path: str | Path, *, expected_count: int = 6624, root: str | Path |
         count += 1
         row = json.loads(line)
         sample_id = str(row.get("sample_id", ""))
+        messages = row.get("messages", []) or []
+        verifier_type = row.get("verifier_type")
         if not sample_id or sample_id in seen:
             errors.append({"line": line_number, "error": "missing_or_duplicate_sample_id", "sample_id": sample_id})
         seen.add(sample_id)
-        if any(message.get("role") == "assistant" for message in row.get("messages", [])):
+        if any(message.get("role") == "assistant" for message in messages):
             errors.append({"line": line_number, "error": "assistant_leakage", "sample_id": sample_id})
-        if row.get("verifier_type") == "model_judge" and not row.get("gold_claims"):
+        if verifier_type == "model_judge" and not row.get("gold_claims"):
             errors.append({"line": line_number, "error": "missing_gold_claims", "sample_id": sample_id})
-        if row.get("verifier_type") != "model_judge" and not row.get("gold_atoms"):
+        if verifier_type == "numeric":
+            gold_numeric = row.get("gold_numeric")
+            if not gold_numeric:
+                errors.append({"line": line_number, "error": "missing_gold_numeric", "sample_id": sample_id})
+            else:
+                try:
+                    for item in gold_numeric:
+                        if not isinstance(item, dict):
+                            raise ValueError("gold_numeric item is not an object")
+                        _structured_numeric(item)
+                except Exception as exc:
+                    errors.append({"line": line_number, "error": "invalid_gold_numeric", "sample_id": sample_id, "detail": str(exc)})
+        elif verifier_type != "model_judge" and not row.get("gold_atoms"):
             errors.append({"line": line_number, "error": "missing_gold_atoms", "sample_id": sample_id})
-        if not row.get("messages"):
+        if not messages:
             errors.append({"line": line_number, "error": "missing_messages", "sample_id": sample_id})
+        images = row.get("images", []) or []
+        if _image_slots(messages) != len(images):
+            errors.append(
+                {
+                    "line": line_number,
+                    "error": "image_slot_mismatch",
+                    "sample_id": sample_id,
+                    "image_slots": _image_slots(messages),
+                    "images": len(images),
+                }
+            )
+        try:
+            _, conflict = validate_program_metadata(row)
+        except Exception as exc:
+            conflict = str(exc)
+        if conflict:
+            errors.append({"line": line_number, "error": "program_metadata_conflict", "sample_id": sample_id, "detail": conflict})
         if root is not None:
-            for image in row.get("images", []) or []:
+            for image in images:
                 image_path = Path(image)
                 if not image_path.is_absolute():
                     image_path = Path(root) / image_path
@@ -46,7 +91,7 @@ def validate(path: str | Path, *, expected_count: int = 6624, root: str | Path |
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("path")
-    parser.add_argument("--expected-count", type=int, default=6624)
+    parser.add_argument("--expected-count", type=int, default=0)
     parser.add_argument("--root")
     args = parser.parse_args()
     print(json.dumps(validate(args.path, expected_count=args.expected_count, root=args.root), ensure_ascii=False))
