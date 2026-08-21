@@ -25,6 +25,14 @@ GSPO_BENCHMARK_TASKS = {
     "multi_step_numerical_reasoning",
     "single_table_reasoning",
 }
+_OCR_TASKS = {
+    "financial_ocr",
+    "financial_ocr_transcription",
+}
+_ENTITY_EXTRACTION_TASKS = {
+    "financial_entity_extraction",
+    "entity_extraction_classification",
+}
 
 
 def _load_pass_at_k_module() -> ModuleType:
@@ -118,6 +126,62 @@ def _json_value(value: str) -> Any | None:
         return None
 
 
+def _canonical_extraction_json(value: Any) -> Any:
+    """Canonicalize extraction JSON while treating arrays as unordered sets."""
+    if isinstance(value, dict):
+        return (
+            "dict",
+            tuple(
+                sorted(
+                    (
+                        _normalize_text(str(key)),
+                        _canonical_extraction_json(item),
+                    )
+                    for key, item in value.items()
+                )
+            ),
+        )
+    if isinstance(value, list):
+        items = [_canonical_extraction_json(item) for item in value]
+        return ("list", tuple(sorted(items, key=repr)))
+    if isinstance(value, str):
+        return ("str", _normalize_text(value))
+    if isinstance(value, bool) or value is None:
+        return (type(value).__name__, value)
+    if isinstance(value, (int, float)):
+        return ("number", Decimal(str(value)))
+    return (type(value).__name__, str(value))
+
+
+def _entity_extraction_judge(expected: str, actual: str) -> bool | None:
+    """Judge entity extraction structurally, ignoring only serialization order/spacing."""
+    expected_json = _json_value(expected)
+    if expected_json is None:
+        return None
+    actual_json = _json_value(actual)
+    if actual_json is None:
+        return False
+    return _canonical_extraction_json(expected_json) == _canonical_extraction_json(actual_json)
+
+
+def _ocr_judge(expected: str, actual: str) -> bool:
+    """Judge OCR content without penalizing presentation-only numeric formatting."""
+    expected_numbers = _numbers(expected)
+    actual_numbers = _numbers(actual)
+
+    if len(expected_numbers) == 1:
+        expected_percent = "%" in unicodedata.normalize("NFKC", expected)
+        actual_percent = "%" in unicodedata.normalize("NFKC", actual)
+        if expected_percent != actual_percent and (expected_percent or actual_percent):
+            return False
+        return any(_number_matches(expected_numbers[0], number) for number in actual_numbers)
+
+    # Non-numeric OCR remains strict on visible text, but ignore Unicode width,
+    # whitespace and harmless edge punctuation so equivalent transcriptions do
+    # not fall through to a stochastic model judge.
+    return _normalize_text(expected) == _normalize_text(actual)
+
+
 def programmatic_judge(reference: Any, candidate: Any, *, task: str = "") -> bool | None:
     """复用共享答案提取，并扫描候选全文中的选项、数字、页码与 JSON。"""
     expected = extract_answer(reference)
@@ -126,6 +190,10 @@ def programmatic_judge(reference: Any, candidate: Any, *, task: str = "") -> boo
         expected_pages = {int(number) for number in re.findall(r"\d+", expected)}
         actual_pages = {int(number) for number in re.findall(r"\d+", actual)}
         return bool(expected_pages) and expected_pages.issubset(actual_pages)
+    if task in _OCR_TASKS:
+        return _ocr_judge(expected, actual)
+    if task in _ENTITY_EXTRACTION_TASKS:
+        return _entity_extraction_judge(expected, actual)
     if _CHOICE_ANSWER_RE.fullmatch(expected):
         return _choice_labels(expected) == _choice_labels(actual)
 
