@@ -17,12 +17,25 @@ def test_high_reward_sampling_is_seeded_distinct_and_stratified():
     assert DEFAULT_AUDIT_COUNT == 32
 
 
-def test_completion_anomaly_metrics():
-    metrics = analyze_completion("乱码\ufffd\n答案：重复 重复 重复", max_completion_length=10)
-    assert metrics["replacement_char_count"] == 1
-    assert metrics["truncated"] is True
-    assert metrics["answer_prefix_missing"] is False
-    assert metrics["answer_prefix_empty"] is False
+def test_completion_anomaly_metrics_support_chinese_and_real_truncation_signals():
+    normal = analyze_completion("根据表格计算收入增长率，结果为8.59%。\n答案：8.59%")
+    assert normal["abnormal_repetition"] is False
+    assert normal["answer_prefix_missing"] is False
+
+    repeated = analyze_completion("重复重复重复重复重复重复重复重复重复重复重复重复\n答案：重复")
+    assert repeated["abnormal_repetition"] is True
+
+    length_stopped = analyze_completion(
+        {"content": "答案：A", "finish_reason": "length", "completion_tokens": 5}, max_completion_length=100
+    )
+    assert length_stopped["truncated"] is True
+    normally_stopped = analyze_completion(
+        {"content": "答案：A", "finish_reason": "stop", "completion_tokens": 5}, max_completion_length=100
+    )
+    assert normally_stopped["truncated"] is False
+
+    replacement = analyze_completion("乱码\ufffd\n答案：A")
+    assert replacement["replacement_char_count"] == 1
 
     missing = analyze_completion("没有规定格式")
     assert missing["answer_prefix_missing"] is True
