@@ -10,6 +10,23 @@ def test_hard_negative_without_independent_verifier_is_suspicious():
     result = audit_record(row, 1)
     assert result["status"] == "suspicious"
     assert "hard_negative_without_independent_verifier" in result["reasons"]
+    assert result["gold_verification"]["status"] == "hard_negative_unverified"
+
+
+def test_convfinqa_original_program_prefix_counts_as_independent_verification():
+    row = {
+        "messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "23"}],
+        "output_format": "numeric_or_short_text",
+        "source": "convfinqa_rendered_rl_verified",
+        "metadata": {
+            "program": "multiply(24, const_m1), add(#0, 47)",
+            "original_program": "multiply(24, const_m1), add(A0, 47), divide(A1, const_2)",
+            "gold_readable_answer": "23",
+        },
+    }
+    result = audit_record(row, 1)
+    assert result["status"] == "clean"
+    assert result["gold_verification"]["independent"] is True
 
 
 def test_bad_program_reference_is_broken():
