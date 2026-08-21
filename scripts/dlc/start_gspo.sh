@@ -40,7 +40,11 @@ export GSPO_PLANNED_ROLLOUTS="${GSPO_PLANNED_ROLLOUTS:-$(( GSPO_EXPECTED_COUNT *
 RUN_DIR="$GSPO_OUTPUT_DIR"
 mkdir -p "$RUN_DIR" "$WANDB_DIR"
 if [[ "$NODE_RANK" == "0" ]]; then
-  "$PYTHON_BIN" -m scripts.rl.validate_gspo_data "$GSPO_DATA" --expected-count "$GSPO_EXPECTED_COUNT" --root "$ROOT" || exit 1
+  VALIDATE_ARGS=("$GSPO_DATA" --expected-count "$GSPO_EXPECTED_COUNT" --root "$ROOT")
+  if [[ "$GSPO_ALLOW_UNVERIFIED_GOLD" != "true" ]]; then
+    VALIDATE_ARGS+=(--fail-on-unverified)
+  fi
+  "$PYTHON_BIN" -m scripts.rl.validate_gspo_data "${VALIDATE_ARGS[@]}" || exit 1
 fi
 
 JUDGE_LOG="$RUN_DIR/judge_node_${NODE_RANK}.log"
@@ -69,7 +73,7 @@ if [[ "$NODE_RANK" == "0" ]]; then
   echo "epochs=$GSPO_NUM_TRAIN_EPOCHS generations=$GSPO_NUM_GENERATIONS iterations=$GSPO_NUM_ITERATIONS steps_per_generation=$GSPO_STEPS_PER_GENERATION generation_batch=$GSPO_GENERATION_BATCH_SIZE"
   echo "max_length=$GSPO_MAX_LENGTH max_completion_length=$GSPO_MAX_COMPLETION_LENGTH save_steps=$GSPO_SAVE_STEPS eval_steps=$GSPO_EVAL_STEPS"
   echo "vllm_mode=$GSPO_VLLM_MODE vllm_max_model_len=$GSPO_VLLM_MAX_MODEL_LEN vllm_max_num_seqs=$GSPO_VLLM_MAX_NUM_SEQS"
-  echo "benchmark_allowlist=$GSPO_BENCHMARK_ALLOWLIST"
+  echo "benchmark_allowlist=$GSPO_BENCHMARK_ALLOWLIST allow_unverified_gold=$GSPO_ALLOW_UNVERIFIED_GOLD"
   echo "expected_global_steps=$GSPO_GLOBAL_STEPS expected_checkpoints=$GSPO_CHECKPOINT_COUNT expected_judge_requests=$((GSPO_EXPECTED_COUNT_VALUE * GSPO_NUM_TRAIN_EPOCHS * GSPO_NUM_GENERATIONS)) benchmark_generation_count=$GSPO_BENCHMARK_GENERATIONS"
 fi
 
