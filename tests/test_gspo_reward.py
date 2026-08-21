@@ -6,6 +6,7 @@ from scripts.rl.gspo_reward import (
     MixedReward,
     extract_prefixed_answer,
     normalize_numeric,
+    numeric_gold_from_text,
     score_programmatic_answer,
     score_judge_result,
 )
@@ -32,20 +33,42 @@ def test_jaccard_handles_partial_wrong_duplicate_and_empty_answers():
     assert score_programmatic_answer("答案：B", ["A"], "single_choice") == 0.0
 
 
-def test_numeric_tolerance_and_unit_inheritance_and_conflict():
+def test_numeric_units_are_longest_match_and_convert_compatible_currency_scales():
     assert normalize_numeric("￥1,000.01") == (1000.01, "元")
-    assert score_programmatic_answer(
-        "计算过程\n答案：10.01%", ["10%"], "numeric", question="增长率是多少（%）？"
-    ) == 1.0
-    assert score_programmatic_answer(
-        "答案：10美元", ["10元"], "numeric", question="金额是多少（元）？"
-    ) == 0.0
-    assert score_programmatic_answer("答案：10", ["10%"], "numeric") == 0.0
+    assert normalize_numeric("43.48万亿元") == (43.48, "万亿元")
+    gold = [{"value": "43.48", "unit": "万亿元"}]
+    assert score_programmatic_answer("答案：43.48万亿元", [], "numeric", gold_numeric=gold) == 1.0
+    assert score_programmatic_answer("答案：43480000000000元", [], "numeric", gold_numeric=gold) == 1.0
+    assert score_programmatic_answer("答案：43.48万", [], "numeric", gold_numeric=gold) == 0.0
+    assert score_programmatic_answer("答案：43.48元", [], "numeric", gold_numeric=gold) == 0.0
 
 
-def test_page_and_boolean_programmatic_parsing():
+def test_numeric_does_not_inherit_units_from_question():
+    gold = [{"value": "2", "unit": "count"}]
+    assert score_programmatic_answer("答案：2项", [], "numeric", question="阈值为5.4%，有多少项？", gold_numeric=gold) == 1.0
+    assert score_programmatic_answer("答案：2%", [], "numeric", question="阈值为5.4%，有多少项？", gold_numeric=gold) == 0.0
+
+
+def test_scientific_notation_is_one_numeric_atom():
+    assert numeric_gold_from_text("1e-05") == [{"value": "0.00001", "unit": ""}]
+    assert numeric_gold_from_text("4.65856e+06") == [{"value": "4.65856E+6", "unit": ""}]
+    gold = [{"value": "0.00001", "unit": ""}]
+    assert score_programmatic_answer("答案：1e-05", [], "numeric", gold_numeric=gold) == 1.0
+
+
+def test_ratio_tolerance_is_tighter_than_one_percentage_point():
+    gold = [{"value": "0.0859", "unit": ""}]
+    assert score_programmatic_answer("答案：0.08595", [], "numeric", gold_numeric=gold) == 1.0
+    assert score_programmatic_answer("答案：0.0959", [], "numeric", gold_numeric=gold) == 0.0
+
+
+def test_page_and_boolean_programmatic_parsing_is_exact():
     assert score_programmatic_answer("证据如下\n答案：第9页、第20页", ["9", "20"], "page_numbers") == 1.0
     assert score_programmatic_answer("答案：是", ["true"], "true_false") == 1.0
+    assert score_programmatic_answer("答案：不正确", ["false"], "true_false") == 1.0
+    assert score_programmatic_answer("答案：不是", ["false"], "true_false") == 1.0
+    assert score_programmatic_answer("答案：不对", ["false"], "true_false") == 1.0
+    assert score_programmatic_answer("答案：不正确", ["true"], "true_false") == 0.0
 
 
 def test_judge_json_strict_validation_and_formula():
