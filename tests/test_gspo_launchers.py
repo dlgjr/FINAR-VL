@@ -49,6 +49,13 @@ def test_gspo_launcher_uses_full_model_sequence_importance_and_offline_wandb():
         assert required in text
 
 
+def test_gspo_launcher_derives_expected_count_from_filtered_dataset():
+    text = (ROOT / "scripts" / "dlc" / "start_gspo.sh").read_text(encoding="utf-8")
+    assert 'GSPO_EXPECTED_COUNT="$(wc -l < "$GSPO_DATA"' in text
+    assert '--expected-count "$GSPO_EXPECTED_COUNT"' in text
+    assert '${GSPO_EXPECTED_COUNT:-6624}' not in text
+
+
 def test_judge_server_defaults_are_single_gpu_and_eager():
     text = (ROOT / "scripts" / "dlc" / "start_gspo_judge.sh").read_text(encoding="utf-8")
     for required in ('--tensor-parallel-size 1', '--max-model-len', '--max-num-seqs', '--gpu-memory-utilization', '--enforce-eager'):
