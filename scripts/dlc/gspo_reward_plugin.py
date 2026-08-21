@@ -35,7 +35,7 @@ def records_from_kwargs(kwargs: Mapping[str, Any], count: int) -> list[dict[str,
     for index in range(count):
         def value(name: str, default: Any) -> Any:
             item = _column(kwargs, name, index, default)
-            if isinstance(item, str) and name in {"gold_atoms", "gold_claims"}:
+            if isinstance(item, str) and name in {"gold_atoms", "gold_numeric", "gold_claims", "gold_claim_details"}:
                 try:
                     return json.loads(item)
                 except json.JSONDecodeError:
@@ -45,8 +45,10 @@ def records_from_kwargs(kwargs: Mapping[str, Any], count: int) -> list[dict[str,
         records.append(
             {
                 "sample_id": value("sample_id", f"batch:{index}"),
+                "source": value("source", ""),
                 "verifier_type": value("verifier_type", "model_judge"),
                 "gold_atoms": value("gold_atoms", []),
+                "gold_numeric": value("gold_numeric", []),
                 "gold_claims": value("gold_claims", []),
                 "gold_claim_details": value("gold_claim_details", []),
                 "question": value("question", ""),
@@ -77,10 +79,12 @@ class GSPOReward(ORM):
                         json.dumps(
                             {
                                 "sample_id": str(record.get("sample_id", "")),
+                                "source": record.get("source", ""),
                                 "completion": str(completion),
                                 "reward": float(reward),
                                 "verifier_type": record.get("verifier_type"),
                                 "gold_atoms": record.get("gold_atoms", []),
+                                "gold_numeric": record.get("gold_numeric", []),
                                 "gold_claims": record.get("gold_claims", []),
                                 "gold_claim_details": record.get("gold_claim_details", []),
                                 "solution": record.get("solution", ""),
