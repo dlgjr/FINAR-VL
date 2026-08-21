@@ -51,6 +51,11 @@ class GSPOEvalCallback(TrainerCallback):
         if remaining:
             raise RuntimeError(f"GSPO checkpoint contains trainer state: {remaining}")
 
+    @staticmethod
+    def _reward_pool_paths(pool_path: Path) -> list[Path]:
+        ranked = sorted(pool_path.parent.glob("reward_pool_rank_*.jsonl"))
+        return ranked or ([pool_path] if pool_path.is_file() else [])
+
     def _run(self, state, *, force: bool = False) -> None:
         step = int(state.global_step)
         interval = int(os.environ.get("GSPO_EVAL_STEPS", "200"))
@@ -86,9 +91,15 @@ class GSPOEvalCallback(TrainerCallback):
             )
         if int(step) > 0 and getattr(state, "is_world_process_zero", True):
             pool_path = Path(os.environ.get("GSPO_REWARD_POOL", str(Path(self.args.output_dir) / "reward_pool.jsonl")))
-            if pool_path.is_file():
-                pool = [json.loads(line) for line in pool_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-                audit = build_audit_records(pool, seed=int(os.environ.get("GSPO_AUDIT_SEED", "42")), max_completion_length=int(os.environ.get("GSPO_MAX_COMPLETION_LENGTH", "2048")))
+            pool: list[dict[str, Any]] = []
+            for current in self._reward_pool_paths(pool_path):
+                pool.extend(json.loads(line) for line in current.read_text(encoding="utf-8").splitlines() if line.strip())
+            if pool:
+                audit = build_audit_records(
+                    pool,
+                    seed=int(os.environ.get("GSPO_AUDIT_SEED", "42")),
+                    max_completion_length=int(os.environ.get("GSPO_MAX_COMPLETION_LENGTH", "2048")),
+                )
                 audit_path = Path(self.args.output_dir) / "eval" / f"step-{step:06d}" / "high_reward_audit.json"
                 audit_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(f"[GSPO_EVAL] step={step} metrics={json.dumps(metrics, ensure_ascii=False)}", flush=True)
