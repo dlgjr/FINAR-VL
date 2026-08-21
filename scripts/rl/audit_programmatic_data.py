@@ -1,4 +1,4 @@
-"""Classify programmatic RL records as clean, suspicious, or broken before GSPO."""
+"""Audit programmatic RL records for objective verifier conflicts before GSPO."""
 
 from __future__ import annotations
 
@@ -43,15 +43,6 @@ def audit_record(row: Mapping[str, Any], line_number: int) -> dict[str, Any] | N
         status = "broken"
         reasons.append(f"prepare_error:{exc}")
         prepared = None
-    metadata = row.get("metadata") or {}
-    pass_at_k = row.get("_pass_at_k") or {}
-    has_independent_verifier = _has_independent_reference(row, verifier_type)
-    if status == "clean" and int(pass_at_k.get("correct_count", -1)) == 0 and not has_independent_verifier:
-        status = "suspicious"
-        reasons.append("hard_negative_without_independent_verifier")
-    if status == "clean" and metadata.get("program") and not has_independent_verifier:
-        status = "suspicious"
-        reasons.append("program_has_no_independent_reference")
     return {
         "line": line_number,
         "sample_id": sample_id,
@@ -59,6 +50,7 @@ def audit_record(row: Mapping[str, Any], line_number: int) -> dict[str, Any] | N
         "reasons": reasons,
         "source": row.get("source", ""),
         "verifier_type": verifier_type,
+        "has_independent_reference": _has_independent_reference(row, verifier_type),
         "gold_source": (prepared or {}).get("gold_source", ""),
         "gold_verification": (prepared or {}).get("gold_verification", {}),
         "gold_numeric": (prepared or {}).get("gold_numeric", []),
