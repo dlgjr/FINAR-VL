@@ -17,10 +17,11 @@ export SFT_BENCHMARK="$DERIVED_BENCHMARK"
 export SFT_GENERATION_KL_BETA="${SFT_GENERATION_KL_BETA:-0.7}"
 export SFT_MIXED_KL_BETA="${SFT_MIXED_KL_BETA:-1.0}"
 
-# The benchmark no longer rewards open-ended visual captions. Do not spend
-# retention KL or suppress CE on the visual-description family.
-export SFT_MIXED_KL_PROB_FAMILY_VISUAL_DESCRIPTION="${SFT_MIXED_KL_PROB_FAMILY_VISUAL_DESCRIPTION:-0.0}"
-export SFT_MIXED_KL_WEIGHT_FAMILY_VISUAL_DESCRIPTION="${SFT_MIXED_KL_WEIGHT_FAMILY_VISUAL_DESCRIPTION:-0.0}"
+# Open-ended visual description is no longer a benchmark target, but it is still
+# a useful base capability. Retain it on a moderate fixed cohort with lambda=0.5
+# while keeping the full supervised CE signal for continued adaptation.
+export SFT_MIXED_KL_PROB_FAMILY_VISUAL_DESCRIPTION="${SFT_MIXED_KL_PROB_FAMILY_VISUAL_DESCRIPTION:-0.50}"
+export SFT_MIXED_KL_WEIGHT_FAMILY_VISUAL_DESCRIPTION="${SFT_MIXED_KL_WEIGHT_FAMILY_VISUAL_DESCRIPTION:-0.50}"
 export SFT_MIXED_CE_SCALE_FAMILY_VISUAL_DESCRIPTION="${SFT_MIXED_CE_SCALE_FAMILY_VISUAL_DESCRIPTION:-1.0}"
 
 # OCR looked worse than it was because format-only answers were previously sent
