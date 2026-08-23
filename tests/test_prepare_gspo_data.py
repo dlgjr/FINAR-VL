@@ -29,7 +29,7 @@ def test_prepare_record_removes_assistant_and_adds_stable_schema(tmp_path):
     assert prepared["estimated_cost"] > 0
 
 
-def test_prepare_record_uses_line_number_and_requires_claims_for_open_answer():
+def test_prepare_record_uses_line_number_and_ignores_claims_for_open_answer():
     row = {
         "messages": [{"role": "user", "content": "Explain the policy."}, {"role": "assistant", "content": "It works."}],
         "output_format": "free_text",
@@ -38,8 +38,11 @@ def test_prepare_record_uses_line_number_and_requires_claims_for_open_answer():
     prepared = prepare_record(row, line_number=11, claims=["G1", "G2"])
     assert prepared["sample_id"] == "line:11"
     assert prepared["verifier_type"] == "model_judge"
-    assert prepared["gold_claims"] == ["G1", "G2"]
-    assert prepared["gold_source"] == "gold_claims"
+    assert prepared["gold_claims"] == []
+    assert prepared["gold_claim_details"] == []
+    assert prepared["gold_source"] == "question_only"
+    assert prepared["judge_reference_mode"] == "question_only"
+    assert prepared["judge_reference"] == ""
     assert "assistant" not in {m["role"] for m in prepared["messages"]}
 
 
@@ -157,7 +160,7 @@ def test_prepare_jsonl_retains_readable_gold_when_program_display_conflicts(tmp_
     assert rows[1]["gold_numeric"] == [{"value": "1799.7", "unit": ""}]
 
 
-def test_explicit_routes_override_free_text_format_and_support_reference_judge():
+def test_explicit_routes_override_free_text_format_and_ignore_reference_for_judge():
     numeric = {
         "messages": [{"role": "user", "content": "计算差额"}, {"role": "assistant", "content": "计算：2-37=-35\n-35%"}],
         "output_format": "free_text",
@@ -179,8 +182,8 @@ def test_explicit_routes_override_free_text_format_and_support_reference_judge()
         "_reward_routing": {"reference_mode": "reference"},
     }
     prepared_judged = prepare_record(judged, 2)
-    assert prepared_judged["judge_reference_mode"] == "reference"
-    assert prepared_judged["judge_reference"] == "政策会影响利率预期。"
+    assert prepared_judged["judge_reference_mode"] == "question_only"
+    assert prepared_judged["judge_reference"] == ""
 
 
 def test_composite_numeric_builds_distinct_gold_and_text_routes_are_rejected():

@@ -151,19 +151,15 @@ def classify_generation(row: dict[str, Any]) -> tuple[str, str]:
     if reference and reference.casefold() != "nan":
         if not solution:
             row["solution"] = reference
-        reference_mode = "reference"
     elif assistant_gold:
         row["solution"] = assistant_gold
         row["reference"] = assistant_gold
-        reference_mode = "reference"
-    else:
-        reference_mode = "question_only"
     _set_route(
         row,
         reward_type="judge",
         subtype="free_text",
         reason="semantic_finance_answer",
-        reference_mode=reference_mode,
+        reference_mode="question_only",
     )
     return "judge", "free_text"
 
@@ -210,7 +206,7 @@ def classify_reasoning(row: dict[str, Any]) -> tuple[str, str]:
             reward_type="judge",
             subtype="free_text",
             reason="semantic_answer_requires_model_judge",
-            reference_mode="reference",
+            reference_mode="question_only",
         )
         return "judge", "free_text"
 
@@ -309,7 +305,7 @@ def main() -> None:
     parser.add_argument("--generation", type=Path, required=True)
     parser.add_argument("--reasoning", type=Path, required=True)
     parser.add_argument("--write", action="store_true")
-    parser.add_argument("--backup-suffix", default=".before_semantic_route_move_20260823")
+    parser.add_argument("--backup-suffix", default=".before_question_only_judge_20260823")
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
 

@@ -134,10 +134,10 @@ def test_model_judge_receives_only_prefixed_answer_and_missing_prefix_skips_judg
 
     def judge(candidate, record):
         seen.append(candidate)
-        return json.dumps({"matched_claim_ids": ["G1"], "wrong_claim_count": 0})
+        return json.dumps({"score": 1.0})
 
     reward = MixedReward(judge=judge)
-    record = {"sample_id": "x", "verifier_type": "model_judge", "gold_claims": ["G1"]}
+    record = {"sample_id": "x", "verifier_type": "model_judge", "gold_claims": []}
     assert reward(["分析过程\n答案：最终结论"], records=[record]) == [1.0]
     assert seen == ["最终结论"]
     assert reward(["没有规定格式"], records=[record]) == [-0.1]

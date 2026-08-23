@@ -96,12 +96,10 @@ def validate(
         gold_atoms = row.get("gold_atoms") or []
         if verifier_type == "model_judge":
             reference_mode = row.get("judge_reference_mode")
-            if reference_mode == "gold_claims" and not row.get("gold_claims"):
-                _add(errors, line_number, sample_id, "missing_gold_claims")
-            elif reference_mode == "reference" and not str(row.get("judge_reference") or "").strip():
-                _add(errors, line_number, sample_id, "missing_judge_reference")
-            elif reference_mode not in {"gold_claims", "reference", "question_only"}:
+            if reference_mode != "question_only":
                 _add(errors, line_number, sample_id, "invalid_judge_reference_mode", mode=reference_mode)
+            if str(row.get("judge_reference") or "").strip() or row.get("gold_claims") or row.get("gold_claim_details"):
+                _add(errors, line_number, sample_id, "judge_must_not_use_reference")
         elif verifier_type in {"numeric", "numeric_final", "composite_numeric"}:
             gold_numeric = row.get("gold_numeric")
             if gold_atoms:

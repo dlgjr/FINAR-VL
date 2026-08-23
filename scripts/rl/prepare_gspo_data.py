@@ -337,7 +337,11 @@ def prepare_record(row: Mapping[str, Any], line_number: int, claims: Sequence[An
     reward_type = expected_reward_type
     if verifier_type != "model_judge" and not solution.strip():
         raise ValueError(f"programmatic answer requires a reference solution at line {line_number}")
-    explicit_claims = claims if claims is not None else row.get("gold_claim_details") or row.get("gold_claims") or []
+    explicit_claims = (
+        []
+        if verifier_type == "model_judge"
+        else claims if claims is not None else row.get("gold_claim_details") or row.get("gold_claims") or []
+    )
     claim_ids, claim_details = _normalize_claims(explicit_claims)
     canonical_solution = _canonical_solution(solution)
     gold_numeric: list[dict[str, Any]] = []
@@ -362,18 +366,9 @@ def prepare_record(row: Mapping[str, Any], line_number: int, claims: Sequence[An
         gold_atoms, gold_source = _page_gold(row, canonical_solution)
     elif verifier_type == "model_judge":
         gold_atoms = []
-        judge_reference = str(row.get("reference") or solution or "").strip()
-        routed_mode = str((row.get("_reward_routing") or {}).get("reference_mode") or "")
-        if claim_ids:
-            judge_reference_mode = "gold_claims"
-            gold_source = "gold_claims"
-        elif routed_mode == "question_only" or not judge_reference:
-            judge_reference_mode = "question_only"
-            judge_reference = ""
-            gold_source = "question_only"
-        else:
-            judge_reference_mode = "reference"
-            gold_source = "reference"
+        judge_reference = ""
+        judge_reference_mode = "question_only"
+        gold_source = "question_only"
     else:
         gold_atoms = _split_atoms(canonical_solution, verifier_type)
         if not gold_atoms:

@@ -24,7 +24,10 @@ export TRAINER_PLUGIN="${TRAINER_PLUGIN:-$ROOT/scripts/dlc/gspo_plugins.py}"
 export GSPO_BENCHMARK_ALLOWLIST
 export GSPO_MODEL="${GSPO_MODEL:-${SFT_MODEL:-}}"
 
-: "${GSPO_JUDGE_MODEL:?GSPO_JUDGE_MODEL must point to Qwen3-VL-30B-A3B-Thinking weights}"
+if [[ "$GSPO_ENABLE_JUDGE" == "true" ]]; then
+  : "${GSPO_JUDGE_MODEL:?GSPO_JUDGE_MODEL must point to DeepSeek-V4 weights}"
+  test -f "$GSPO_JUDGE_MODEL/config.json" || { echo "missing DeepSeek-V4 config: $GSPO_JUDGE_MODEL/config.json" >&2; exit 1; }
+fi
 : "${GSPO_MODEL:?GSPO_MODEL must be the merged full SFT model (LoRA adapter is not accepted)}"
 test -f "$GSPO_MODEL/config.json" || { echo "missing merged model config: $GSPO_MODEL/config.json" >&2; exit 1; }
 test -f "$ROOT/scripts/dlc/gspo_plugins.py" || { echo "missing GSPO plugin" >&2; exit 1; }
@@ -79,20 +82,25 @@ else
   done
 fi
 
+JUDGE_PID=""
 JUDGE_LOG="$RUN_DIR/judge_node_${NODE_RANK}.log"
-(
-  export CUDA_VISIBLE_DEVICES="$GSPO_JUDGE_GPU"
-  export WANDB_MODE=disabled
-  exec "$ROOT/scripts/dlc/start_gspo_judge.sh"
-) >"$JUDGE_LOG" 2>&1 &
-JUDGE_PID=$!
-cleanup() { kill "$JUDGE_PID" 2>/dev/null || true; }
+if [[ "$GSPO_ENABLE_JUDGE" == "true" ]]; then
+  (
+    export CUDA_VISIBLE_DEVICES="$GSPO_JUDGE_GPU"
+    export WANDB_MODE=disabled
+    exec "$ROOT/scripts/dlc/start_gspo_judge.sh"
+  ) >"$JUDGE_LOG" 2>&1 &
+  JUDGE_PID=$!
+fi
+cleanup() { if [[ -n "$JUDGE_PID" ]]; then kill "$JUDGE_PID" 2>/dev/null || true; fi; }
 trap cleanup EXIT
-for attempt in $(seq 1 180); do
-  if "$PYTHON_BIN" -c "import urllib.request; urllib.request.urlopen('$GSPO_JUDGE_URL/health', timeout=2)" >/dev/null 2>&1; then break; fi
-  sleep 2
-  if (( attempt == 180 )); then echo "judge server failed to become healthy: $JUDGE_LOG" >&2; exit 1; fi
-done
+if [[ "$GSPO_ENABLE_JUDGE" == "true" ]]; then
+  for attempt in $(seq 1 180); do
+    if "$PYTHON_BIN" -c "import urllib.request; urllib.request.urlopen('$GSPO_JUDGE_URL/health', timeout=2)" >/dev/null 2>&1; then break; fi
+    sleep 2
+    if (( attempt == 180 )); then echo "judge server failed to become healthy: $JUDGE_LOG" >&2; exit 1; fi
+  done
+fi
 
 if [[ "$NODE_RANK" == "0" ]]; then
   GSPO_EXPECTED_COUNT_VALUE="$GSPO_EXPECTED_COUNT"
@@ -100,8 +108,9 @@ if [[ "$NODE_RANK" == "0" ]]; then
   GSPO_CHECKPOINT_COUNT=$(( (GSPO_GLOBAL_STEPS + GSPO_SAVE_STEPS - 1) / GSPO_SAVE_STEPS + GSPO_NUM_TRAIN_EPOCHS + 1 ))
   GSPO_BENCHMARK_GENERATIONS=$(( 94 * 9 * (GSPO_CHECKPOINT_COUNT + 2) ))
   echo "===== FULL GSPO DLC CONFIG ====="
-  echo "nodes=$GSPO_NNODES train_ranks=$((GSPO_NNODES * GSPO_NPROC_PER_NODE)) train_gpus=$GSPO_TRAIN_GPUS judge_gpu=$GSPO_JUDGE_GPU"
+  echo "nodes=$GSPO_NNODES train_ranks=$((GSPO_NNODES * GSPO_NPROC_PER_NODE)) train_gpus=$GSPO_TRAIN_GPUS judge_enabled=$GSPO_ENABLE_JUDGE judge_gpu=$GSPO_JUDGE_GPU"
   echo "model=$GSPO_MODEL judge_model=$GSPO_JUDGE_MODEL data=$GSPO_DATA"
+  echo "judge_serve_name=$GSPO_JUDGE_SERVE_NAME judge_max_tokens=$GSPO_JUDGE_MAX_TOKENS judge_tp=$GSPO_JUDGE_TENSOR_PARALLEL_SIZE judge_thinking=false"
   echo "epochs=$GSPO_NUM_TRAIN_EPOCHS generations=$GSPO_NUM_GENERATIONS iterations=$GSPO_NUM_ITERATIONS steps_per_generation=$GSPO_STEPS_PER_GENERATION generation_batch=$GSPO_GENERATION_BATCH_SIZE"
   echo "max_length=$GSPO_MAX_LENGTH max_completion_length=$GSPO_MAX_COMPLETION_LENGTH save_steps=$GSPO_SAVE_STEPS eval_steps=$GSPO_EVAL_STEPS"
   echo "vllm_mode=$GSPO_VLLM_MODE vllm_max_model_len=$GSPO_VLLM_MAX_MODEL_LEN vllm_max_num_seqs=$GSPO_VLLM_MAX_NUM_SEQS"
@@ -125,6 +134,8 @@ ARGS=(
   --torch_dtype bfloat16
   --per_device_train_batch_size "$GSPO_BATCH_SIZE"
   --gradient_accumulation_steps "$GSPO_GRAD_ACC"
+  --gradient_checkpointing "$GSPO_GRADIENT_CHECKPOINTING"
+  --vit_gradient_checkpointing "$GSPO_VIT_GRADIENT_CHECKPOINTING"
   --num_train_epochs "$GSPO_NUM_TRAIN_EPOCHS"
   --num_generations "$GSPO_NUM_GENERATIONS"
   --num_iterations "$GSPO_NUM_ITERATIONS"
