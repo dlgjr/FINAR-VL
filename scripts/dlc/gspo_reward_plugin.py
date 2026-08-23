@@ -46,11 +46,15 @@ def records_from_kwargs(kwargs: Mapping[str, Any], count: int) -> list[dict[str,
             {
                 "sample_id": value("sample_id", f"batch:{index}"),
                 "source": value("source", ""),
+                "reward_type": value("reward_type", ""),
+                "reward_subtype": value("reward_subtype", ""),
                 "verifier_type": value("verifier_type", "model_judge"),
                 "gold_atoms": value("gold_atoms", []),
                 "gold_numeric": value("gold_numeric", []),
                 "gold_claims": value("gold_claims", []),
                 "gold_claim_details": value("gold_claim_details", []),
+                "judge_reference": value("judge_reference", ""),
+                "judge_reference_mode": value("judge_reference_mode", ""),
                 "question": value("question", ""),
                 "solution": value("solution", ""),
                 "estimated_cost": value("estimated_cost", 0),
@@ -63,6 +67,7 @@ class GSPOReward(ORM):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.completed = 0
+        self.completed_by_route = {"rule": 0, "judge": 0}
 
     def __call__(self, completions, **kwargs) -> list[float]:
         started = time.perf_counter()
@@ -70,6 +75,11 @@ class GSPOReward(ORM):
         scorer = MixedReward(judge=judge_from_record)
         rewards = scorer(completions, records=records)
         self.completed += len(completions)
+        route_counts = {"rule": 0, "judge": 0}
+        for record in records:
+            route = "judge" if record.get("reward_type") == "judge" or record.get("verifier_type") == "model_judge" else "rule"
+            route_counts[route] += 1
+            self.completed_by_route[route] += 1
         pool_path = os.environ.get("GSPO_REWARD_POOL")
         if pool_path:
             os.makedirs(os.path.dirname(pool_path) or ".", exist_ok=True)
@@ -80,6 +90,8 @@ class GSPOReward(ORM):
                             {
                                 "sample_id": str(record.get("sample_id", "")),
                                 "source": record.get("source", ""),
+                                "reward_type": record.get("reward_type", ""),
+                                "reward_subtype": record.get("reward_subtype", ""),
                                 "completion": str(completion),
                                 "reward": float(reward),
                                 "verifier_type": record.get("verifier_type"),
@@ -87,6 +99,7 @@ class GSPOReward(ORM):
                                 "gold_numeric": record.get("gold_numeric", []),
                                 "gold_claims": record.get("gold_claims", []),
                                 "gold_claim_details": record.get("gold_claim_details", []),
+                                "judge_reference_mode": record.get("judge_reference_mode", ""),
                                 "solution": record.get("solution", ""),
                                 "question": record.get("question", ""),
                                 "parser_result": record.get("_parser_result"),
@@ -107,6 +120,8 @@ class GSPOReward(ORM):
             "gspo/throughput": float(kwargs.get("throughput", 0) or 0),
             "gspo/gradient_norm": float(kwargs.get("gradient_norm", 0) or 0),
             "gspo/nonfinite": float(bool(kwargs.get("nonfinite", False))),
+            "gspo/rule_samples": route_counts["rule"],
+            "gspo/judge_samples": route_counts["judge"],
         }
         generations = int(os.environ.get("GSPO_NUM_GENERATIONS", "16"))
         groups = [rewards[index : index + generations] for index in range(0, len(rewards), generations)]
@@ -126,6 +141,8 @@ class GSPOReward(ORM):
                 "rank": rank,
                 "planned": planned,
                 "completed": self.completed,
+                "completed_rule": self.completed_by_route["rule"],
+                "completed_judge": self.completed_by_route["judge"],
                 "remaining": max(0, planned - self.completed) if planned else 0,
                 "errors": len(scorer.errors),
                 "heartbeat": time.time(),

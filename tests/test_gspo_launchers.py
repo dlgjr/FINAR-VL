@@ -56,6 +56,29 @@ def test_gspo_launcher_derives_expected_count_from_filtered_dataset():
     assert '${GSPO_EXPECTED_COUNT:-6624}' not in text
 
 
+def test_independent_generation_and_reasoning_launchers_share_only_sft_input():
+    generation = (ROOT / "scripts" / "dlc" / "start_gspo_generation.sh").read_text(encoding="utf-8")
+    reasoning = (ROOT / "scripts" / "dlc" / "start_gspo_reasoning.sh").read_text(encoding="utf-8")
+    assert 'SFT_MODEL must point to the shared full SFT checkpoint' in generation
+    assert 'GENERATION_RL_DATA must point' in generation
+    assert 'GENERATION_RL_OUTPUT_DIR must be shared by all DLC nodes' in generation
+    assert 'GSPO_ROUTE_MODE=generation' in generation
+    assert 'SFT_MODEL must point to the shared full SFT checkpoint' in reasoning
+    assert 'REASONING_RL_DATA must point' in reasoning
+    assert 'REASONING_RL_OUTPUT_DIR must be shared by all DLC nodes' in reasoning
+    assert 'GSPO_ROUTE_MODE=reasoning' in reasoning
+    assert 'exec bash "$ROOT/scripts/dlc/start_gspo.sh"' in generation
+    assert 'exec bash "$ROOT/scripts/dlc/start_gspo.sh"' in reasoning
+
+
+def test_core_launcher_prepares_schedules_and_validates_explicit_routes():
+    text = (ROOT / "scripts" / "dlc" / "start_gspo.sh").read_text(encoding="utf-8")
+    assert '-m scripts.rl.prepare_gspo_data' in text
+    assert '-m scripts.rl.schedule_gspo_data' in text
+    assert '--route-mode "$GSPO_ROUTE_MODE"' in text
+    assert 'data_validation.ready' in text
+
+
 def test_judge_server_defaults_are_single_gpu_and_eager():
     text = (ROOT / "scripts" / "dlc" / "start_gspo_judge.sh").read_text(encoding="utf-8")
     for required in ('--tensor-parallel-size 1', '--max-model-len', '--max-num-seqs', '--gpu-memory-utilization', '--enforce-eager'):
@@ -66,3 +89,5 @@ def test_start_dlc_can_dispatch_full_gspo_stage():
     text = (ROOT / "scripts" / "dlc" / "start_dlc.sh").read_text(encoding="utf-8")
     assert 'DLC_STAGE:-smoke' in text
     assert 'start_gspo.sh' in text
+    assert 'start_gspo_generation.sh' in text
+    assert 'start_gspo_reasoning.sh' in text

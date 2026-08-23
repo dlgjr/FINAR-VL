@@ -82,8 +82,10 @@ def test_program_execution_recomputes_and_preserves_verified_display_scale():
             "gold_readable_answer": "1799.7",
         }
     )
-    with pytest.raises(RejectedRecord, match="gold_readable_answer_mismatch"):
-        prepare_record(broken, 1)
+    prepared_broken = prepare_record(broken, 1)
+    assert prepared_broken["gold_numeric"] == [{"value": "1799.7", "unit": ""}]
+    assert "program_conflict:gold_readable_answer_mismatch" in prepared_broken["gold_source"]
+    assert prepared_broken["gold_verification"]["status"] == "source_only"
 
 
 def test_convfinqa_program_must_match_original_program_prefix():
@@ -130,7 +132,7 @@ def test_execute_financial_program_supports_dataset_operations_constants_and_a_r
     assert execute_financial_program("add(118, 145), add(A0, 88), divide(A1, const_3)") == 117
 
 
-def test_prepare_jsonl_drops_data_quality_rejections_and_reports_reason(tmp_path):
+def test_prepare_jsonl_retains_readable_gold_when_program_display_conflicts(tmp_path):
     good = {
         "messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "2"}],
         "output_format": "number_or_free_text",
@@ -148,7 +150,70 @@ def test_prepare_jsonl_drops_data_quality_rejections_and_reports_reason(tmp_path
     source = tmp_path / "input.jsonl"
     source.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in (good, bad)) + "\n", encoding="utf-8")
     report = prepare_jsonl(source, tmp_path / "out.jsonl", tmp_path / "audit.json")
-    assert report["written"] == 1
-    assert report["rejected_count"] == 1
-    assert report["rejected_by_reason"] == {"gold_readable_answer_mismatch": 1}
-    assert len((tmp_path / "out.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+    assert report["written"] == 2
+    assert report["rejected_count"] == 0
+    assert report["rejected_by_reason"] == {}
+    rows = [json.loads(line) for line in (tmp_path / "out.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert rows[1]["gold_numeric"] == [{"value": "1799.7", "unit": ""}]
+
+
+def test_explicit_routes_override_free_text_format_and_support_reference_judge():
+    numeric = {
+        "messages": [{"role": "user", "content": "计算差额"}, {"role": "assistant", "content": "计算：2-37=-35\n-35%"}],
+        "output_format": "free_text",
+        "reward_type": "rule",
+        "reward_subtype": "numeric_final",
+        "verifier_type": "numeric_final",
+    }
+    prepared_numeric = prepare_record(numeric, 1)
+    assert prepared_numeric["verifier_type"] == "numeric_final"
+    assert prepared_numeric["gold_numeric"] == [{"value": "-35", "unit": "%"}]
+
+    judged = {
+        "messages": [{"role": "user", "content": "解释政策影响"}],
+        "solution": "政策会影响利率预期。",
+        "reference": "政策会影响利率预期。",
+        "reward_type": "judge",
+        "reward_subtype": "free_text",
+        "verifier_type": "model_judge",
+        "_reward_routing": {"reference_mode": "reference"},
+    }
+    prepared_judged = prepare_record(judged, 2)
+    assert prepared_judged["judge_reference_mode"] == "reference"
+    assert prepared_judged["judge_reference"] == "政策会影响利率预期。"
+
+
+def test_composite_numeric_builds_distinct_gold_and_text_routes_are_rejected():
+    composite = {
+        "messages": [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "答案：-2.5%，100万元"},
+        ],
+        "reward_type": "rule",
+        "reward_subtype": "composite_numeric",
+        "verifier_type": "composite_numeric",
+    }
+    assert prepare_record(composite, 1)["gold_numeric"] == [
+        {"value": "-2.5", "unit": "%"},
+        {"value": "100", "unit": "万元"},
+    ]
+    composite["messages"][-1]["content"] = "答案：1.28个百分点，1.28个百分点"
+    assert prepare_record(composite, 1)["gold_numeric"] == [{"value": "1.28", "unit": "百分点"}]
+
+    short = {
+        "messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "A, B remain related"}],
+        "reward_type": "rule",
+        "reward_subtype": "short_text",
+        "verifier_type": "short_text",
+    }
+    with pytest.raises(ValueError, match="unknown verifier_type"):
+        prepare_record(short, 2)
+
+    text_set = {
+        "messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "现金, 存货"}],
+        "reward_type": "rule",
+        "reward_subtype": "text_set",
+        "verifier_type": "text_set",
+    }
+    with pytest.raises(ValueError, match="unknown verifier_type"):
+        prepare_record(text_set, 3)

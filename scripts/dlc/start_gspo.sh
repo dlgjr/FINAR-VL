@@ -22,29 +22,61 @@ export GSPO_STATUS_DIR="${GSPO_STATUS_DIR:-$GSPO_OUTPUT_DIR/rank_status}"
 export REWARD_PLUGIN="${REWARD_PLUGIN:-$ROOT/scripts/dlc/gspo_plugins.py}"
 export TRAINER_PLUGIN="${TRAINER_PLUGIN:-$ROOT/scripts/dlc/gspo_plugins.py}"
 export GSPO_BENCHMARK_ALLOWLIST
+export GSPO_MODEL="${GSPO_MODEL:-${SFT_MODEL:-}}"
 
 : "${GSPO_JUDGE_MODEL:?GSPO_JUDGE_MODEL must point to Qwen3-VL-30B-A3B-Thinking weights}"
 : "${GSPO_MODEL:?GSPO_MODEL must be the merged full SFT model (LoRA adapter is not accepted)}"
 test -f "$GSPO_MODEL/config.json" || { echo "missing merged model config: $GSPO_MODEL/config.json" >&2; exit 1; }
-test -f "$GSPO_DATA" || { echo "missing derived GSPO data: $GSPO_DATA" >&2; exit 1; }
 test -f "$ROOT/scripts/dlc/gspo_plugins.py" || { echo "missing GSPO plugin" >&2; exit 1; }
 
 PYTHON_BIN="${PYTHON_BIN:-/opt/ac2/bin/python}"
 SWIFT_BIN="${SWIFT_BIN:-$PYTHONUSERBASE/bin/swift}"
 if [[ ! -x "$SWIFT_BIN" ]]; then SWIFT_BIN=("$PYTHON_BIN" -m swift.cli); else SWIFT_BIN=("$SWIFT_BIN"); fi
+RUN_DIR="$GSPO_OUTPUT_DIR"
+mkdir -p "$RUN_DIR" "$WANDB_DIR"
+if [[ -n "$GSPO_SOURCE_DATA" ]]; then
+  test -f "$GSPO_SOURCE_DATA" || { echo "missing RL source data: $GSPO_SOURCE_DATA" >&2; exit 1; }
+  export GSPO_DATA="${GSPO_PREPARED_DATA:-$RUN_DIR/train_gspo.jsonl}"
+  DATA_READY="$RUN_DIR/data_preparation.ready"
+  if [[ "$NODE_RANK" == "0" ]]; then
+    rm -f "$DATA_READY"
+    UNSCHEDULED_DATA="$GSPO_DATA.unscheduled"
+    "$PYTHON_BIN" -m scripts.rl.prepare_gspo_data "$GSPO_SOURCE_DATA" "$UNSCHEDULED_DATA" "$RUN_DIR/data_preparation.audit.json"
+    "$PYTHON_BIN" -m scripts.rl.schedule_gspo_data "$UNSCHEDULED_DATA" "$GSPO_DATA" \
+      --workers "$((GSPO_NNODES * GSPO_NPROC_PER_NODE))" --batch-size "$GSPO_SCHEDULE_BATCH_SIZE"
+    rm -f "$UNSCHEDULED_DATA" "$UNSCHEDULED_DATA.schedule.json"
+    touch "$DATA_READY"
+  else
+    for attempt in $(seq 1 1800); do
+      if [[ -f "$DATA_READY" ]]; then break; fi
+      sleep 1
+      if (( attempt % 30 == 0 )); then echo "waiting_for_prepared_data seconds=$attempt node_rank=$NODE_RANK"; fi
+      if (( attempt == 1800 )); then echo "timed out waiting for prepared GSPO data: $DATA_READY" >&2; exit 1; fi
+    done
+  fi
+fi
+test -f "$GSPO_DATA" || { echo "missing derived GSPO data: $GSPO_DATA" >&2; exit 1; }
 if [[ -z "${GSPO_EXPECTED_COUNT:-}" ]]; then
   export GSPO_EXPECTED_COUNT="$(wc -l < "$GSPO_DATA" | tr -d ' ')"
 fi
 export GSPO_PLANNED_ROLLOUTS="${GSPO_PLANNED_ROLLOUTS:-$(( GSPO_EXPECTED_COUNT * GSPO_NUM_TRAIN_EPOCHS * GSPO_NUM_GENERATIONS / (GSPO_NNODES * GSPO_NPROC_PER_NODE) ))}"
-
-RUN_DIR="$GSPO_OUTPUT_DIR"
-mkdir -p "$RUN_DIR" "$WANDB_DIR"
 if [[ "$NODE_RANK" == "0" ]]; then
-  VALIDATE_ARGS=("$GSPO_DATA" --expected-count "$GSPO_EXPECTED_COUNT" --root "$ROOT")
+  VALIDATION_READY="$RUN_DIR/data_validation.ready"
+  rm -f "$VALIDATION_READY"
+  VALIDATE_ARGS=("$GSPO_DATA" --expected-count "$GSPO_EXPECTED_COUNT" --root "$ROOT" --route-mode "$GSPO_ROUTE_MODE" --report "$RUN_DIR/data_validation.report.json")
   if [[ "$GSPO_ALLOW_UNVERIFIED_GOLD" != "true" ]]; then
     VALIDATE_ARGS+=(--fail-on-unverified)
   fi
   "$PYTHON_BIN" -m scripts.rl.validate_gspo_data "${VALIDATE_ARGS[@]}" || exit 1
+  touch "$VALIDATION_READY"
+else
+  VALIDATION_READY="$RUN_DIR/data_validation.ready"
+  for attempt in $(seq 1 1800); do
+    if [[ -f "$VALIDATION_READY" ]]; then break; fi
+    sleep 1
+    if (( attempt % 30 == 0 )); then echo "waiting_for_data_validation seconds=$attempt node_rank=$NODE_RANK"; fi
+    if (( attempt == 1800 )); then echo "timed out waiting for GSPO data validation: $VALIDATION_READY" >&2; exit 1; fi
+  done
 fi
 
 JUDGE_LOG="$RUN_DIR/judge_node_${NODE_RANK}.log"
@@ -74,7 +106,7 @@ if [[ "$NODE_RANK" == "0" ]]; then
   echo "max_length=$GSPO_MAX_LENGTH max_completion_length=$GSPO_MAX_COMPLETION_LENGTH save_steps=$GSPO_SAVE_STEPS eval_steps=$GSPO_EVAL_STEPS"
   echo "vllm_mode=$GSPO_VLLM_MODE vllm_max_model_len=$GSPO_VLLM_MAX_MODEL_LEN vllm_max_num_seqs=$GSPO_VLLM_MAX_NUM_SEQS"
   echo "benchmark_allowlist=$GSPO_BENCHMARK_ALLOWLIST allow_unverified_gold=$GSPO_ALLOW_UNVERIFIED_GOLD"
-  echo "expected_global_steps=$GSPO_GLOBAL_STEPS expected_checkpoints=$GSPO_CHECKPOINT_COUNT expected_judge_requests=$((GSPO_EXPECTED_COUNT_VALUE * GSPO_NUM_TRAIN_EPOCHS * GSPO_NUM_GENERATIONS)) benchmark_generation_count=$GSPO_BENCHMARK_GENERATIONS"
+  echo "expected_global_steps=$GSPO_GLOBAL_STEPS expected_checkpoints=$GSPO_CHECKPOINT_COUNT expected_reward_evaluations=$((GSPO_EXPECTED_COUNT_VALUE * GSPO_NUM_TRAIN_EPOCHS * GSPO_NUM_GENERATIONS)) benchmark_generation_count=$GSPO_BENCHMARK_GENERATIONS"
 fi
 
 ARGS=(

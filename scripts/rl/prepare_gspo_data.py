@@ -27,7 +27,10 @@ _FORMAT_TO_VERIFIER = {
     "multiple_choice": "multiple_choice",
     "true_false": "true_false",
     "page_numbers": "page_numbers",
+    "numeric_final": "numeric_final",
+    "composite_numeric": "composite_numeric",
 }
+_PROGRAMMATIC_VERIFIERS = set(_FORMAT_TO_VERIFIER.values())
 _PROGRAM_CALL_RE = re.compile(r"(add|subtract|multiply|divide)\(([^()]*)\)")
 
 
@@ -35,16 +38,29 @@ class RejectedRecord(ValueError):
     """A data-quality rejection that should be dropped and reported, not crash preparation."""
 
 
-def _assistant_solution(messages: Sequence[Mapping[str, Any]]) -> str:
+def _reference_solution(row: Mapping[str, Any], messages: Sequence[Mapping[str, Any]]) -> str:
+    explicit = row.get("solution")
+    if explicit not in (None, ""):
+        return str(explicit)
     for message in reversed(messages):
         if message.get("role") == "assistant":
             content = message.get("content", "")
             return content if isinstance(content, str) else str(content)
-    raise ValueError("record has no assistant solution")
+    return str(row.get("reference") or "")
 
 
 def _question(messages: Sequence[Mapping[str, Any]]) -> str:
     return "\n".join(str(m.get("content", "")) for m in messages if m.get("role") == "user")
+
+
+def _sample_id(row: Mapping[str, Any], line_number: int) -> str:
+    routed_line = (row.get("_reward_routing") or {}).get("source_line")
+    return str(
+        row.get("sample_id")
+        or row.get("id")
+        or (row.get("_pass_at_k") or {}).get("result_index")
+        or f"line:{routed_line or line_number}"
+    )
 
 
 def _estimate_cost(row: Mapping[str, Any], question: str, verifier_type: str) -> float:
@@ -226,6 +242,12 @@ def _numeric_gold(row: Mapping[str, Any], solution: str) -> tuple[list[dict[str,
     metadata = row.get("metadata") or {}
     execution, conflict = validate_program_metadata(row)
     if conflict:
+        if conflict != "gold_readable_answer_mismatch":
+            raise RejectedRecord(conflict)
+        for key in ("gold_readable_answer", "official_answer", "gold_execution_answer"):
+            value = metadata.get(key)
+            if value not in (None, ""):
+                return numeric_gold_from_text(str(value)), f"metadata.{key}+program_conflict:{conflict}"
         raise RejectedRecord(conflict)
     if execution is not None:
         # Program execution verifies the arithmetic. Prefer an independently sourced
@@ -267,17 +289,33 @@ def _page_gold(row: Mapping[str, Any], canonical_solution: str) -> tuple[list[st
     return assistant_pages, "assistant.final_answer"
 
 
+def _composite_numeric_gold(canonical_solution: str) -> list[dict[str, str]]:
+    gold: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for atom in _numeric_atoms(canonical_solution):
+        item = numeric_gold_from_text(atom)[0]
+        key = (item["value"], item["unit"])
+        if key not in seen:
+            seen.add(key)
+            gold.append(item)
+    if not gold:
+        raise RejectedRecord("missing_composite_numeric_gold")
+    return gold
+
+
 def _gold_verification(row: Mapping[str, Any], verifier_type: str, gold_source: str) -> dict[str, Any]:
     metadata = row.get("metadata") or {}
     pass_at_k = row.get("_pass_at_k") or {}
     independent = False
     if verifier_type == "page_numbers":
         independent = bool(metadata.get("evidence_pages"))
-    elif verifier_type == "numeric":
+    elif verifier_type in {"numeric", "numeric_final", "composite_numeric"}:
         independent = any(
             metadata.get(key) not in (None, "")
             for key in ("gold_readable_answer", "official_answer", "official_program", "original_program")
         )
+    if "program_conflict:" in gold_source:
+        independent = False
     status = "verified" if independent else "source_only"
     if int(pass_at_k.get("correct_count", -1)) == 0 and not independent:
         status = "hard_negative_unverified"
@@ -286,27 +324,61 @@ def _gold_verification(row: Mapping[str, Any], verifier_type: str, gold_source: 
 
 def prepare_record(row: Mapping[str, Any], line_number: int, claims: Sequence[Any] | None = None) -> dict[str, Any]:
     messages = row.get("messages") or []
-    solution = _assistant_solution(messages)
-    question = _question(messages)
+    solution = _reference_solution(row, messages)
+    question = _question(messages) or str(row.get("question") or "")
     output_format = row.get("output_format")
-    verifier_type = _FORMAT_TO_VERIFIER.get(output_format, "model_judge")
-    if verifier_type == "model_judge" and not claims:
-        raise ValueError(f"open answer requires cached gold_claims at line {line_number}")
-    claim_ids, claim_details = _normalize_claims(claims or [])
+    reward_type = str(row.get("reward_type") or "")
+    verifier_type = str(row.get("verifier_type") or row.get("reward_subtype") or _FORMAT_TO_VERIFIER.get(output_format, "model_judge"))
+    if verifier_type not in _PROGRAMMATIC_VERIFIERS | {"model_judge"}:
+        raise ValueError(f"unknown verifier_type {verifier_type!r} at line {line_number}")
+    expected_reward_type = "judge" if verifier_type == "model_judge" else "rule"
+    if reward_type and reward_type != expected_reward_type:
+        raise ValueError(f"reward_type/verifier_type mismatch at line {line_number}")
+    reward_type = expected_reward_type
+    if verifier_type != "model_judge" and not solution.strip():
+        raise ValueError(f"programmatic answer requires a reference solution at line {line_number}")
+    explicit_claims = claims if claims is not None else row.get("gold_claim_details") or row.get("gold_claims") or []
+    claim_ids, claim_details = _normalize_claims(explicit_claims)
     canonical_solution = _canonical_solution(solution)
     gold_numeric: list[dict[str, Any]] = []
     gold_source = "assistant.final_answer"
-    if verifier_type == "numeric":
-        gold_numeric, gold_source = _numeric_gold(row, solution)
+    judge_reference = ""
+    judge_reference_mode = ""
+    if verifier_type in {"numeric", "numeric_final"}:
+        try:
+            gold_numeric, gold_source = _numeric_gold(row, solution)
+        except RejectedRecord:
+            raise
+        except ValueError:
+            if verifier_type != "numeric_final":
+                raise
+            gold_numeric = numeric_gold_from_text(solution)
+            gold_source = "assistant.last_numeric"
         gold_atoms: list[str] = []
+    elif verifier_type == "composite_numeric":
+        gold_numeric = _composite_numeric_gold(canonical_solution)
+        gold_atoms = []
     elif verifier_type == "page_numbers":
         gold_atoms, gold_source = _page_gold(row, canonical_solution)
     elif verifier_type == "model_judge":
         gold_atoms = []
-        gold_source = "gold_claims"
+        judge_reference = str(row.get("reference") or solution or "").strip()
+        routed_mode = str((row.get("_reward_routing") or {}).get("reference_mode") or "")
+        if claim_ids:
+            judge_reference_mode = "gold_claims"
+            gold_source = "gold_claims"
+        elif routed_mode == "question_only" or not judge_reference:
+            judge_reference_mode = "question_only"
+            judge_reference = ""
+            gold_source = "question_only"
+        else:
+            judge_reference_mode = "reference"
+            gold_source = "reference"
     else:
         gold_atoms = _split_atoms(canonical_solution, verifier_type)
-    sample_id = (row.get("_pass_at_k") or {}).get("result_index") or f"line:{line_number}"
+        if not gold_atoms:
+            raise RejectedRecord(f"missing_{verifier_type}_gold")
+    sample_id = _sample_id(row, line_number)
     input_messages = [copy.deepcopy(message) for message in messages if message.get("role") != "assistant"]
     instruction = "\n请在回复最后一行按“答案：具体答案”的格式给出最终答案。"
     for message in reversed(input_messages):
@@ -324,6 +396,8 @@ def prepare_record(row: Mapping[str, Any], line_number: int, claims: Sequence[An
             "messages": input_messages,
             "solution": solution,
             "sample_id": str(sample_id),
+            "reward_type": reward_type,
+            "reward_subtype": str(row.get("reward_subtype") or verifier_type),
             "verifier_type": verifier_type,
             "gold_atoms": gold_atoms,
             "gold_numeric": gold_numeric,
@@ -331,6 +405,8 @@ def prepare_record(row: Mapping[str, Any], line_number: int, claims: Sequence[An
             "gold_verification": _gold_verification(row, verifier_type, gold_source),
             "gold_claims": claim_ids,
             "gold_claim_details": claim_details,
+            "judge_reference": judge_reference,
+            "judge_reference_mode": judge_reference_mode,
             "question": question,
             "estimated_cost": _estimate_cost(row, question, verifier_type),
             "estimated_cost_breakdown": {
@@ -367,7 +443,7 @@ def prepare_jsonl(
             except json.JSONDecodeError as exc:
                 audit["errors"].append({"line": line_number, "error": f"invalid_json:{exc.msg}"})
                 continue
-            sample_id = str((row.get("_pass_at_k") or {}).get("result_index") or f"line:{line_number}")
+            sample_id = _sample_id(row, line_number)
             if sample_id in sample_ids:
                 audit["errors"].append({"line": line_number, "sample_id": sample_id, "error": "duplicate_sample_id"})
                 continue

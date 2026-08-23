@@ -33,7 +33,12 @@ def _add(errors: list[dict[str, Any]], line: int, sample_id: str, error: str, **
 
 
 def validate(
-    path: str | Path, *, expected_count: int = 0, root: str | Path | None = None, fail_on_unverified: bool = False
+    path: str | Path,
+    *,
+    expected_count: int = 0,
+    root: str | Path | None = None,
+    fail_on_unverified: bool = False,
+    route_mode: str = "mixed",
 ) -> dict[str, Any]:
     # fail_on_unverified is retained for CLI compatibility only. Source-only gold is
     # diagnostic metadata; it is not a rejection criterion. Objective structural or
@@ -42,6 +47,7 @@ def validate(
     seen: set[str] = set()
     errors: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
+    reward_counts = {"rule": 0, "judge": 0}
     count = 0
     for line_number, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
@@ -55,6 +61,7 @@ def validate(
         sample_id = str(row.get("sample_id", ""))
         messages = row.get("messages", []) or []
         verifier_type = row.get("verifier_type")
+        reward_type = row.get("reward_type")
         output_format = row.get("output_format")
         if not sample_id or sample_id in seen:
             _add(errors, line_number, sample_id, "missing_or_duplicate_sample_id")
@@ -69,6 +76,18 @@ def validate(
                 expected=_FORMAT_TO_VERIFIER[output_format],
                 actual=verifier_type,
             )
+        expected_reward_type = "judge" if verifier_type == "model_judge" else "rule"
+        if reward_type != expected_reward_type:
+            _add(
+                errors,
+                line_number,
+                sample_id,
+                "reward_type_mismatch",
+                expected=expected_reward_type,
+                actual=reward_type,
+            )
+        elif reward_type in reward_counts:
+            reward_counts[reward_type] += 1
         if any(message.get("role") == "assistant" for message in messages):
             _add(errors, line_number, sample_id, "assistant_leakage")
         if not messages:
@@ -76,15 +95,22 @@ def validate(
 
         gold_atoms = row.get("gold_atoms") or []
         if verifier_type == "model_judge":
-            if not row.get("gold_claims"):
+            reference_mode = row.get("judge_reference_mode")
+            if reference_mode == "gold_claims" and not row.get("gold_claims"):
                 _add(errors, line_number, sample_id, "missing_gold_claims")
-        elif verifier_type == "numeric":
+            elif reference_mode == "reference" and not str(row.get("judge_reference") or "").strip():
+                _add(errors, line_number, sample_id, "missing_judge_reference")
+            elif reference_mode not in {"gold_claims", "reference", "question_only"}:
+                _add(errors, line_number, sample_id, "invalid_judge_reference_mode", mode=reference_mode)
+        elif verifier_type in {"numeric", "numeric_final", "composite_numeric"}:
             gold_numeric = row.get("gold_numeric")
             if gold_atoms:
                 _add(errors, line_number, sample_id, "numeric_has_stale_gold_atoms")
             if not gold_numeric:
                 _add(errors, line_number, sample_id, "missing_gold_numeric")
-            elif not isinstance(gold_numeric, list) or len(gold_numeric) != 1:
+            elif not isinstance(gold_numeric, list) or (
+                verifier_type != "composite_numeric" and len(gold_numeric) != 1
+            ):
                 _add(
                     errors,
                     line_number,
@@ -94,14 +120,14 @@ def validate(
                 )
             else:
                 try:
-                    item = gold_numeric[0]
-                    if not isinstance(item, dict):
-                        raise ValueError("gold_numeric item is not an object")
-                    _structured_numeric(item)
-                    for alias in item.get("aliases", []) or []:
-                        if not isinstance(alias, dict):
-                            raise ValueError("numeric alias is not an object")
-                        _structured_numeric(alias)
+                    for item in gold_numeric:
+                        if not isinstance(item, dict):
+                            raise ValueError("gold_numeric item is not an object")
+                        _structured_numeric(item)
+                        for alias in item.get("aliases", []) or []:
+                            if not isinstance(alias, dict):
+                                raise ValueError("numeric alias is not an object")
+                            _structured_numeric(alias)
                 except Exception as exc:
                     _add(errors, line_number, sample_id, "invalid_gold_numeric", detail=str(exc))
             if not row.get("gold_source"):
@@ -142,7 +168,17 @@ def validate(
         except Exception as exc:
             conflict = str(exc)
         if conflict:
-            _add(errors, line_number, sample_id, "program_metadata_conflict", detail=conflict)
+            if "program_conflict:" in str(row.get("gold_source") or ""):
+                warnings.append(
+                    {
+                        "line": line_number,
+                        "sample_id": sample_id,
+                        "warning": "program_metadata_conflict_ignored",
+                        "detail": conflict,
+                    }
+                )
+            else:
+                _add(errors, line_number, sample_id, "program_metadata_conflict", detail=conflict)
 
         verification = row.get("gold_verification") or {}
         if verifier_type != "model_judge":
@@ -171,10 +207,15 @@ def validate(
         errors.append(
             {"line": 0, "error": "count_mismatch", "sample_id": "", "count": count, "expected_count": expected_count}
         )
+    if route_mode == "generation" and (reward_counts["rule"] == 0 or reward_counts["judge"] == 0):
+        errors.append({"line": 0, "error": "generation_requires_rule_and_judge_routes", "sample_id": ""})
+    elif route_mode == "reasoning" and reward_counts["judge"]:
+        errors.append({"line": 0, "error": "reasoning_must_be_programmatic_only", "sample_id": ""})
     report = {
         "count": count,
         "expected_count": expected_count,
         "unique_sample_ids": len(seen),
+        "reward_counts": reward_counts,
         "warnings": warnings,
         "errors": errors,
         "valid": not errors,
@@ -190,18 +231,22 @@ def main() -> None:
     parser.add_argument("--expected-count", type=int, default=0)
     parser.add_argument("--root")
     parser.add_argument("--fail-on-unverified", action="store_true", help="deprecated; retained for compatibility")
+    parser.add_argument("--route-mode", choices=("mixed", "generation", "reasoning"), default="mixed")
+    parser.add_argument("--report")
     args = parser.parse_args()
-    print(
-        json.dumps(
-            validate(
-                args.path,
-                expected_count=args.expected_count,
-                root=args.root,
-                fail_on_unverified=args.fail_on_unverified,
-            ),
-            ensure_ascii=False,
-        )
+    report = validate(
+        args.path,
+        expected_count=args.expected_count,
+        root=args.root,
+        fail_on_unverified=args.fail_on_unverified,
+        route_mode=args.route_mode,
     )
+    if args.report:
+        Path(args.report).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    summary = {key: value for key, value in report.items() if key not in {"warnings", "errors"}}
+    summary["warning_count"] = len(report["warnings"])
+    summary["error_count"] = len(report["errors"])
+    print(json.dumps(summary, ensure_ascii=False))
 
 
 if __name__ == "__main__":

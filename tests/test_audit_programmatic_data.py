@@ -29,7 +29,7 @@ def test_convfinqa_original_program_prefix_counts_as_independent_verification():
     assert result["has_independent_reference"] is True
 
 
-def test_bad_program_reference_is_broken():
+def test_bad_program_reference_is_retained_as_suspicious():
     row = {
         "messages": [{"role": "user", "content": "average?"}, {"role": "assistant", "content": "5399"}],
         "output_format": "numeric_or_short_text",
@@ -42,5 +42,5 @@ def test_bad_program_reference_is_broken():
         },
     }
     result = audit_record(row, 1)
-    assert result["status"] == "broken"
+    assert result["status"] == "suspicious"
     assert result["reasons"] == ["gold_readable_answer_mismatch"]

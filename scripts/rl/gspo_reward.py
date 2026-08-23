@@ -15,7 +15,11 @@ _ANSWER_PREFIX_RE = re.compile(r"答案\s*[:：][ \t]*([^\r\n]*)")
 _NUMBER_TOKEN_RE = re.compile(
     r"(?P<prefix>[\$￥¥€£])?\s*"
     r"(?P<number>[-+]?(?:(?:\d{1,3}(?:[,，]\d{3})+|\d+)(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d+)?)\s*"
-    r"(?P<suffix>万亿元|亿美元|万美元|亿元|万元|港元|人民币|美元|元|HKD|USD|CNY|RMB|"
+    r"(?P<suffix>人民币千亿元|人民币百亿元|人民币十亿元|人民币亿元|人民币千万元|人民币百万元|人民币十万元|人民币万元|人民币千元|"
+    r"billion美元|million美元|thousand美元|billion元|million元|thousand元|"
+    r"千亿美元|百亿美元|十亿美元|亿美元|千万美元|百万美元|十万美元|万美元|"
+    r"万亿元|千亿元|百亿元|十亿元|亿元|千万元|百万元|十万元|万元|千元|"
+    r"千亿|百亿|十亿|亿|千万|百万|十万|万|千|港元|人民币|美元|元|HKD|USD|CNY|RMB|"
     r"percentage\s+points?|个百分点|百分点|billion|million|thousand|[%％]|倍|家|项|个|点|万|亿)?",
     re.IGNORECASE,
 )
@@ -79,10 +83,38 @@ def _unit_descriptor(prefix: str, suffix: str) -> tuple[str, str, Decimal]:
     }
     direct = {
         "万亿元": ("万亿元", "CNY", Decimal("1e12")),
+        "人民币千亿元": ("千亿元", "CNY", Decimal("1e11")),
+        "人民币百亿元": ("百亿元", "CNY", Decimal("1e10")),
+        "人民币十亿元": ("十亿元", "CNY", Decimal("1e9")),
+        "人民币亿元": ("亿元", "CNY", Decimal("1e8")),
+        "人民币千万元": ("千万元", "CNY", Decimal("1e7")),
+        "人民币百万元": ("百万元", "CNY", Decimal("1e6")),
+        "人民币十万元": ("十万元", "CNY", Decimal("1e5")),
+        "人民币万元": ("万元", "CNY", Decimal("1e4")),
+        "人民币千元": ("千元", "CNY", Decimal("1e3")),
+        "千亿元": ("千亿元", "CNY", Decimal("1e11")),
+        "百亿元": ("百亿元", "CNY", Decimal("1e10")),
+        "十亿元": ("十亿元", "CNY", Decimal("1e9")),
         "亿元": ("亿元", "CNY", Decimal("1e8")),
+        "千万元": ("千万元", "CNY", Decimal("1e7")),
+        "百万元": ("百万元", "CNY", Decimal("1e6")),
+        "十万元": ("十万元", "CNY", Decimal("1e5")),
         "万元": ("万元", "CNY", Decimal("1e4")),
+        "千元": ("千元", "CNY", Decimal("1e3")),
+        "千亿美元": ("千亿美元", "USD", Decimal("1e11")),
+        "百亿美元": ("百亿美元", "USD", Decimal("1e10")),
+        "十亿美元": ("十亿美元", "USD", Decimal("1e9")),
         "亿美元": ("亿美元", "USD", Decimal("1e8")),
+        "千万美元": ("千万美元", "USD", Decimal("1e7")),
+        "百万美元": ("百万美元", "USD", Decimal("1e6")),
+        "十万美元": ("十万美元", "USD", Decimal("1e5")),
         "万美元": ("万美元", "USD", Decimal("1e4")),
+        "thousand美元": ("thousand美元", "USD", Decimal("1e3")),
+        "million美元": ("million美元", "USD", Decimal("1e6")),
+        "billion美元": ("billion美元", "USD", Decimal("1e9")),
+        "thousand元": ("thousand元", "CNY", Decimal("1e3")),
+        "million元": ("million元", "CNY", Decimal("1e6")),
+        "billion元": ("billion元", "CNY", Decimal("1e9")),
         "%": ("%", "percent", Decimal("0.01")),
         "个百分点": ("百分点", "percentage_point", Decimal(1)),
         "百分点": ("百分点", "percentage_point", Decimal(1)),
@@ -95,6 +127,13 @@ def _unit_descriptor(prefix: str, suffix: str) -> tuple[str, str, Decimal]:
         "个": ("count", "count", Decimal(1)),
         "点": ("点", "point", Decimal(1)),
         "万": ("万", "scalar", Decimal("1e4")),
+        "千": ("千", "scalar", Decimal("1e3")),
+        "十万": ("十万", "scalar", Decimal("1e5")),
+        "百万": ("百万", "scalar", Decimal("1e6")),
+        "千万": ("千万", "scalar", Decimal("1e7")),
+        "十亿": ("十亿", "scalar", Decimal("1e9")),
+        "百亿": ("百亿", "scalar", Decimal("1e10")),
+        "千亿": ("千亿", "scalar", Decimal("1e11")),
         "亿": ("亿", "scalar", Decimal("1e8")),
         "thousand": ("thousand", "scalar", Decimal("1e3")),
         "million": ("million", "scalar", Decimal("1e6")),
@@ -148,6 +187,9 @@ def _split_atoms(answer: str, verifier_type: str) -> list[str]:
             return ["false"]
         return []
     if verifier_type in {"single_choice", "multiple_choice", "choice"}:
+        compact = re.sub(r"[\s,;，；、/|]+", "", text.upper())
+        if re.fullmatch(r"[A-H]+", compact):
+            return list(dict.fromkeys(compact))
         tokens = re.findall(r"(?<![A-Za-z])[A-H](?![A-Za-z])|(?<!\d)\d+(?!\d)", text.upper())
         return list(dict.fromkeys(tokens))
     pieces = re.split(r"[,;\n|/]+", text)
@@ -155,7 +197,11 @@ def _split_atoms(answer: str, verifier_type: str) -> list[str]:
 
 
 def _numeric_atoms(value: str) -> list[str]:
-    return list(dict.fromkeys(match.group(0).strip() for match in _NUMBER_TOKEN_RE.finditer(_fold_text(value))))
+    # Preserve Chinese list punctuation as a separator before NFKC turns it into
+    # an ASCII comma, which would otherwise be mistaken for a thousands separator.
+    text = str(value).replace("，", "\n").replace("、", "\n")
+    text = unicodedata.normalize("NFKC", text)
+    return list(dict.fromkeys(match.group(0).strip() for match in _NUMBER_TOKEN_RE.finditer(text)))
 
 
 def numeric_gold_from_text(value: str) -> list[dict[str, str]]:
@@ -180,17 +226,37 @@ def _structured_numeric(value: Mapping[str, Any]) -> NumericValue:
         "百分点": ("percentage_point", Decimal(1)),
         "元": ("CNY", Decimal(1)),
         "万元": ("CNY", Decimal("1e4")),
+        "千元": ("CNY", Decimal("1e3")),
+        "十万元": ("CNY", Decimal("1e5")),
+        "百万元": ("CNY", Decimal("1e6")),
+        "千万元": ("CNY", Decimal("1e7")),
         "亿元": ("CNY", Decimal("1e8")),
+        "十亿元": ("CNY", Decimal("1e9")),
+        "百亿元": ("CNY", Decimal("1e10")),
+        "千亿元": ("CNY", Decimal("1e11")),
         "万亿元": ("CNY", Decimal("1e12")),
         "美元": ("USD", Decimal(1)),
         "万美元": ("USD", Decimal("1e4")),
+        "十万美元": ("USD", Decimal("1e5")),
+        "百万美元": ("USD", Decimal("1e6")),
+        "千万美元": ("USD", Decimal("1e7")),
         "亿美元": ("USD", Decimal("1e8")),
+        "十亿美元": ("USD", Decimal("1e9")),
+        "百亿美元": ("USD", Decimal("1e10")),
+        "千亿美元": ("USD", Decimal("1e11")),
         "港元": ("HKD", Decimal(1)),
         "count": ("count", Decimal(1)),
         "倍": ("multiple", Decimal(1)),
         "点": ("point", Decimal(1)),
         "万": ("scalar", Decimal("1e4")),
+        "千": ("scalar", Decimal("1e3")),
+        "十万": ("scalar", Decimal("1e5")),
+        "百万": ("scalar", Decimal("1e6")),
+        "千万": ("scalar", Decimal("1e7")),
         "亿": ("scalar", Decimal("1e8")),
+        "十亿": ("scalar", Decimal("1e9")),
+        "百亿": ("scalar", Decimal("1e10")),
+        "千亿": ("scalar", Decimal("1e11")),
         "thousand": ("scalar", Decimal("1e3")),
         "million": ("scalar", Decimal("1e6")),
         "billion": ("scalar", Decimal("1e9")),
@@ -238,12 +304,19 @@ def _numeric_tolerance(gold: NumericValue, spec: Mapping[str, Any] | None = None
 
 
 def _numeric_match(pred: NumericValue, gold: NumericValue, spec: Mapping[str, Any] | None = None) -> bool:
-    same_dimension = pred.dimension == gold.dimension
-    allow_unitless = bool((spec or {}).get("allow_unitless")) or gold.dimension == "count"
-    if not same_dimension and not (allow_unitless and pred.dimension == "scalar" and pred.unit == ""):
-        return False
     abs_tol, rel_tol = _numeric_tolerance(gold, spec)
-    pred_value = pred.base_value if same_dimension else pred.value
+    if pred.dimension == "scalar" and pred.unit == "":
+        targets = {gold.base_value, gold.value}
+        for target in targets:
+            target_abs_tol = abs_tol if target == gold.base_value else abs_tol / gold.factor
+            delta = abs(pred.value - target)
+            if delta <= target_abs_tol or delta <= abs(target) * rel_tol:
+                return True
+        return False
+    same_dimension = pred.dimension == gold.dimension
+    if not same_dimension:
+        return False
+    pred_value = pred.base_value
     delta = abs(pred_value - gold.base_value)
     if delta <= abs_tol:
         return True
@@ -265,7 +338,11 @@ def score_programmatic_answer(
         return -0.1
     if not answer:
         return 0.0
-    if verifier_type in {"numeric", "number_or_free_text", "numeric_or_short_text"}:
+    if verifier_type in {
+        "numeric",
+        "numeric_final",
+        "composite_numeric",
+    }:
         pred_atoms = _numeric_atoms(answer)
         if not pred_atoms:
             return 0.0
@@ -300,6 +377,8 @@ def score_programmatic_answer(
                     break
         union = len(pred_values) + len(gold_specs) - matched_pred
         return matched_pred / union if union else 0.0
+    if verifier_type not in {"page_numbers", "true_false", "single_choice", "multiple_choice", "choice"}:
+        return 0.0
     pred = set(_split_atoms(answer, verifier_type))
     gold = set(_split_atoms(";".join(map(str, gold_atoms)), verifier_type))
     if not pred or not gold:
@@ -312,7 +391,14 @@ def parse_judge_result(result: Any, gold_claim_ids: Sequence[str]) -> tuple[floa
         payload = json.loads(result) if isinstance(result, str) else result
     except (TypeError, json.JSONDecodeError):
         return 0.0, None, "invalid_json"
-    if not isinstance(payload, dict) or not isinstance(payload.get("matched_claim_ids"), list):
+    if not isinstance(payload, dict):
+        return 0.0, None, "invalid_schema"
+    if not gold_claim_ids and "score" in payload:
+        score = payload.get("score")
+        if isinstance(score, bool) or not isinstance(score, (int, float)) or not 0 <= float(score) <= 1:
+            return 0.0, None, "invalid_score"
+        return float(score), {"score": float(score)}, None
+    if not isinstance(payload.get("matched_claim_ids"), list):
         return 0.0, None, "invalid_schema"
     wrong = payload.get("wrong_claim_count")
     if isinstance(wrong, bool) or not isinstance(wrong, int) or wrong < 0:
@@ -340,7 +426,7 @@ class MixedReward:
         rewards: list[float] = []
         for index, completion in enumerate(completions):
             record = records[index] if index < len(records) else {}
-            if record.get("verifier_type") == "model_judge":
+            if record.get("reward_type") == "judge" or record.get("verifier_type") == "model_judge":
                 answer = extract_prefixed_answer(completion)
                 if answer is None:
                     rewards.append(-0.1)

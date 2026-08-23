@@ -8,14 +8,14 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping
 
-from .prepare_gspo_data import _FORMAT_TO_VERIFIER, RejectedRecord, prepare_record, validate_program_metadata
+from .prepare_gspo_data import _FORMAT_TO_VERIFIER, RejectedRecord, prepare_record
 
 
 def _has_independent_reference(row: Mapping[str, Any], verifier_type: str) -> bool:
     metadata = row.get("metadata") or {}
     if verifier_type == "page_numbers":
         return bool(metadata.get("evidence_pages"))
-    if verifier_type == "numeric":
+    if verifier_type in {"numeric", "numeric_final", "composite_numeric"}:
         return any(
             metadata.get(key) not in (None, "")
             for key in ("gold_readable_answer", "official_answer", "official_program", "original_program")
@@ -24,17 +24,17 @@ def _has_independent_reference(row: Mapping[str, Any], verifier_type: str) -> bo
 
 
 def audit_record(row: Mapping[str, Any], line_number: int) -> dict[str, Any] | None:
-    verifier_type = _FORMAT_TO_VERIFIER.get(row.get("output_format"), "model_judge")
+    verifier_type = str(row.get("verifier_type") or row.get("reward_subtype") or _FORMAT_TO_VERIFIER.get(row.get("output_format"), "model_judge"))
     if verifier_type == "model_judge":
         return None
     sample_id = str((row.get("_pass_at_k") or {}).get("result_index") or f"line:{line_number}")
     reasons: list[str] = []
     status = "clean"
     try:
-        _, conflict = validate_program_metadata(row)
-        if conflict:
-            raise RejectedRecord(conflict)
         prepared = prepare_record(row, line_number)
+        if "program_conflict:" in str(prepared.get("gold_source") or ""):
+            status = "suspicious"
+            reasons.append(str(prepared["gold_source"]).rsplit("program_conflict:", 1)[1])
     except RejectedRecord as exc:
         status = "broken"
         reasons.append(str(exc))
@@ -45,7 +45,7 @@ def audit_record(row: Mapping[str, Any], line_number: int) -> dict[str, Any] | N
         prepared = None
     return {
         "line": line_number,
-        "sample_id": sample_id,
+        "sample_id": str((prepared or {}).get("sample_id") or sample_id),
         "status": status,
         "reasons": reasons,
         "source": row.get("source", ""),

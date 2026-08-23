@@ -11,5 +11,15 @@ if [ "${DLC_STAGE:-smoke}" = "gspo" ]; then
     2>&1 | tee "$LOG_FILE"
 fi
 
+if [ "${DLC_STAGE:-smoke}" = "gspo_generation" ]; then
+  exec bash "$ROOT/scripts/dlc/start_gspo_generation.sh" \
+    2>&1 | tee "$LOG_FILE"
+fi
+
+if [ "${DLC_STAGE:-smoke}" = "gspo_reasoning" ]; then
+  exec bash "$ROOT/scripts/dlc/start_gspo_reasoning.sh" \
+    2>&1 | tee "$LOG_FILE"
+fi
+
 exec bash "$ROOT/scripts/dlc/run_sft_gspo_smoke.sh" \
   2>&1 | tee "$LOG_FILE"
