@@ -30,7 +30,8 @@ def request(url: str, model: str, prompt: str, max_tokens: int, image_urls: list
         req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions", data=payload, headers={"Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(req, timeout=300) as response:
             body = json.loads(response.read().decode())
-        valid = isinstance(body.get("choices", [{}])[0].get("message", {}).get("content"), str)
+        result = json.loads(body.get("choices", [{}])[0].get("message", {}).get("content", ""))
+        valid = isinstance(result, dict)
     except Exception:
         valid = False
     return time.perf_counter() - started, valid
