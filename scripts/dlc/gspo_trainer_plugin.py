@@ -31,6 +31,8 @@ class GSPOEvalCallback(TrainerCallback):
         self.args = args
         self.trainer = trainer
         self.last_eval_step: int | None = None
+        self.last_reward_print_step = 0
+        self.reward_pool_offsets: dict[str, int] = {}
 
     @staticmethod
     def _cleanup_checkpoint(path: Path) -> None:
@@ -55,6 +57,50 @@ class GSPOEvalCallback(TrainerCallback):
     def _reward_pool_paths(pool_path: Path) -> list[Path]:
         ranked = sorted(pool_path.parent.glob("reward_pool_rank_*.jsonl"))
         return ranked or ([pool_path] if pool_path.is_file() else [])
+
+    @staticmethod
+    def _new_reward_records(paths: list[Path], offsets: dict[str, int]) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for path in paths:
+            key = str(path)
+            with path.open("rb") as source:
+                source.seek(offsets.get(key, 0))
+                records.extend(json.loads(line.decode("utf-8")) for line in source if line.strip())
+                offsets[key] = source.tell()
+        return records
+
+    def _print_top_rewards(self, state) -> None:
+        if not getattr(state, "is_world_process_zero", True):
+            return
+        step = int(state.global_step)
+        interval = int(os.environ.get("GSPO_TOP_REWARD_STEPS", "20"))
+        if step == 0 or step % interval != 0 or self.last_reward_print_step == step:
+            return
+        pool_path = Path(os.environ.get("GSPO_REWARD_POOL", str(Path(self.args.output_dir) / "reward_pool.jsonl")))
+        records = self._new_reward_records(self._reward_pool_paths(pool_path), self.reward_pool_offsets)
+        count = int(os.environ.get("GSPO_TOP_REWARD_K", "5"))
+        top = sorted(records, key=lambda row: float(row.get("reward", 0.0)), reverse=True)[:count]
+        payload = {
+            "step": step,
+            "window_start_step": self.last_reward_print_step,
+            "window_end_step": step,
+            "rollout_count": len(records),
+            "top": [
+                {
+                    "rank": index,
+                    "reward": float(row.get("reward", 0.0)),
+                    "sample_id": str(row.get("sample_id", "")),
+                    "source": row.get("source", ""),
+                    "reward_type": row.get("reward_type", ""),
+                    "verifier_type": row.get("verifier_type", ""),
+                    "question": row.get("question", ""),
+                    "completion": row.get("completion", ""),
+                }
+                for index, row in enumerate(top, 1)
+            ],
+        }
+        print(f"[GSPO_TOP_REWARD] {json.dumps(payload, ensure_ascii=False)}", flush=True)
+        self.last_reward_print_step = step
 
     def _run(self, state, *, force: bool = False) -> None:
         step = int(state.global_step)
@@ -105,7 +151,16 @@ class GSPOEvalCallback(TrainerCallback):
         print(f"[GSPO_EVAL] step={step} metrics={json.dumps(metrics, ensure_ascii=False)}", flush=True)
 
     def on_train_begin(self, args, state, control, **kwargs):
+        if getattr(state, "is_world_process_zero", True):
+            pool_path = Path(os.environ.get("GSPO_REWARD_POOL", str(Path(self.args.output_dir) / "reward_pool.jsonl")))
+            self.reward_pool_offsets = {
+                str(path): path.stat().st_size for path in self._reward_pool_paths(pool_path)
+            }
         self._run(state, force=True)
+        return control
+
+    def on_step_end(self, args, state, control, **kwargs):
+        self._print_top_rewards(state)
         return control
 
     def on_save(self, args, state, control, **kwargs):
@@ -130,6 +185,8 @@ class GSPOEvalCallback(TrainerCallback):
             self._cleanup_checkpoint(checkpoint)
             self._cleanup_checkpoint(Path(args.output_dir))
         self.last_eval_step = None
+        self.last_reward_print_step = 0
+        self.reward_pool_offsets = {}
         self._run(state, force=True)
         return control
 

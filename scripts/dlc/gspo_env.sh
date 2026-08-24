@@ -74,6 +74,8 @@ export GSPO_EVAL_STEPS="${GSPO_EVAL_STEPS:-200}"
 export GSPO_EVAL_AT_ZERO="${GSPO_EVAL_AT_ZERO:-true}"
 export GSPO_EVAL_MAX_SAMPLES="${GSPO_EVAL_MAX_SAMPLES:-0}"
 export GSPO_AUDIT_SEED="${GSPO_AUDIT_SEED:-42}"
+export GSPO_TOP_REWARD_STEPS="${GSPO_TOP_REWARD_STEPS:-20}"
+export GSPO_TOP_REWARD_K="${GSPO_TOP_REWARD_K:-5}"
 # Source-only programmatic gold is allowed by default. Objective metadata/program
 # conflicts are still rejected by data preparation and validation.
 export GSPO_ALLOW_UNVERIFIED_GOLD="${GSPO_ALLOW_UNVERIFIED_GOLD:-true}"

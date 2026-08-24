@@ -117,6 +117,7 @@ if [[ "$NODE_RANK" == "0" ]]; then
   echo "judge_serve_name=$GSPO_JUDGE_SERVE_NAME judge_max_tokens=$GSPO_JUDGE_MAX_TOKENS judge_tp=$GSPO_JUDGE_TENSOR_PARALLEL_SIZE judge_thinking=false"
   echo "epochs=$GSPO_NUM_TRAIN_EPOCHS generations=$GSPO_NUM_GENERATIONS iterations=$GSPO_NUM_ITERATIONS steps_per_generation=$GSPO_STEPS_PER_GENERATION generation_batch=$GSPO_GENERATION_BATCH_SIZE"
   echo "max_length=$GSPO_MAX_LENGTH max_completion_length=$GSPO_MAX_COMPLETION_LENGTH save_steps=$GSPO_SAVE_STEPS eval_steps=$GSPO_EVAL_STEPS"
+  echo "top_reward_steps=$GSPO_TOP_REWARD_STEPS top_reward_k=$GSPO_TOP_REWARD_K"
   echo "vllm_mode=$GSPO_VLLM_MODE vllm_max_model_len=$GSPO_VLLM_MAX_MODEL_LEN vllm_max_num_seqs=$GSPO_VLLM_MAX_NUM_SEQS"
   echo "benchmark_allowlist=$GSPO_BENCHMARK_ALLOWLIST allow_unverified_gold=$GSPO_ALLOW_UNVERIFIED_GOLD"
   echo "expected_global_steps=$GSPO_GLOBAL_STEPS expected_checkpoints=$GSPO_CHECKPOINT_COUNT expected_reward_evaluations=$((GSPO_EXPECTED_COUNT_VALUE * GSPO_NUM_TRAIN_EPOCHS * GSPO_NUM_GENERATIONS)) benchmark_generation_count=$GSPO_BENCHMARK_GENERATIONS"
