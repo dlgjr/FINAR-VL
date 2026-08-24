@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/gspo_env.sh"
-: "${GSPO_JUDGE_MODEL:?GSPO_JUDGE_MODEL must point to DeepSeek-V4 weights}"
+: "${GSPO_JUDGE_MODEL:?GSPO_JUDGE_MODEL must point to Qwen3-VL-235B weights}"
 PYTHON_BIN="${PYTHON_BIN:-/opt/ac2/bin/python}"
 export CUDA_VISIBLE_DEVICES="$GSPO_JUDGE_GPU"
 ARGS=(
@@ -15,6 +15,8 @@ ARGS=(
   --max-num-seqs "$GSPO_JUDGE_MAX_NUM_SEQS"
   --tensor-parallel-size "$GSPO_JUDGE_TENSOR_PARALLEL_SIZE"
   --tokenizer-mode "$GSPO_JUDGE_TOKENIZER_MODE"
+  --allowed-local-media-path "$GSPO_JUDGE_ALLOWED_MEDIA_PATH"
+  --limit-mm-per-prompt "{\"image\":$GSPO_JUDGE_MAX_IMAGES,\"video\":0}"
   --kv-cache-dtype "$GSPO_JUDGE_KV_CACHE_DTYPE"
   --block-size "$GSPO_JUDGE_BLOCK_SIZE"
   --gpu-memory-utilization "$GSPO_JUDGE_GPU_MEMORY_UTILIZATION"

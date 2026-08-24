@@ -434,7 +434,8 @@ class MixedReward:
                     rewards.append(0.0)
                 else:
                     try:
-                        raw = self.judge(answer, record)
+                        candidate = completion.get("content", completion.get("text", "")) if isinstance(completion, Mapping) else completion
+                        raw = self.judge(str(candidate), record)
                         score, _, error = parse_judge_result(raw, record.get("gold_claims", []))
                         if isinstance(record, dict):
                             record["_judge_json"] = raw

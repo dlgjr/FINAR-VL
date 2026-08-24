@@ -83,7 +83,7 @@ def main() -> None:
     parser.add_argument("input")
     parser.add_argument("output")
     parser.add_argument("--url", default=os.environ.get("GSPO_CLAIM_JUDGE_URL", "http://127.0.0.1:8001"))
-    parser.add_argument("--model", default=os.environ.get("GSPO_JUDGE_SERVE_NAME", "deepseek-v4"))
+    parser.add_argument("--model", default=os.environ.get("GSPO_JUDGE_SERVE_NAME", "qwen235-judge"))
     args = parser.parse_args()
     generate_claim_cache(args.input, args.output, url=args.url, model=args.model)
 

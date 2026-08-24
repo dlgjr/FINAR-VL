@@ -23,14 +23,18 @@ export REWARD_PLUGIN="${REWARD_PLUGIN:-$ROOT/scripts/dlc/gspo_plugins.py}"
 export TRAINER_PLUGIN="${TRAINER_PLUGIN:-$ROOT/scripts/dlc/gspo_plugins.py}"
 export GSPO_BENCHMARK_ALLOWLIST
 export GSPO_MODEL="${GSPO_MODEL:-${SFT_MODEL:-}}"
+export ROOT_IMAGE_DIR="${ROOT_IMAGE_DIR:-${GSPO_SOURCE_DATA:+$(dirname "$GSPO_SOURCE_DATA")}}"
+export ROOT_IMAGE_DIR="${ROOT_IMAGE_DIR:-$ROOT/data/train_multi}"
 
 if [[ "$GSPO_ENABLE_JUDGE" == "true" ]]; then
-  : "${GSPO_JUDGE_MODEL:?GSPO_JUDGE_MODEL must point to DeepSeek-V4 weights}"
-  test -f "$GSPO_JUDGE_MODEL/config.json" || { echo "missing DeepSeek-V4 config: $GSPO_JUDGE_MODEL/config.json" >&2; exit 1; }
+  : "${GSPO_JUDGE_MODEL:?GSPO_JUDGE_MODEL must point to Qwen3-VL-235B weights}"
+  test -f "$GSPO_JUDGE_MODEL/config.json" || { echo "missing Qwen3-VL-235B config: $GSPO_JUDGE_MODEL/config.json" >&2; exit 1; }
 fi
 : "${GSPO_MODEL:?GSPO_MODEL must be the merged full SFT model (LoRA adapter is not accepted)}"
 test -f "$GSPO_MODEL/config.json" || { echo "missing merged model config: $GSPO_MODEL/config.json" >&2; exit 1; }
 test -f "$ROOT/scripts/dlc/gspo_plugins.py" || { echo "missing GSPO plugin" >&2; exit 1; }
+test -d "$ROOT_IMAGE_DIR" || { echo "missing ROOT_IMAGE_DIR: $ROOT_IMAGE_DIR" >&2; exit 1; }
+cd "$ROOT_IMAGE_DIR"
 
 PYTHON_BIN="${PYTHON_BIN:-/opt/ac2/bin/python}"
 SWIFT_BIN="${SWIFT_BIN:-$PYTHONUSERBASE/bin/swift}"
@@ -66,7 +70,7 @@ export GSPO_PLANNED_ROLLOUTS="${GSPO_PLANNED_ROLLOUTS:-$(( GSPO_EXPECTED_COUNT *
 if [[ "$NODE_RANK" == "0" ]]; then
   VALIDATION_READY="$RUN_DIR/data_validation.ready"
   rm -f "$VALIDATION_READY"
-  VALIDATE_ARGS=("$GSPO_DATA" --expected-count "$GSPO_EXPECTED_COUNT" --root "$ROOT" --route-mode "$GSPO_ROUTE_MODE" --report "$RUN_DIR/data_validation.report.json")
+  VALIDATE_ARGS=("$GSPO_DATA" --expected-count "$GSPO_EXPECTED_COUNT" --root "$ROOT_IMAGE_DIR" --route-mode "$GSPO_ROUTE_MODE" --report "$RUN_DIR/data_validation.report.json")
   if [[ "$GSPO_ALLOW_UNVERIFIED_GOLD" != "true" ]]; then
     VALIDATE_ARGS+=(--fail-on-unverified)
   fi

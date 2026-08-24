@@ -14,11 +14,13 @@ def test_gspo_environment_exports_two_node_route_specific_topology_and_all_overr
         'GSPO_DEFAULT_TRAIN_GPUS=0,1,2,3',
         'GSPO_JUDGE_GPU:-4,5,6,7',
         'GSPO_ENABLE_JUDGE:-$GSPO_DEFAULT_ENABLE_JUDGE',
-        'GSPO_JUDGE_SERVE_NAME:-deepseek-v4',
-        '/models/ds',
+        'GSPO_JUDGE_SERVE_NAME:-qwen235-judge',
+        '/models/qwen235',
         'GSPO_JUDGE_MAX_TOKENS:-64',
+        'GSPO_JUDGE_MAX_MODEL_LEN:-49152',
         'GSPO_JUDGE_TENSOR_PARALLEL_SIZE:-4',
-        'GSPO_JUDGE_TOKENIZER_MODE:-deepseek_v4',
+        'GSPO_JUDGE_TOKENIZER_MODE:-auto',
+        'GSPO_JUDGE_MAX_IMAGES:-32',
         'GSPO_NUM_TRAIN_EPOCHS:-4',
         'GSPO_NUM_GENERATIONS:-16',
         'GSPO_NUM_ITERATIONS:-4',
@@ -59,6 +61,9 @@ def test_gspo_launcher_uses_full_model_sequence_importance_and_offline_wandb():
         '--report_to wandb',
         '--callbacks gspo_eval',
         'export WANDB_MODE=offline',
+        'export ROOT_IMAGE_DIR=',
+        'cd "$ROOT_IMAGE_DIR"',
+        '--root "$ROOT_IMAGE_DIR"',
         'GSPO_BENCHMARK_ALLOWLIST',
     ):
         assert required in text
@@ -94,11 +99,13 @@ def test_core_launcher_prepares_schedules_and_validates_explicit_routes():
     assert 'data_validation.ready' in text
 
 
-def test_judge_server_exposes_deepseek_v4_parallelism_and_is_eager():
+def test_judge_server_exposes_qwen3_vl_parallelism_images_and_is_eager():
     text = (ROOT / "scripts" / "dlc" / "start_gspo_judge.sh").read_text(encoding="utf-8")
     for required in (
         '--tensor-parallel-size "$GSPO_JUDGE_TENSOR_PARALLEL_SIZE"',
         '--tokenizer-mode "$GSPO_JUDGE_TOKENIZER_MODE"',
+        '--allowed-local-media-path "$GSPO_JUDGE_ALLOWED_MEDIA_PATH"',
+        '--limit-mm-per-prompt',
         '--kv-cache-dtype "$GSPO_JUDGE_KV_CACHE_DTYPE"',
         '--block-size "$GSPO_JUDGE_BLOCK_SIZE"',
         '--enable-expert-parallel',

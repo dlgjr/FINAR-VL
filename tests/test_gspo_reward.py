@@ -129,7 +129,7 @@ def test_judge_json_strict_validation_and_formula():
     assert score_judge_result('{"score":1.5}', []) == 0.0
 
 
-def test_model_judge_receives_only_prefixed_answer_and_missing_prefix_skips_judge():
+def test_model_judge_receives_full_rollout_and_missing_prefix_skips_judge():
     seen = []
 
     def judge(candidate, record):
@@ -139,6 +139,6 @@ def test_model_judge_receives_only_prefixed_answer_and_missing_prefix_skips_judg
     reward = MixedReward(judge=judge)
     record = {"sample_id": "x", "verifier_type": "model_judge", "gold_claims": []}
     assert reward(["分析过程\n答案：最终结论"], records=[record]) == [1.0]
-    assert seen == ["最终结论"]
+    assert seen == ["分析过程\n答案：最终结论"]
     assert reward(["没有规定格式"], records=[record]) == [-0.1]
-    assert seen == ["最终结论"]
+    assert seen == ["分析过程\n答案：最终结论"]

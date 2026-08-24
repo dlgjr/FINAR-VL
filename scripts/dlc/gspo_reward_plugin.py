@@ -35,7 +35,7 @@ def records_from_kwargs(kwargs: Mapping[str, Any], count: int) -> list[dict[str,
     for index in range(count):
         def value(name: str, default: Any) -> Any:
             item = _column(kwargs, name, index, default)
-            if isinstance(item, str) and name in {"gold_atoms", "gold_numeric", "gold_claims", "gold_claim_details"}:
+            if isinstance(item, str) and name in {"images", "gold_atoms", "gold_numeric", "gold_claims", "gold_claim_details"}:
                 try:
                     return json.loads(item)
                 except json.JSONDecodeError:
@@ -49,6 +49,7 @@ def records_from_kwargs(kwargs: Mapping[str, Any], count: int) -> list[dict[str,
                 "reward_type": value("reward_type", ""),
                 "reward_subtype": value("reward_subtype", ""),
                 "verifier_type": value("verifier_type", "model_judge"),
+                "images": value("images", []),
                 "gold_atoms": value("gold_atoms", []),
                 "gold_numeric": value("gold_numeric", []),
                 "gold_claims": value("gold_claims", []),

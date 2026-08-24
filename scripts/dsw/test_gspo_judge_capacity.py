@@ -34,7 +34,7 @@ def request(url: str, model: str, prompt: str, max_tokens: int) -> tuple[float, 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:8001")
-    parser.add_argument("--model", default="deepseek-v4")
+    parser.add_argument("--model", default="qwen235-judge")
     parser.add_argument("--prompt", default="Return JSON {\"ok\":true}.")
     parser.add_argument("--max-tokens", type=int, default=64)
     args = parser.parse_args()
