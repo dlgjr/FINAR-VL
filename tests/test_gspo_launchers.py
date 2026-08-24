@@ -21,6 +21,7 @@ def test_gspo_environment_exports_two_node_route_specific_topology_and_all_overr
         'GSPO_JUDGE_TENSOR_PARALLEL_SIZE:-4',
         'GSPO_JUDGE_TOKENIZER_MODE:-auto',
         'GSPO_JUDGE_MAX_IMAGES:-32',
+        'GSPO_JUDGE_BLOCK_SIZE:-32',
         'GSPO_NUM_TRAIN_EPOCHS:-4',
         'GSPO_NUM_GENERATIONS:-16',
         'GSPO_NUM_ITERATIONS:-4',
