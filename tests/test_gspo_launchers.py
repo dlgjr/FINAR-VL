@@ -35,7 +35,9 @@ def test_gspo_environment_exports_two_node_route_specific_topology_and_all_overr
         'GSPO_VLLM_GPU_MEMORY_UTILIZATION:-0.60',
         'GSPO_DYNAMIC_SAMPLE:-true',
         'GSPO_MAX_RESAMPLE_TIMES:-3',
-        'GSPO_SAVE_STEPS:-200',
+        'GSPO_BETA:-0.01',
+        'GSPO_ENTROPY_COEF:-0.01',
+        'GSPO_SAVE_STEPS:-40',
     ):
         assert required in text
 
@@ -61,6 +63,7 @@ def test_gspo_launcher_uses_full_model_sequence_importance_and_offline_wandb():
         '--save_only_model true',
         '--report_to wandb',
         '--callbacks gspo_eval',
+        'kl_beta=$GSPO_BETA entropy_coef=$GSPO_ENTROPY_COEF',
         'export WANDB_MODE=offline',
         'export ROOT_IMAGE_DIR=',
         'cd "$ROOT_IMAGE_DIR"',

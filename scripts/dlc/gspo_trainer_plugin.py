@@ -14,15 +14,62 @@ from typing import Any
 
 try:
     from swift.callbacks import TrainerCallback, callbacks_map
+    from swift.rlhf_trainers import GRPOTrainer
+    from swift.trainers.trainer_factory import TrainerFactory
 except ImportError:  # pragma: no cover - DLC supplies ms-swift
     class TrainerCallback:  # type: ignore[no-redef]
         def __init__(self, *args, **kwargs):
             pass
 
+    class GRPOTrainer:  # type: ignore[no-redef]
+        pass
+
+    class TrainerFactory:  # type: ignore[no-redef]
+        TRAINER_MAPPING: dict[str, str] = {}
+
     callbacks_map: dict[str, type] = {}  # type: ignore[no-redef]
 
 from scripts.rl.gspo_audit import build_audit_records
 from scripts.sft.pass_at_8_eval import run_distributed_evaluation
+
+
+class GSPOGRPOTrainer(GRPOTrainer):
+    """Add a static entropy bonus to ms-swift's existing GRPO/GSPO loss."""
+
+    def _get_per_token_logps_and_entropies(self, *args, **kwargs):
+        per_token_logps, entropies = super()._get_per_token_logps_and_entropies(*args, **kwargs)
+        self._gspo_entropy_tensor = entropies
+        return per_token_logps, entropies
+
+    def _compute_loss_and_metrics(self, model, model_inputs, grpo_batch):
+        loss, metrics_data = super()._compute_loss_and_metrics(model, model_inputs, grpo_batch)
+        entropies = self.__dict__.pop("_gspo_entropy_tensor")
+        entropy_coef = float(os.environ.get("GSPO_ENTROPY_COEF", "0.01"))
+        if entropy_coef == 0.0:
+            return loss, metrics_data
+        completion_mask = metrics_data["completion_mask"]
+        entropy_mean = (
+            entropies.masked_fill(completion_mask == 0, 0.0).sum()
+            / metrics_data["completion_token_count"]
+        )
+        entropy_loss = -entropy_coef * entropy_mean
+        loss = loss + entropy_loss
+        gathered_entropy_mean = self.accelerator.gather_for_metrics(entropy_mean.detach()).nanmean().item()
+        metrics_data["entropy_regularization"] = {
+            "coef": entropy_coef,
+            "mean": gathered_entropy_mean,
+            "loss": -entropy_coef * gathered_entropy_mean,
+        }
+        return loss, metrics_data
+
+    def _update_metrics(self, metrics_data):
+        super()._update_metrics(metrics_data)
+        regularization = metrics_data.get("entropy_regularization")
+        if regularization:
+            mode = metrics_data["mode"]
+            self._metrics[mode]["entropy/coef"].append(regularization["coef"])
+            self._metrics[mode]["entropy/regularized_mean"].append(regularization["mean"])
+            self._metrics[mode]["entropy/regularization_loss"].append(regularization["loss"])
 
 
 class GSPOEvalCallback(TrainerCallback):
@@ -222,3 +269,4 @@ class GSPOEvalCallback(TrainerCallback):
 
 
 callbacks_map["gspo_eval"] = GSPOEvalCallback
+TrainerFactory.TRAINER_MAPPING["grpo"] = "scripts.dlc.gspo_trainer_plugin.GSPOGRPOTrainer"
