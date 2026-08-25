@@ -111,7 +111,9 @@ def test_independent_generation_and_reasoning_launchers_share_only_sft_input():
     assert 'mktemp /tmp/qwen3vl-start-gspo-generation.' in generation
     assert 'cp "$ROOT/scripts/dlc/start_gspo.sh" "$LOCAL_GSPO_SCRIPT"' in generation
     assert 'exec bash "$LOCAL_GSPO_SCRIPT"' in generation
-    assert 'exec bash "$ROOT/scripts/dlc/start_gspo.sh"' in reasoning
+    assert 'mktemp /tmp/qwen3vl-start-gspo-reasoning.' in reasoning
+    assert 'cp "$ROOT/scripts/dlc/start_gspo.sh" "$LOCAL_GSPO_SCRIPT"' in reasoning
+    assert 'exec bash "$LOCAL_GSPO_SCRIPT"' in reasoning
 
 
 def test_core_launcher_prepares_schedules_and_validates_explicit_routes():
