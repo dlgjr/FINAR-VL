@@ -175,7 +175,7 @@ if [[ "$NODE_RANK" == "0" ]]; then
   echo "gradient_checkpointing=$GSPO_GRADIENT_CHECKPOINTING gradient_checkpointing_kwargs=$GSPO_GRADIENT_CHECKPOINTING_KWARGS ddp_find_unused_parameters=$GSPO_DDP_FIND_UNUSED_PARAMETERS"
   echo "kl_beta=$GSPO_BETA entropy_coef=$GSPO_ENTROPY_COEF"
   echo "top_reward_steps=$GSPO_TOP_REWARD_STEPS top_reward_k=$GSPO_TOP_REWARD_K"
-  echo "vllm_mode=$GSPO_VLLM_MODE vllm_max_model_len=$GSPO_VLLM_MAX_MODEL_LEN vllm_max_num_seqs=$GSPO_VLLM_MAX_NUM_SEQS"
+  echo "vllm_mode=$GSPO_VLLM_MODE vllm_max_model_len=$GSPO_VLLM_MAX_MODEL_LEN vllm_max_num_seqs=$GSPO_VLLM_MAX_NUM_SEQS vllm_mm_processor_cache_gb=$GSPO_VLLM_MM_PROCESSOR_CACHE_GB"
   echo "allow_unverified_gold=$GSPO_ALLOW_UNVERIFIED_GOLD"
   echo "expected_global_steps=$GSPO_GLOBAL_STEPS expected_checkpoints=$GSPO_CHECKPOINT_COUNT expected_reward_evaluations=$((GSPO_EXPECTED_COUNT_VALUE * GSPO_NUM_TRAIN_EPOCHS * GSPO_NUM_GENERATIONS))"
 fi
@@ -223,6 +223,7 @@ ARGS=(
   --vllm_max_model_len "$GSPO_VLLM_MAX_MODEL_LEN"
   --vllm_max_num_seqs "$GSPO_VLLM_MAX_NUM_SEQS"
   --vllm_gpu_memory_utilization "$GSPO_VLLM_GPU_MEMORY_UTILIZATION"
+  --vllm_mm_processor_cache_gb "$GSPO_VLLM_MM_PROCESSOR_CACHE_GB"
   --vllm_enforce_eager "$GSPO_VLLM_ENFORCE_EAGER"
   --sleep_level "$GSPO_VLLM_SLEEP_LEVEL"
   --save_strategy steps
