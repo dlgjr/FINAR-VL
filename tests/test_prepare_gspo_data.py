@@ -13,7 +13,7 @@ def test_prepare_record_removes_assistant_and_adds_stable_schema(tmp_path):
         ],
         "output_format": "number_or_free_text",
         "_pass_at_k": {"result_index": "train_text:42"},
-        "images": ["data/train_multi/assets/a.png"],
+        "images": ["assets/finder_rendered/a.png"],
         "task": "basic_arithmetic_metrics",
     }
     prepared = prepare_record(row, line_number=7)
@@ -27,6 +27,7 @@ def test_prepare_record_removes_assistant_and_adds_stable_schema(tmp_path):
     assert prepared["gold_source"] == "assistant.final_answer"
     assert prepared["gold_verification"]["status"] == "source_only"
     assert prepared["estimated_cost"] > 0
+    assert prepared["images"] == ["assets_rl/finqa_rendered/a.png"]
 
 
 def test_prepare_record_uses_line_number_and_ignores_claims_for_open_answer():

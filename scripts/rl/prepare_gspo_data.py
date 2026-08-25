@@ -388,7 +388,11 @@ def prepare_record(row: Mapping[str, Any], line_number: int, claims: Sequence[An
     prepared = {key: value for key, value in row.items() if key != "messages"}
     if "images" in prepared:
         prepared["images"] = [
-            "assets_rl/" + image[len("assets/") :] if image.startswith("assets/") else image
+            "assets_rl/finqa_rendered/" + image[len("assets/finder_rendered/") :]
+            if image.startswith("assets/finder_rendered/")
+            else "assets_rl/" + image[len("assets/") :]
+            if image.startswith("assets/")
+            else image
             for image in prepared["images"]
         ]
     prepared.update(
