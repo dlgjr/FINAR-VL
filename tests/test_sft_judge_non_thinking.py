@@ -47,6 +47,22 @@ def test_instruct_model_judge_uses_short_output(monkeypatch):
     assert payloads[0]["max_tokens"] == 64
 
 
+def test_gspo_judge_uses_configured_served_model_name(monkeypatch):
+    payloads = []
+
+    def fake_urlopen(request, timeout):
+        payloads.append(json.loads(request.data.decode("utf-8")))
+        return _FakeResponse(
+            {"choices": [{"message": {"content": "CORRECT"}, "finish_reason": "stop"}]}
+        )
+
+    monkeypatch.setenv("GSPO_JUDGE_SERVE_NAME", "qwen235-judge")
+    monkeypatch.setattr(evaluator.urllib.request, "urlopen", fake_urlopen)
+
+    assert evaluator._judge_with_server("http://judge", _row(), "标准答案", "标准答案") is True
+    assert payloads[0]["model"] == "qwen235-judge"
+
+
 def test_model_judge_retry_stays_short(monkeypatch):
     payloads = []
 

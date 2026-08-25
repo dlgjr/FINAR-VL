@@ -74,6 +74,10 @@ def test_gspo_launcher_uses_full_model_sequence_importance_and_offline_wandb():
         'cd "$ROOT_IMAGE_DIR"',
         '--root "$ROOT_IMAGE_DIR"',
         'GSPO_BENCHMARK_ALLOWLIST',
+        'GSPO_RUNTIME_MODEL_DIR="$TMPDIR/model"',
+        'config["fix_mistral_regex"] = False',
+        '--model "$GSPO_RUNTIME_MODEL_DIR"',
+        'kill -0 "$JUDGE_PID"',
     ):
         assert required in text
 

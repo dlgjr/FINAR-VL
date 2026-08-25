@@ -47,6 +47,18 @@ cd "$ROOT_IMAGE_DIR"
 PYTHON_BIN="${PYTHON_BIN:-/opt/ac2/bin/python}"
 SWIFT_BIN="${SWIFT_BIN:-$PYTHONUSERBASE/bin/swift}"
 if [[ ! -x "$SWIFT_BIN" ]]; then SWIFT_BIN=("$PYTHON_BIN" -m swift.cli); else SWIFT_BIN=("$SWIFT_BIN"); fi
+GSPO_RUNTIME_MODEL_DIR="$TMPDIR/model"
+mkdir -p "$GSPO_RUNTIME_MODEL_DIR"
+while IFS= read -r -d '' MODEL_ENTRY; do
+  MODEL_ENTRY_NAME="${MODEL_ENTRY##*/}"
+  if [[ "$MODEL_ENTRY_NAME" != "tokenizer_config.json" ]]; then
+    ln -sfn "$MODEL_ENTRY" "$GSPO_RUNTIME_MODEL_DIR/$MODEL_ENTRY_NAME"
+  fi
+done < <(find "$GSPO_MODEL" -mindepth 1 -maxdepth 1 -print0)
+test -f "$GSPO_MODEL/tokenizer_config.json" || { echo "missing tokenizer config: $GSPO_MODEL/tokenizer_config.json" >&2; exit 1; }
+rm -f "$GSPO_RUNTIME_MODEL_DIR/tokenizer_config.json"
+cp "$GSPO_MODEL/tokenizer_config.json" "$GSPO_RUNTIME_MODEL_DIR/tokenizer_config.json"
+"$PYTHON_BIN" -c 'import json, pathlib, sys; path = pathlib.Path(sys.argv[1]); config = json.loads(path.read_text(encoding="utf-8")); config["fix_mistral_regex"] = False; path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")' "$GSPO_RUNTIME_MODEL_DIR/tokenizer_config.json"
 RUN_DIR="$GSPO_OUTPUT_DIR"
 mkdir -p "$RUN_DIR" "$WANDB_DIR"
 if [[ -n "$GSPO_SOURCE_DATA" ]]; then
@@ -109,6 +121,7 @@ trap cleanup EXIT
 if [[ "$GSPO_ENABLE_JUDGE" == "true" ]]; then
   for attempt in $(seq 1 1800); do
     if "$PYTHON_BIN" -c "import urllib.request; urllib.request.urlopen('$GSPO_JUDGE_URL/health', timeout=2)" >/dev/null 2>&1; then break; fi
+    if ! kill -0 "$JUDGE_PID" 2>/dev/null; then echo "judge server exited before becoming healthy: $JUDGE_LOG" >&2; exit 1; fi
     sleep 2
     if (( attempt == 1800 )); then echo "judge server failed to become healthy: $JUDGE_LOG" >&2; exit 1; fi
   done
@@ -121,7 +134,7 @@ if [[ "$NODE_RANK" == "0" ]]; then
   GSPO_BENCHMARK_GENERATIONS=$(( 94 * 9 * (GSPO_CHECKPOINT_COUNT + 2) ))
   echo "===== FULL GSPO DLC CONFIG ====="
   echo "nodes=$GSPO_NNODES train_ranks=$((GSPO_NNODES * GSPO_NPROC_PER_NODE)) train_gpus=$GSPO_TRAIN_GPUS judge_enabled=$GSPO_ENABLE_JUDGE judge_gpu=$GSPO_JUDGE_GPU"
-  echo "model=$GSPO_MODEL judge_model=$GSPO_JUDGE_MODEL data=$GSPO_DATA"
+  echo "model=$GSPO_MODEL runtime_model=$GSPO_RUNTIME_MODEL_DIR judge_model=$GSPO_JUDGE_MODEL data=$GSPO_DATA"
   echo "judge_serve_name=$GSPO_JUDGE_SERVE_NAME judge_max_tokens=$GSPO_JUDGE_MAX_TOKENS judge_tp=$GSPO_JUDGE_TENSOR_PARALLEL_SIZE judge_thinking=false"
   echo "epochs=$GSPO_NUM_TRAIN_EPOCHS generations=$GSPO_NUM_GENERATIONS iterations=$GSPO_NUM_ITERATIONS steps_per_generation=$GSPO_STEPS_PER_GENERATION generation_batch=$GSPO_GENERATION_BATCH_SIZE"
   echo "max_length=$GSPO_MAX_LENGTH max_completion_length=$GSPO_MAX_COMPLETION_LENGTH save_steps=$GSPO_SAVE_STEPS logging_steps=$GSPO_LOGGING_STEPS log_entropy=$GSPO_LOG_ENTROPY eval_steps=$GSPO_EVAL_STEPS"
@@ -135,7 +148,7 @@ fi
 ARGS=(
   rlhf
   --rlhf_type grpo
-  --model "$GSPO_MODEL"
+  --model "$GSPO_RUNTIME_MODEL_DIR"
   --dataset "$GSPO_DATA"
   --split_dataset_ratio 0
   --external_plugins "$TRAINER_PLUGIN"

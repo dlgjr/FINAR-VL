@@ -526,7 +526,7 @@ def _judge_with_server(judge_url: str, row: dict[str, Any], reference: str, cand
     for max_tokens in (64, 128):
         payload = json.dumps(
             {
-                "model": "qwen30-judge",
+                "model": os.environ.get("GSPO_JUDGE_SERVE_NAME", "qwen30-judge"),
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": content},
