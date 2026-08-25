@@ -27,7 +27,7 @@ from scripts.sft.pass_at_8_eval import run_distributed_evaluation
 
 class GSPOEvalCallback(TrainerCallback):
     def __init__(self, args, trainer):
-        super().__init__()
+        super().__init__(args, trainer)
         self.args = args
         self.trainer = trainer
         self.last_eval_step: int | None = None
