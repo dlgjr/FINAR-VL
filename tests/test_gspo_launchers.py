@@ -39,7 +39,7 @@ def test_gspo_environment_exports_two_node_route_specific_topology_and_all_overr
         'GSPO_ENTROPY_COEF:-0.02',
         'GSPO_EPSILON:-0.01',
         'GSPO_EPSILON_HIGH:-0.02',
-        'GSPO_SAVE_STEPS:-40',
+        'GSPO_SAVE_STEPS:-20',
     ):
         assert required in text
 
@@ -73,7 +73,6 @@ def test_gspo_launcher_uses_full_model_sequence_importance_and_offline_wandb():
         'export ROOT_IMAGE_DIR=',
         'cd "$ROOT_IMAGE_DIR"',
         '--root "$ROOT_IMAGE_DIR"',
-        'GSPO_BENCHMARK_ALLOWLIST',
         'GSPO_RUNTIME_MODEL_DIR="$TMPDIR/model"',
         'config["fix_mistral_regex"] = False',
         '--model "$GSPO_RUNTIME_MODEL_DIR"',

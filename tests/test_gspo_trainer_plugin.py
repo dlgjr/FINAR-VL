@@ -1,4 +1,5 @@
 from collections import defaultdict
+from pathlib import Path
 from types import SimpleNamespace
 
 from scripts.dlc.gspo_trainer_plugin import GSPOEvalCallback, GSPOGRPOTrainer, GRPOTrainer, TrainerFactory
@@ -61,6 +62,17 @@ def test_reward_pool_paths_aggregate_all_node_files(tmp_path):
     first.write_text("{}\n", encoding="utf-8")
     second.write_text("{}\n", encoding="utf-8")
     assert GSPOEvalCallback._reward_pool_paths(first) == [first, second]
+
+
+def test_rl_callback_keeps_checkpoint_and_reward_hooks_without_benchmark_evaluation():
+    source = (Path(__file__).resolve().parents[1] / "scripts/dlc/gspo_trainer_plugin.py").read_text(
+        encoding="utf-8"
+    )
+    assert "run_distributed_evaluation" not in source
+    assert "[GSPO_EVAL]" not in source
+    assert "def _print_top_rewards" in source
+    assert "def on_save" in source
+    assert "_cleanup_checkpoint(checkpoint)" in source
 
 
 def test_entropy_bonus_reuses_base_forward_and_registers_custom_trainer(monkeypatch):

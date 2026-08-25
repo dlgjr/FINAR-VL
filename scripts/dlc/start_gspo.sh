@@ -29,7 +29,6 @@ export GSPO_REWARD_ERRORS="${GSPO_REWARD_ERRORS:-$GSPO_OUTPUT_DIR/reward_errors_
 export GSPO_STATUS_DIR="${GSPO_STATUS_DIR:-$GSPO_OUTPUT_DIR/rank_status}"
 export REWARD_PLUGIN="${REWARD_PLUGIN:-$ROOT/scripts/dlc/gspo_plugins.py}"
 export TRAINER_PLUGIN="${TRAINER_PLUGIN:-$ROOT/scripts/dlc/gspo_plugins.py}"
-export GSPO_BENCHMARK_ALLOWLIST
 export GSPO_MODEL="${GSPO_MODEL:-${SFT_MODEL:-}}"
 export ROOT_IMAGE_DIR="${ROOT_IMAGE_DIR:-${GSPO_SOURCE_DATA:+$(dirname "$GSPO_SOURCE_DATA")}}"
 export ROOT_IMAGE_DIR="${ROOT_IMAGE_DIR:-$ROOT/data/train_multi}"
@@ -135,18 +134,17 @@ if [[ "$NODE_RANK" == "0" ]]; then
   GSPO_EXPECTED_COUNT_VALUE="$GSPO_EXPECTED_COUNT"
   GSPO_GLOBAL_STEPS=$(( (GSPO_EXPECTED_COUNT_VALUE + GSPO_GENERATION_BATCH_SIZE - 1) / GSPO_GENERATION_BATCH_SIZE * GSPO_NUM_TRAIN_EPOCHS ))
   GSPO_CHECKPOINT_COUNT=$(( (GSPO_GLOBAL_STEPS + GSPO_SAVE_STEPS - 1) / GSPO_SAVE_STEPS + GSPO_NUM_TRAIN_EPOCHS + 1 ))
-  GSPO_BENCHMARK_GENERATIONS=$(( 94 * 9 * (GSPO_CHECKPOINT_COUNT + 2) ))
   echo "===== FULL GSPO DLC CONFIG ====="
   echo "nodes=$GSPO_NNODES train_ranks=$((GSPO_NNODES * GSPO_NPROC_PER_NODE)) train_gpus=$GSPO_TRAIN_GPUS judge_enabled=$GSPO_ENABLE_JUDGE judge_gpu=$GSPO_JUDGE_GPU"
   echo "model=$GSPO_MODEL runtime_model=$GSPO_RUNTIME_MODEL_DIR judge_model=$GSPO_JUDGE_MODEL data=$GSPO_DATA"
   echo "judge_serve_name=$GSPO_JUDGE_SERVE_NAME judge_max_tokens=$GSPO_JUDGE_MAX_TOKENS judge_tp=$GSPO_JUDGE_TENSOR_PARALLEL_SIZE judge_thinking=false"
   echo "epochs=$GSPO_NUM_TRAIN_EPOCHS generations=$GSPO_NUM_GENERATIONS iterations=$GSPO_NUM_ITERATIONS steps_per_generation=$GSPO_STEPS_PER_GENERATION generation_batch=$GSPO_GENERATION_BATCH_SIZE"
-  echo "max_length=$GSPO_MAX_LENGTH max_completion_length=$GSPO_MAX_COMPLETION_LENGTH save_steps=$GSPO_SAVE_STEPS logging_steps=$GSPO_LOGGING_STEPS log_entropy=$GSPO_LOG_ENTROPY eval_steps=$GSPO_EVAL_STEPS"
+  echo "max_length=$GSPO_MAX_LENGTH max_completion_length=$GSPO_MAX_COMPLETION_LENGTH save_steps=$GSPO_SAVE_STEPS logging_steps=$GSPO_LOGGING_STEPS log_entropy=$GSPO_LOG_ENTROPY"
   echo "kl_beta=$GSPO_BETA entropy_coef=$GSPO_ENTROPY_COEF"
   echo "top_reward_steps=$GSPO_TOP_REWARD_STEPS top_reward_k=$GSPO_TOP_REWARD_K"
   echo "vllm_mode=$GSPO_VLLM_MODE vllm_max_model_len=$GSPO_VLLM_MAX_MODEL_LEN vllm_max_num_seqs=$GSPO_VLLM_MAX_NUM_SEQS"
-  echo "benchmark_allowlist=$GSPO_BENCHMARK_ALLOWLIST allow_unverified_gold=$GSPO_ALLOW_UNVERIFIED_GOLD"
-  echo "expected_global_steps=$GSPO_GLOBAL_STEPS expected_checkpoints=$GSPO_CHECKPOINT_COUNT expected_reward_evaluations=$((GSPO_EXPECTED_COUNT_VALUE * GSPO_NUM_TRAIN_EPOCHS * GSPO_NUM_GENERATIONS)) benchmark_generation_count=$GSPO_BENCHMARK_GENERATIONS"
+  echo "allow_unverified_gold=$GSPO_ALLOW_UNVERIFIED_GOLD"
+  echo "expected_global_steps=$GSPO_GLOBAL_STEPS expected_checkpoints=$GSPO_CHECKPOINT_COUNT expected_reward_evaluations=$((GSPO_EXPECTED_COUNT_VALUE * GSPO_NUM_TRAIN_EPOCHS * GSPO_NUM_GENERATIONS))"
 fi
 
 ARGS=(
