@@ -386,6 +386,11 @@ def prepare_record(row: Mapping[str, Any], line_number: int, claims: Sequence[An
             content.append({"type": "text", "text": instruction})
         break
     prepared = {key: value for key, value in row.items() if key != "messages"}
+    if "images" in prepared:
+        prepared["images"] = [
+            "assets_rl/" + image[len("assets/") :] if image.startswith("assets/") else image
+            for image in prepared["images"]
+        ]
     prepared.update(
         {
             "messages": input_messages,
