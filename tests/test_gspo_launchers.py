@@ -36,7 +36,7 @@ def test_gspo_environment_exports_two_node_route_specific_topology_and_all_overr
         'GSPO_DYNAMIC_SAMPLE:-true',
         'GSPO_MAX_RESAMPLE_TIMES:-3',
         'GSPO_BETA:-0.02',
-        'GSPO_ENTROPY_COEF:-0.02',
+        'GSPO_ENTROPY_COEF:-0.01',
         'GSPO_EPSILON:-0.01',
         'GSPO_EPSILON_HIGH:-0.02',
         'GSPO_SAVE_STEPS:-20',
