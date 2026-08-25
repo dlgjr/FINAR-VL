@@ -5,7 +5,9 @@ CHECKPOINT="/mnt/nas/bihaoran/qwen3vl/output/sft/sft_qwen3vl4b_20260821_183115/v
 TRAIN_DATA="/mnt/nas/bihaoran/qwen3vl/data/benchmark/test.jsonl"
 IMAGE_DIR="/mnt/nas/bihaoran/qwen3vl/data/benchmark/assets"
 
-export NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
+export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+export NNODES="${NNODES:-${WORLD_SIZE:-2}}"
+export NODE_RANK="${NODE_RANK:-${RANK:-0}}"
 source "$ROOT/scripts/dlc/dlc_env.sh"
 
 export IMAGE_MAX_TOKEN_NUM="${IMAGE_MAX_TOKEN_NUM:-512}"
@@ -15,9 +17,8 @@ PYTHON_BIN="${PYTHON_BIN:-/opt/ac2/bin/python}"
 SWIFT_BIN="${SWIFT_BIN:-$PYTHONUSERBASE/bin/swift}"
 SFT_ATTN_IMPL="${SFT_ATTN_IMPL:-sdpa}"
 SFT_MAX_LENGTH="${SFT_MAX_LENGTH:-49152}"
-RUN_ID="${SFT_RUN_ID:-sft_test_unclean_$(date +%Y%m%d_%H%M%S)}"
-RUN_DIR="${SFT_OUTPUT_DIR:-$ROOT/output/sft_test_unclean/$RUN_ID}"
-PREPARED_DATA="$RUN_DIR/test_abs_images.jsonl"
+RUN_DIR="${SFT_OUTPUT_DIR:-$ROOT/output/sft_test_unclean/checkpoint15500_ep1_lr1e5}"
+PREPARED_DATA="$RUN_DIR/test_abs_images_rank${NODE_RANK}.jsonl"
 
 mkdir -p "$RUN_DIR"
 
@@ -29,7 +30,11 @@ import sys
 src, image_dir, dst = sys.argv[1:4]
 
 def resolve(path):
-    return path if os.path.isabs(path) else os.path.join(image_dir, path)
+    if os.path.isabs(path):
+        return path
+    if path.startswith("assets/"):
+        path = path[len("assets/"):]
+    return os.path.join(image_dir, path)
 
 with open(src, "r", encoding="utf-8") as fin, open(dst, "w", encoding="utf-8") as fout:
     for line in fin:
@@ -75,4 +80,5 @@ PY
   --save_strategy epoch \
   --save_only_model true \
   --report_to none \
+  --add_version false \
   --output_dir "$RUN_DIR"
