@@ -1,3 +1,4 @@
+import pickle
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -62,6 +63,28 @@ def test_reward_pool_paths_aggregate_all_node_files(tmp_path):
     first.write_text("{}\n", encoding="utf-8")
     second.write_text("{}\n", encoding="utf-8")
     assert GSPOEvalCallback._reward_pool_paths(first) == [first, second]
+
+
+def test_dynamic_sampling_payloads_preserve_rank_order_with_unequal_sizes():
+    rank_zero = [{"sample_id": "short"}]
+    rank_one = [{"sample_id": "long", "completion": "x" * 10000}]
+    payloads = [
+        pickle.dumps(rank_zero, protocol=pickle.HIGHEST_PROTOCOL),
+        pickle.dumps(rank_one, protocol=pickle.HIGHEST_PROTOCOL),
+    ]
+
+    assert len(payloads[0]) != len(payloads[1])
+    assert GSPOGRPOTrainer._deserialize_samples(payloads) == rank_zero + rank_one
+
+
+def test_dynamic_sampling_uses_equal_size_tensor_gather():
+    source = (Path(__file__).resolve().parents[1] / "scripts/dlc/gspo_trainer_plugin.py").read_text(
+        encoding="utf-8"
+    )
+    assert "gather_object(samples)" not in source
+    assert "padded_size = max(sizes)" in source
+    assert "dist.all_gather(gathered_payloads, padded_payload)" in source
+    assert "all_samples = self._gather_samples_equal_size(samples)" in source
 
 
 def test_rl_callback_keeps_checkpoint_and_reward_hooks_without_benchmark_evaluation():

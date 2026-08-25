@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import pickle
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,87 @@ except ImportError:  # pragma: no cover - DLC supplies ms-swift
 
 class GSPOGRPOTrainer(GRPOTrainer):
     """Add a static entropy bonus to ms-swift's existing GRPO/GSPO loss."""
+
+    @staticmethod
+    def _serialize_samples(samples: list[Any]) -> bytes:
+        return pickle.dumps(samples, protocol=pickle.HIGHEST_PROTOCOL)
+
+    @staticmethod
+    def _deserialize_samples(payloads: list[bytes]) -> list[Any]:
+        samples: list[Any] = []
+        for payload in payloads:
+            samples.extend(pickle.loads(payload))
+        return samples
+
+    def _gather_samples_equal_size(self, samples: list[Any]) -> list[Any]:
+        import torch
+        import torch.distributed as dist
+
+        if not dist.is_initialized() or dist.get_world_size() == 1:
+            return samples
+
+        payload = self._serialize_samples(samples)
+        payload_size = len(payload)
+        device = self.accelerator.device
+        world_size = dist.get_world_size()
+        local_size = torch.tensor([payload_size], dtype=torch.int64, device=device)
+        gathered_sizes = [torch.empty_like(local_size) for _ in range(world_size)]
+        dist.all_gather(gathered_sizes, local_size)
+        sizes = [int(size.item()) for size in gathered_sizes]
+        padded_size = max(sizes)
+
+        padded_payload = torch.zeros(padded_size, dtype=torch.uint8, device=device)
+        local_payload = torch.frombuffer(bytearray(payload), dtype=torch.uint8).to(device)
+        padded_payload[:payload_size].copy_(local_payload)
+        gathered_payloads = [torch.empty_like(padded_payload) for _ in range(world_size)]
+        dist.all_gather(gathered_payloads, padded_payload)
+        payloads = [
+            tensor[:size].cpu().numpy().tobytes()
+            for tensor, size in zip(gathered_payloads, sizes)
+        ]
+        return self._deserialize_samples(payloads)
+
+    def _dynamic_sampling(self, samples, rewards_per_func):
+        import torch
+
+        resample_count = 0
+        valid_samples = []
+        valid_rewards_per_func = []
+        origin_data = (samples, rewards_per_func)
+
+        while resample_count < self.max_resample_times:
+            rewards_std = self.compute_std(samples, rewards_per_func)
+            valid_mask = rewards_std > 0
+            all_samples = self._gather_samples_equal_size(samples)
+            valid_samples.extend([sample for sample, valid in zip(all_samples, valid_mask) if valid])
+            valid_rewards_per_func.append(rewards_per_func[valid_mask])
+            if len(valid_samples) >= self.args.generation_batch_size:
+                break
+
+            inputs = next(self.dynamic_resample_iterator)
+            if self.template.truncation_strategy == "raise":
+                inputs = self.resample_encode_failed_inputs(inputs)
+            samples = self.to_samples(inputs)
+            samples = self._generate_completions(samples)
+            rewards_per_func = self._compute_rewards_per_func(samples)
+            resample_count += 1
+
+        if len(valid_samples) >= self.args.generation_batch_size:
+            process_slice = slice(
+                self.accelerator.process_index * len(samples),
+                (self.accelerator.process_index + 1) * len(samples),
+            )
+            samples = valid_samples[:self.args.generation_batch_size][process_slice]
+            rewards_per_func = torch.cat(valid_rewards_per_func)[:self.args.generation_batch_size]
+        else:
+            if self.accelerator.is_main_process:
+                print(
+                    f"There are still std=0 groups present after {self.max_resample_times} retries.",
+                    flush=True,
+                )
+            samples, rewards_per_func = origin_data
+
+        return samples, rewards_per_func
 
     def _get_per_token_logps_and_entropies(self, *args, **kwargs):
         per_token_logps, entropies = super()._get_per_token_logps_and_entropies(*args, **kwargs)
