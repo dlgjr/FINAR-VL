@@ -100,7 +100,9 @@ def test_independent_generation_and_reasoning_launchers_share_only_sft_input():
     assert 'REASONING_RL_DATA must point' in reasoning
     assert 'REASONING_RL_OUTPUT_DIR must be shared by all DLC nodes' in reasoning
     assert 'GSPO_ROUTE_MODE=reasoning' in reasoning
-    assert 'exec bash "$ROOT/scripts/dlc/start_gspo.sh"' in generation
+    assert 'mktemp /tmp/qwen3vl-start-gspo-generation.' in generation
+    assert 'cp "$ROOT/scripts/dlc/start_gspo.sh" "$LOCAL_GSPO_SCRIPT"' in generation
+    assert 'exec bash "$LOCAL_GSPO_SCRIPT"' in generation
     assert 'exec bash "$ROOT/scripts/dlc/start_gspo.sh"' in reasoning
 
 
@@ -110,6 +112,8 @@ def test_core_launcher_prepares_schedules_and_validates_explicit_routes():
     assert '-m scripts.rl.schedule_gspo_data' in text
     assert '--route-mode "$GSPO_ROUTE_MODE"' in text
     assert 'data_validation.ready' in text
+    assert 'waiting_for_judge seconds=$((attempt * 2))' in text
+    assert 'tail -c 4096 "$JUDGE_LOG"' in text
 
 
 def test_judge_server_exposes_qwen3_vl_parallelism_images_and_is_eager():

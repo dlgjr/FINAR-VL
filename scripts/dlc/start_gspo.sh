@@ -122,6 +122,10 @@ if [[ "$GSPO_ENABLE_JUDGE" == "true" ]]; then
   for attempt in $(seq 1 1800); do
     if "$PYTHON_BIN" -c "import urllib.request; urllib.request.urlopen('$GSPO_JUDGE_URL/health', timeout=2)" >/dev/null 2>&1; then break; fi
     if ! kill -0 "$JUDGE_PID" 2>/dev/null; then echo "judge server exited before becoming healthy: $JUDGE_LOG" >&2; exit 1; fi
+    if (( attempt % 30 == 0 )); then
+      echo "waiting_for_judge seconds=$((attempt * 2)) node_rank=$NODE_RANK log=$JUDGE_LOG"
+      tail -c 4096 "$JUDGE_LOG" | tr '\r' '\n' | tail -n 5
+    fi
     sleep 2
     if (( attempt == 1800 )); then echo "judge server failed to become healthy: $JUDGE_LOG" >&2; exit 1; fi
   done

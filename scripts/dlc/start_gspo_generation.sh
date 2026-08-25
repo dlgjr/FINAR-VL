@@ -11,4 +11,6 @@ export GSPO_SOURCE_DATA="$GENERATION_RL_DATA"
 export GSPO_ROUTE_MODE=generation
 export GSPO_OUTPUT_DIR="$GENERATION_RL_OUTPUT_DIR"
 
-exec bash "$ROOT/scripts/dlc/start_gspo.sh"
+LOCAL_GSPO_SCRIPT="$(mktemp /tmp/qwen3vl-start-gspo-generation.XXXXXX.sh)"
+cp "$ROOT/scripts/dlc/start_gspo.sh" "$LOCAL_GSPO_SCRIPT"
+exec bash "$LOCAL_GSPO_SCRIPT"
