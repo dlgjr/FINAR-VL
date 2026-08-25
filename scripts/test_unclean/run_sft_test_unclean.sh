@@ -17,7 +17,7 @@ PYTHON_BIN="${PYTHON_BIN:-/opt/ac2/bin/python}"
 SWIFT_BIN="${SWIFT_BIN:-$PYTHONUSERBASE/bin/swift}"
 SFT_ATTN_IMPL="${SFT_ATTN_IMPL:-sdpa}"
 SFT_MAX_LENGTH="${SFT_MAX_LENGTH:-49152}"
-RUN_DIR="${SFT_OUTPUT_DIR:-$ROOT/output/sft_test_unclean/checkpoint15500_ep1_lr1e5}"
+RUN_DIR="${SFT_OUTPUT_DIR:-$ROOT/output/sft_test_unclean/checkpoint15500_ep2_lr1e5}"
 PREPARED_DATA="$RUN_DIR/test_abs_images_rank${NODE_RANK}.jsonl"
 
 mkdir -p "$RUN_DIR"
@@ -61,7 +61,7 @@ PY
   --freeze_llm false \
   --torch_dtype bfloat16 \
   --attn_impl "$SFT_ATTN_IMPL" \
-  --num_train_epochs 1 \
+  --num_train_epochs 2 \
   --per_device_train_batch_size 1 \
   --gradient_accumulation_steps 2 \
   --gradient_checkpointing true \
