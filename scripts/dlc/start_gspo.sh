@@ -92,17 +92,17 @@ if [[ "$GSPO_ENABLE_JUDGE" == "true" ]]; then
   (
     export CUDA_VISIBLE_DEVICES="$GSPO_JUDGE_GPU"
     export WANDB_MODE=disabled
-    exec "$ROOT/scripts/dlc/start_gspo_judge.sh"
+    exec bash "$ROOT/scripts/dlc/start_gspo_judge.sh"
   ) >"$JUDGE_LOG" 2>&1 &
   JUDGE_PID=$!
 fi
 cleanup() { if [[ -n "$JUDGE_PID" ]]; then kill "$JUDGE_PID" 2>/dev/null || true; fi; }
 trap cleanup EXIT
 if [[ "$GSPO_ENABLE_JUDGE" == "true" ]]; then
-  for attempt in $(seq 1 180); do
+  for attempt in $(seq 1 1800); do
     if "$PYTHON_BIN" -c "import urllib.request; urllib.request.urlopen('$GSPO_JUDGE_URL/health', timeout=2)" >/dev/null 2>&1; then break; fi
     sleep 2
-    if (( attempt == 180 )); then echo "judge server failed to become healthy: $JUDGE_LOG" >&2; exit 1; fi
+    if (( attempt == 1800 )); then echo "judge server failed to become healthy: $JUDGE_LOG" >&2; exit 1; fi
   done
 fi
 
