@@ -44,7 +44,7 @@ class GSPOGRPOTrainer(GRPOTrainer):
     def _compute_loss_and_metrics(self, model, model_inputs, grpo_batch):
         loss, metrics_data = super()._compute_loss_and_metrics(model, model_inputs, grpo_batch)
         entropies = self.__dict__.pop("_gspo_entropy_tensor")
-        entropy_coef = float(os.environ.get("GSPO_ENTROPY_COEF", "0.01"))
+        entropy_coef = float(os.environ.get("GSPO_ENTROPY_COEF", "0.02"))
         if entropy_coef == 0.0:
             return loss, metrics_data
         completion_mask = metrics_data["completion_mask"]
