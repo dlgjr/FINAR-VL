@@ -116,7 +116,7 @@ if [[ "$NODE_RANK" == "0" ]]; then
   echo "model=$GSPO_MODEL judge_model=$GSPO_JUDGE_MODEL data=$GSPO_DATA"
   echo "judge_serve_name=$GSPO_JUDGE_SERVE_NAME judge_max_tokens=$GSPO_JUDGE_MAX_TOKENS judge_tp=$GSPO_JUDGE_TENSOR_PARALLEL_SIZE judge_thinking=false"
   echo "epochs=$GSPO_NUM_TRAIN_EPOCHS generations=$GSPO_NUM_GENERATIONS iterations=$GSPO_NUM_ITERATIONS steps_per_generation=$GSPO_STEPS_PER_GENERATION generation_batch=$GSPO_GENERATION_BATCH_SIZE"
-  echo "max_length=$GSPO_MAX_LENGTH max_completion_length=$GSPO_MAX_COMPLETION_LENGTH save_steps=$GSPO_SAVE_STEPS eval_steps=$GSPO_EVAL_STEPS"
+  echo "max_length=$GSPO_MAX_LENGTH max_completion_length=$GSPO_MAX_COMPLETION_LENGTH save_steps=$GSPO_SAVE_STEPS logging_steps=$GSPO_LOGGING_STEPS log_entropy=$GSPO_LOG_ENTROPY eval_steps=$GSPO_EVAL_STEPS"
   echo "top_reward_steps=$GSPO_TOP_REWARD_STEPS top_reward_k=$GSPO_TOP_REWARD_K"
   echo "vllm_mode=$GSPO_VLLM_MODE vllm_max_model_len=$GSPO_VLLM_MAX_MODEL_LEN vllm_max_num_seqs=$GSPO_VLLM_MAX_NUM_SEQS"
   echo "benchmark_allowlist=$GSPO_BENCHMARK_ALLOWLIST allow_unverified_gold=$GSPO_ALLOW_UNVERIFIED_GOLD"
@@ -153,6 +153,7 @@ ARGS=(
   --overlong_filter "$GSPO_OVERLONG_FILTER"
   --temperature "$GSPO_TEMPERATURE"
   --learning_rate "$GSPO_LEARNING_RATE"
+  --lr_scheduler_type constant
   --beta "$GSPO_BETA"
   --epsilon "$GSPO_EPSILON"
   --epsilon_high "$GSPO_EPSILON_HIGH"
@@ -169,6 +170,8 @@ ARGS=(
   --save_steps "$GSPO_SAVE_STEPS"
   --save_total_limit "$GSPO_SAVE_TOTAL_LIMIT"
   --save_only_model true
+  --logging_steps "$GSPO_LOGGING_STEPS"
+  --log_entropy "$GSPO_LOG_ENTROPY"
   --eval_strategy no
   --report_to wandb
   --callbacks gspo_eval

@@ -33,6 +33,9 @@ class GSPOEvalCallback(TrainerCallback):
         self.last_eval_step: int | None = None
         self.last_reward_print_step = 0
         self.reward_pool_offsets: dict[str, int] = {}
+        self.last_lr_decay_step = 0
+        self.best_eval_metric: float | None = None
+        self.no_improve_evals = 0
 
     @staticmethod
     def _cleanup_checkpoint(path: Path) -> None:
@@ -102,7 +105,7 @@ class GSPOEvalCallback(TrainerCallback):
         print(f"[GSPO_TOP_REWARD] {json.dumps(payload, ensure_ascii=False)}", flush=True)
         self.last_reward_print_step = step
 
-    def _run(self, state, *, force: bool = False) -> None:
+    def _run(self, state, control=None, *, force: bool = False) -> None:
         step = int(state.global_step)
         interval = int(os.environ.get("GSPO_EVAL_STEPS", "200"))
         if not force and (step == 0 or step % interval != 0):
@@ -148,6 +151,24 @@ class GSPOEvalCallback(TrainerCallback):
                 )
                 audit_path = Path(self.args.output_dir) / "eval" / f"step-{step:06d}" / "high_reward_audit.json"
                 audit_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if control is not None:
+            metric_name = os.environ.get("GSPO_EARLY_STOP_METRIC", "pass_at_8")
+            metric = metrics.get(metric_name)
+            if metric is not None:
+                if self.best_eval_metric is None or float(metric) > self.best_eval_metric:
+                    self.best_eval_metric = float(metric)
+                    self.no_improve_evals = 0
+                else:
+                    self.no_improve_evals += 1
+                patience = int(os.environ.get("GSPO_EARLY_STOP_INTERVAL", "3"))
+                if self.no_improve_evals >= patience:
+                    control.should_training_stop = True
+                    if getattr(state, "is_world_process_zero", True):
+                        print(
+                            f"[GSPO_EARLY_STOP] step={step} metric={metric_name} value={metric} "
+                            f"best={self.best_eval_metric} no_improve_evals={self.no_improve_evals}",
+                            flush=True,
+                        )
         print(f"[GSPO_EVAL] step={step} metrics={json.dumps(metrics, ensure_ascii=False)}", flush=True)
 
     def on_train_begin(self, args, state, control, **kwargs):
@@ -156,15 +177,24 @@ class GSPOEvalCallback(TrainerCallback):
             self.reward_pool_offsets = {
                 str(path): path.stat().st_size for path in self._reward_pool_paths(pool_path)
             }
-        self._run(state, force=True)
+        self._run(state, control, force=True)
         return control
 
     def on_step_end(self, args, state, control, **kwargs):
         self._print_top_rewards(state)
+        step = int(state.global_step)
+        interval = int(os.environ.get("GSPO_LR_DECAY_STEPS", "1000"))
+        if step > 0 and step % interval == 0 and self.last_lr_decay_step != step:
+            gamma = float(os.environ.get("GSPO_LR_DECAY_GAMMA", "0.5"))
+            for group in self.trainer.optimizer.param_groups:
+                group["lr"] *= gamma
+            self.last_lr_decay_step = step
+            if getattr(state, "is_world_process_zero", True):
+                print(f"[GSPO_LR_DECAY] step={step} gamma={gamma} lr={self.trainer.optimizer.param_groups[0]['lr']}", flush=True)
         return control
 
     def on_save(self, args, state, control, **kwargs):
-        self._run(state, force=True)
+        self._run(state, control, force=True)
         if getattr(state, "is_world_process_zero", True):
             checkpoint = Path(args.output_dir) / f"checkpoint-{state.global_step}"
             self._cleanup_checkpoint(checkpoint)
