@@ -31,9 +31,9 @@ export WANDB_MODE=offline
 export WANDB_DIR="$EVAL_ROOT/wandb"
 
 FOCUS_TASKS=(
-  basic_arithmetic_metrics
+  financial_visual_data_reasoning
   multi_step_numerical_reasoning
-  multi_table_reasoning
+  single_table_reasoning
   cross_modal_multi_hop
 )
 FOCUS_ARGS=()

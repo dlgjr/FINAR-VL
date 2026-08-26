@@ -122,5 +122,12 @@ def test_launcher_uses_sft_benchmark_seven_eval_gpus_and_qwen30_judge() -> None:
         '[[ "$(basename "$checkpoint")" =~ ^checkpoint-[0-9]+$ ]]',
         "unset RANK WORLD_SIZE LOCAL_RANK MASTER_ADDR MASTER_PORT",
         "wave_start += 7",
+        "financial_visual_data_reasoning",
+        "multi_step_numerical_reasoning",
+        "single_table_reasoning",
+        "cross_modal_multi_hop",
     ):
         assert expected in text
+
+    assert "basic_arithmetic_metrics" not in text
+    assert "multi_table_reasoning" not in text
