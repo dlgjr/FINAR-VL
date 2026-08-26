@@ -15,6 +15,12 @@ EVAL_GPU_CSV="${SFT_CHECKPOINT_EVAL_GPUS:-0,1,2,3,4,5,6}"
 JUDGE_PORT="${SFT_JUDGE_PORT:-8001}"
 JUDGE_STARTUP_TIMEOUT="${SFT_JUDGE_STARTUP_TIMEOUT:-1800}"
 EXPECTED_TASK_COUNT=24
+NODE_WORLD_SIZE="${WORLD_SIZE:?DLC must provide WORLD_SIZE}"
+NODE_RANK="${RANK:?DLC must provide RANK}"
+if [[ "$NODE_WORLD_SIZE" != "2" || ! "$NODE_RANK" =~ ^[01]$ ]]; then
+  echo "checkpoint evaluation requires WORLD_SIZE=2 and RANK=0/1, got WORLD_SIZE=$NODE_WORLD_SIZE RANK=$NODE_RANK" >&2
+  exit 1
+fi
 
 source "$CODE_ROOT/scripts/dlc/dlc_env.sh"
 PYTHON_BIN="${PYTHON_BIN:-/opt/ac2/bin/python}"
@@ -48,15 +54,26 @@ test -f "$CODE_ROOT/scripts/sft/run_eval_only.py" || { echo "missing eval runner
 test -f "$CODE_ROOT/scripts/sft/checkpoint_eval_wandb.py" || { echo "missing W&B summary module" >&2; exit 1; }
 
 mkdir -p "$EVAL_ROOT/checkpoints" "$EVAL_ROOT/logs" "$WANDB_DIR"
-exec 9>"$EVAL_ROOT/.run.lock"
-flock -n 9 || { echo "another checkpoint evaluation is already running: $EVAL_ROOT" >&2; exit 1; }
+SYNC_DIR="$EVAL_ROOT/sync"
+mkdir -p "$SYNC_DIR"
+NODE_STATUS="$SYNC_DIR/node_${NODE_RANK}.status"
+printf 'running\n' >"$NODE_STATUS"
+JUDGE_PID=""
+NODE_EVAL_COMPLETE=0
+cleanup() {
+  [[ -z "$JUDGE_PID" ]] || kill "$JUDGE_PID" 2>/dev/null || true
+  if (( NODE_EVAL_COMPLETE == 0 )); then
+    printf 'failed\n' >"$NODE_STATUS"
+  fi
+}
+trap cleanup EXIT
 OUTPUT_PROBE="$EVAL_ROOT/.output_dir_write_probe.$$"
 printf 'writable\n' >"$OUTPUT_PROBE"
 rm -f "$OUTPUT_PROBE"
 echo "output_dir=$EVAL_ROOT writable=1 nas_root=$QWEN3VL_ROOT"
 echo "checkpoint_root=$CHECKPOINT_ROOT"
 echo "benchmark=$BENCHMARK judge_model=$JUDGE_MODEL"
-echo "eval_gpus=$EVAL_GPU_CSV judge_gpu=$JUDGE_GPU wandb_mode=$WANDB_MODE wandb_dir=$WANDB_DIR"
+echo "node_rank=$NODE_RANK node_world_size=$NODE_WORLD_SIZE eval_gpus=$EVAL_GPU_CSV judge_gpu=$JUDGE_GPU wandb_mode=$WANDB_MODE wandb_dir=$WANDB_DIR"
 
 "$PYTHON_BIN" -m scripts.sft.checkpoint_eval_wandb validate-benchmark \
   --benchmark "$BENCHMARK" \
@@ -78,13 +95,21 @@ for checkpoint in "${CHECKPOINTS[@]}"; do
   test -f "$checkpoint/config.json" || { echo "missing checkpoint config: $checkpoint/config.json" >&2; exit 1; }
 done
 
+NODE_CHECKPOINTS=()
+for index in "${!CHECKPOINTS[@]}"; do
+  if (( index % NODE_WORLD_SIZE == NODE_RANK )); then
+    NODE_CHECKPOINTS+=("${CHECKPOINTS[$index]}")
+  fi
+done
+echo "node_checkpoint_count=${#NODE_CHECKPOINTS[@]} total_checkpoint_count=${#CHECKPOINTS[@]}"
+
 IFS=',' read -r -a EVAL_GPUS <<<"$EVAL_GPU_CSV"
 if (( ${#EVAL_GPUS[@]} != 7 )); then
   echo "SFT_CHECKPOINT_EVAL_GPUS must contain exactly 7 GPU ids" >&2
   exit 1
 fi
 
-JUDGE_LOG="$EVAL_ROOT/logs/qwen30_judge.log"
+JUDGE_LOG="$EVAL_ROOT/logs/qwen30_judge_node_${NODE_RANK}.log"
 (
   export CUDA_VISIBLE_DEVICES="$JUDGE_GPU"
   export WANDB_DISABLED=true
@@ -103,8 +128,6 @@ JUDGE_LOG="$EVAL_ROOT/logs/qwen30_judge.log"
     --generation-config vllm
 ) >"$JUDGE_LOG" 2>&1 &
 JUDGE_PID=$!
-cleanup() { kill "$JUDGE_PID" 2>/dev/null || true; }
-trap cleanup EXIT
 
 judge_deadline=$((SECONDS + JUDGE_STARTUP_TIMEOUT))
 while (( SECONDS < judge_deadline )); do
@@ -123,11 +146,11 @@ if (( SECONDS >= judge_deadline )); then
 fi
 echo "judge_ready url=$SFT_JUDGE_URL model=qwen30-judge log=$JUDGE_LOG"
 
-for ((wave_start = 0; wave_start < ${#CHECKPOINTS[@]}; wave_start += 7)); do
+for ((wave_start = 0; wave_start < ${#NODE_CHECKPOINTS[@]}; wave_start += 7)); do
   pids=()
   names=()
-  for ((slot = 0; slot < 7 && wave_start + slot < ${#CHECKPOINTS[@]}; slot++)); do
-    checkpoint="${CHECKPOINTS[$((wave_start + slot))]}"
+  for ((slot = 0; slot < 7 && wave_start + slot < ${#NODE_CHECKPOINTS[@]}; slot++)); do
+    checkpoint="${NODE_CHECKPOINTS[$((wave_start + slot))]}"
     checkpoint_name="$(basename "$checkpoint")"
     checkpoint_output="$EVAL_ROOT/checkpoints/$checkpoint_name"
     summary="$checkpoint_output/eval/step-000000/summary.json"
@@ -181,6 +204,35 @@ for ((wave_start = 0; wave_start < ${#CHECKPOINTS[@]}; wave_start += 7)); do
   fi
 done
 
+printf 'complete\n' >"$NODE_STATUS"
+NODE_EVAL_COMPLETE=1
+if (( NODE_RANK != 0 )); then
+  echo "GSPO_CHECKPOINT_EVAL_NODE_OK node_rank=$NODE_RANK checkpoints=${#NODE_CHECKPOINTS[@]} output_dir=$EVAL_ROOT"
+  exit 0
+fi
+
+while true; do
+  all_complete=1
+  for checkpoint in "${CHECKPOINTS[@]}"; do
+    summary="$EVAL_ROOT/checkpoints/$(basename "$checkpoint")/eval/step-000000/summary.json"
+    if ! "$PYTHON_BIN" -m scripts.sft.checkpoint_eval_wandb check-summary \
+      --benchmark "$BENCHMARK" \
+      --expected-task-count "$EXPECTED_TASK_COUNT" \
+      --summary "$summary"; then
+      all_complete=0
+      break
+    fi
+  done
+  (( all_complete == 1 )) && break
+  for ((rank = 1; rank < NODE_WORLD_SIZE; rank++)); do
+    if [[ "$(cat "$SYNC_DIR/node_${rank}.status" 2>/dev/null || true)" == "failed" ]]; then
+      echo "checkpoint evaluation failed on node rank $rank" >&2
+      exit 1
+    fi
+  done
+  sleep 10
+done
+
 unset WANDB_DISABLED
 export WANDB_MODE=offline
 "$PYTHON_BIN" -m scripts.sft.checkpoint_eval_wandb log \
@@ -194,4 +246,4 @@ export WANDB_MODE=offline
   --wandb-name "$WANDB_NAME" \
   --wandb-mode "$WANDB_MODE"
 
-echo "GSPO_CHECKPOINT_EVAL_OK checkpoints=${#CHECKPOINTS[@]} output_dir=$EVAL_ROOT"
+echo "GSPO_CHECKPOINT_EVAL_OK nodes=$NODE_WORLD_SIZE checkpoints=${#CHECKPOINTS[@]} output_dir=$EVAL_ROOT"
