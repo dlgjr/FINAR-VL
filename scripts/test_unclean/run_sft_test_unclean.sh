@@ -10,9 +10,10 @@ IMAGE_DIR="/mnt/nas/bihaoran/qwen3vl/data/benchmark/assets"
 EVAL_ROOT="${SFT_TEST_UNCLEAN_EVAL_ROOT:-$ROOT/output/sft_test_unclean/checkpoint15500_ep2_lr1e5/test_eval}"
 JUDGE_MODEL="${JUDGE_MODEL:-/mnt/nas/bihaoran/model/qwen30}"
 JUDGE_GPU="${SFT_TEST_UNCLEAN_JUDGE_GPU:-7}"
-EVAL_GPU_CSV="${SFT_TEST_UNCLEAN_EVAL_GPUS:-0,1}"
+EVAL_GPU="${SFT_TEST_UNCLEAN_EVAL_GPU:-0}"
 JUDGE_PORT="${SFT_JUDGE_PORT:-8001}"
 NODE_RANK="${RANK:-0}"
+NODE_WORLD_SIZE="${WORLD_SIZE:-2}"
 
 source "$ROOT/scripts/dlc/dlc_env.sh"
 
@@ -24,9 +25,18 @@ export SFT_JUDGE_URL="http://127.0.0.1:$JUDGE_PORT"
 export GSPO_JUDGE_SERVE_NAME="qwen30-judge"
 export SFT_EVAL_MAX_SAMPLES=0
 
-if [[ "$NODE_RANK" == "0" ]]; then
-  mkdir -p "$EVAL_ROOT/logs"
-  PREPARED_DATA="$EVAL_ROOT/test_abs_images.jsonl"
+if [[ "$NODE_WORLD_SIZE" != "2" || ! "$NODE_RANK" =~ ^[01]$ ]]; then
+  echo "requires two DLC nodes: WORLD_SIZE=2 and RANK=0/1; got WORLD_SIZE=$NODE_WORLD_SIZE RANK=$NODE_RANK"
+else
+  mkdir -p "$EVAL_ROOT/logs" "$EVAL_ROOT/sync"
+  checkpoint="${CHECKPOINTS[$NODE_RANK]}"
+  checkpoint_name="$(basename "$checkpoint")"
+  checkpoint_output="$EVAL_ROOT/$checkpoint_name"
+  checkpoint_log="$EVAL_ROOT/logs/$checkpoint_name.log"
+  PREPARED_DATA="$EVAL_ROOT/test_abs_images_rank${NODE_RANK}.jsonl"
+  NODE_STATUS="$EVAL_ROOT/sync/node_${NODE_RANK}.status"
+
+  printf 'running\n' >"$NODE_STATUS"
 
   "$PYTHON_BIN" - "$BENCHMARK" "$IMAGE_DIR" "$PREPARED_DATA" <<'PY'
 import json
@@ -52,7 +62,7 @@ with open(src, "r", encoding="utf-8") as fin, open(dst, "w", encoding="utf-8") a
         fout.write(json.dumps(row, ensure_ascii=False) + "\n")
 PY
 
-  JUDGE_LOG="$EVAL_ROOT/logs/qwen30_judge.log"
+  JUDGE_LOG="$EVAL_ROOT/logs/qwen30_judge_rank${NODE_RANK}.log"
   (
     export CUDA_VISIBLE_DEVICES="$JUDGE_GPU"
     export WANDB_DISABLED=true
@@ -82,42 +92,73 @@ PY
   done
 
   if (( judge_ready == 1 )); then
-    IFS=',' read -r -a EVAL_GPUS <<<"$EVAL_GPU_CSV"
-    EVAL_PIDS=()
-    for index in "${!CHECKPOINTS[@]}"; do
-      checkpoint="${CHECKPOINTS[$index]}"
-      checkpoint_name="$(basename "$checkpoint")"
-      checkpoint_output="$EVAL_ROOT/$checkpoint_name"
-      checkpoint_log="$EVAL_ROOT/logs/$checkpoint_name.log"
-      rm -rf "$checkpoint_output/eval"
-      mkdir -p "$checkpoint_output/eval"
-      (
-        export CUDA_VISIBLE_DEVICES="${EVAL_GPUS[$index]}"
-        export WANDB_DISABLED=true
-        export WANDB_MODE=disabled
-        export SFT_BENCHMARK="$PREPARED_DATA"
-        export SFT_EVAL_OUTPUT="$checkpoint_output/eval"
-        export TMPDIR="/tmp/qwen3vl-test-unclean-eval-$checkpoint_name"
-        export TMP="$TMPDIR"
-        export TEMP="$TMPDIR"
-        mkdir -p "$TMPDIR"
-        unset RANK WORLD_SIZE LOCAL_RANK MASTER_ADDR MASTER_PORT
-        "$PYTHON_BIN" "$ROOT/scripts/sft/run_eval_only.py" \
-          --model "$checkpoint" \
-          --model_type qwen3_vl \
-          --infer_backend transformers \
-          --torch_dtype bfloat16 \
-          --attn_impl sdpa \
-          --device_map cuda:0
-      ) >"$checkpoint_log" 2>&1 &
-      EVAL_PIDS+=("$!")
+    rm -rf "$checkpoint_output/eval"
+    mkdir -p "$checkpoint_output/eval"
+    echo "checkpoint_start rank=$NODE_RANK checkpoint=$checkpoint_name eval_gpu=$EVAL_GPU judge_gpu=$JUDGE_GPU log=$checkpoint_log"
+
+    (
+      export CUDA_VISIBLE_DEVICES="$EVAL_GPU"
+      export WANDB_DISABLED=true
+      export WANDB_MODE=disabled
+      export SFT_BENCHMARK="$PREPARED_DATA"
+      export SFT_EVAL_OUTPUT="$checkpoint_output/eval"
+      export TMPDIR="/tmp/qwen3vl-test-unclean-eval-$checkpoint_name"
+      export TMP="$TMPDIR"
+      export TEMP="$TMPDIR"
+      mkdir -p "$TMPDIR"
+      unset RANK WORLD_SIZE LOCAL_RANK MASTER_ADDR MASTER_PORT
+      "$PYTHON_BIN" "$ROOT/scripts/sft/run_eval_only.py" \
+        --model "$checkpoint" \
+        --model_type qwen3_vl \
+        --infer_backend transformers \
+        --torch_dtype bfloat16 \
+        --attn_impl sdpa \
+        --device_map cuda:0
+    ) >"$checkpoint_log" 2>&1 &
+    EVAL_PID=$!
+
+    STATUS_PATH="$checkpoint_output/eval/step-000000/status/rank_0000.json"
+    RUN_CONFIG_PATH="$checkpoint_output/eval/step-000000/run_config.json"
+    while kill -0 "$EVAL_PID" 2>/dev/null; do
+      if [[ -f "$STATUS_PATH" && -f "$RUN_CONFIG_PATH" ]]; then
+        "$PYTHON_BIN" -c "import json; s=json.load(open('$STATUS_PATH')); c=json.load(open('$RUN_CONFIG_PATH')); total=int(c['total']); done=int(s['completed']); errors=int(s['errors']); print(f'checkpoint_progress rank=$NODE_RANK checkpoint=$checkpoint_name completed={done}/{total} errors={errors} progress={(done+errors)/total*100 if total else 0:.2f}% elapsed={float(s[\"elapsed_seconds\"]):.1f}s', flush=True)"
+      fi
+      sleep 10
     done
 
-    for pid in "${EVAL_PIDS[@]}"; do
-      wait "$pid"
+    if wait "$EVAL_PID"; then
+      "$PYTHON_BIN" -c "import json; s=json.load(open('$STATUS_PATH')); c=json.load(open('$RUN_CONFIG_PATH')); total=int(c['total']); done=int(s['completed']); errors=int(s['errors']); print(f'checkpoint_progress rank=$NODE_RANK checkpoint=$checkpoint_name completed={done}/{total} errors={errors} progress={(done+errors)/total*100 if total else 0:.2f}% elapsed={float(s[\"elapsed_seconds\"]):.1f}s', flush=True)"
+      printf 'complete\n' >"$NODE_STATUS"
+      echo "checkpoint_finished rank=$NODE_RANK checkpoint=$checkpoint_name"
+    else
+      printf 'failed\n' >"$NODE_STATUS"
+      echo "checkpoint_failed rank=$NODE_RANK checkpoint=$checkpoint_name log=$checkpoint_log"
+    fi
+  else
+    printf 'failed\n' >"$NODE_STATUS"
+    echo "judge server not ready on rank=$NODE_RANK; see $JUDGE_LOG"
+  fi
+
+  kill "$JUDGE_PID" 2>/dev/null || true
+
+  if [[ "$NODE_RANK" == "0" ]]; then
+    echo "waiting_for_rank1 checkpoint=${CHECKPOINTS[1]}"
+    while true; do
+      rank0_status="$(cat "$EVAL_ROOT/sync/node_0.status" 2>/dev/null || true)"
+      rank1_status="$(cat "$EVAL_ROOT/sync/node_1.status" 2>/dev/null || true)"
+      if [[ "$rank0_status" == "complete" && "$rank1_status" == "complete" ]]; then
+        break
+      fi
+      if [[ "$rank0_status" == "failed" || "$rank1_status" == "failed" ]]; then
+        echo "evaluation_failed rank0_status=$rank0_status rank1_status=$rank1_status"
+        break
+      fi
+      echo "waiting_for_nodes rank0_status=${rank0_status:-missing} rank1_status=${rank1_status:-missing}"
+      sleep 10
     done
 
-    "$PYTHON_BIN" - "$BENCHMARK" "$EVAL_ROOT" "${CHECKPOINTS[@]}" <<'PY'
+    if [[ "$(cat "$EVAL_ROOT/sync/node_0.status" 2>/dev/null || true)" == "complete" && "$(cat "$EVAL_ROOT/sync/node_1.status" 2>/dev/null || true)" == "complete" ]]; then
+      "$PYTHON_BIN" - "$BENCHMARK" "$EVAL_ROOT" "${CHECKPOINTS[@]}" <<'PY'
 import json
 import sys
 from collections import defaultdict
@@ -188,11 +229,6 @@ for checkpoint in checkpoints:
 )
 print(f"\nsource_summary={eval_root / 'source_summary.json'}")
 PY
-  else
-    echo "judge server not ready; see $JUDGE_LOG"
+    fi
   fi
-
-  kill "$JUDGE_PID" 2>/dev/null || true
-else
-  echo "RANK=$NODE_RANK skips evaluation; RANK=0 evaluates both checkpoints."
 fi
