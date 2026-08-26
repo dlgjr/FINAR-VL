@@ -6,9 +6,12 @@ GENERATION_START_MODEL="${GENERATION_START_MODEL:-/mnt/nas/bihaoran/qwen3vl/outp
 : "${GENERATION_RL_DATA:?GENERATION_RL_DATA must point to the generation RL JSONL}"
 : "${GENERATION_RL_OUTPUT_DIR:?GENERATION_RL_OUTPUT_DIR must be shared by all DLC nodes}"
 
+UNIQUE_GSPO_SOURCE="$(mktemp /tmp/qwen3vl-gspo-generation-unique-ids.XXXXXX.jsonl)"
+python "$ROOT/scripts/rl/ensure_unique_sample_ids.py" "$GENERATION_RL_DATA" "$UNIQUE_GSPO_SOURCE"
+
 export GSPO_MODEL="$GENERATION_START_MODEL"
 export GSPO_LEARNING_RATE="${GSPO_LEARNING_RATE:-2e-6}"
-export GSPO_SOURCE_DATA="$GENERATION_RL_DATA"
+export GSPO_SOURCE_DATA="$UNIQUE_GSPO_SOURCE"
 export GSPO_ROUTE_MODE=generation
 export GSPO_OUTPUT_DIR="$GENERATION_RL_OUTPUT_DIR"
 
