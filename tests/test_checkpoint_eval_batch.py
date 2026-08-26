@@ -122,6 +122,7 @@ def test_launcher_uses_sft_benchmark_seven_eval_gpus_and_qwen30_judge() -> None:
         '[[ "$(basename "$checkpoint")" =~ ^checkpoint-[0-9]+$ ]]',
         "unset RANK WORLD_SIZE LOCAL_RANK MASTER_ADDR MASTER_PORT",
         "wave_start += 7",
+        'flock -n 9 || { echo "another checkpoint evaluation is already running: $EVAL_ROOT"',
         "financial_visual_data_reasoning",
         "multi_step_numerical_reasoning",
         "single_table_reasoning",

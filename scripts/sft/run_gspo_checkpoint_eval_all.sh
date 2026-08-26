@@ -48,6 +48,8 @@ test -f "$CODE_ROOT/scripts/sft/run_eval_only.py" || { echo "missing eval runner
 test -f "$CODE_ROOT/scripts/sft/checkpoint_eval_wandb.py" || { echo "missing W&B summary module" >&2; exit 1; }
 
 mkdir -p "$EVAL_ROOT/checkpoints" "$EVAL_ROOT/logs" "$WANDB_DIR"
+exec 9>"$EVAL_ROOT/.run.lock"
+flock -n 9 || { echo "another checkpoint evaluation is already running: $EVAL_ROOT" >&2; exit 1; }
 OUTPUT_PROBE="$EVAL_ROOT/.output_dir_write_probe.$$"
 printf 'writable\n' >"$OUTPUT_PROBE"
 rm -f "$OUTPUT_PROBE"
