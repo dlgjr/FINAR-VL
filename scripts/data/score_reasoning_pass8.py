@@ -113,7 +113,9 @@ def worker(args: argparse.Namespace) -> None:
                 continue
             row = json.loads(line)
             prepared = prepare_record(row, line_number)
-            prompt_input = build_prompt_input(row, processor, image_root)
+            prompt_row = dict(prepared)
+            prompt_row['messages'] = [*prepared['messages'], {'role': 'assistant', 'content': ''}]
+            prompt_input = build_prompt_input(prompt_row, processor, image_root)
             batch_rows.append((line_number, row, prompt_input, prepared))
             if len(batch_rows) >= args.batch_size:
                 run_batch()
