@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash "$0" "$@"
+fi
+set -euo pipefail
+
+CODE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+export QWEN3VL_ROOT="${QWEN3VL_ROOT:-/mnt/nas/bihaoran/qwen3vl}"
+CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-/mnt/nas/bihaoran/qwen3vl/output/gspo/reasoning_qwen3vl4b_ckpt15500_20260826_retry3_tp4sleep2/v0-20260826-072528}"
+BENCHMARK="${SFT_BENCHMARK:-/mnt/nas/bihaoran/qwen3vl/data/benchmark/my_benchmark/all.jsonl}"
+JUDGE_MODEL="${JUDGE_MODEL:-/mnt/nas/bihaoran/model/qwen30}"
+EVAL_ROOT="${SFT_CHECKPOINT_EVAL_ROOT:-$CHECKPOINT_ROOT/eval_sft_all}"
+JUDGE_GPU="${SFT_CHECKPOINT_EVAL_JUDGE_GPU:-7}"
+EVAL_GPU_CSV="${SFT_CHECKPOINT_EVAL_GPUS:-0,1,2,3,4,5,6}"
+JUDGE_PORT="${SFT_JUDGE_PORT:-8001}"
+JUDGE_STARTUP_TIMEOUT="${SFT_JUDGE_STARTUP_TIMEOUT:-1800}"
+EXPECTED_TASK_COUNT=24
+
+source "$CODE_ROOT/scripts/dlc/dlc_env.sh"
+PYTHON_BIN="${PYTHON_BIN:-/opt/ac2/bin/python}"
+export PYTHONPATH="$CODE_ROOT:$PYTHON_USER_SITE${PYTHONPATH:+:$PYTHONPATH}"
+export SFT_BENCHMARK="$BENCHMARK"
+export SFT_JUDGE_URL="http://127.0.0.1:$JUDGE_PORT"
+export GSPO_JUDGE_SERVE_NAME=qwen30-judge
+export SFT_EVAL_MAX_SAMPLES=0
+export SFT_PASS_AT_8_TEMPERATURE="${SFT_PASS_AT_8_TEMPERATURE:-1.0}"
+export IMAGE_MAX_TOKEN_NUM="${IMAGE_MAX_TOKEN_NUM:-512}"
+export WANDB_PROJECT="${WANDB_PROJECT:-FINAR-VL-GSPO-EVAL}"
+export WANDB_NAME="${WANDB_NAME:-$(basename "$CHECKPOINT_ROOT")_sft_all}"
+export WANDB_MODE=offline
+export WANDB_DIR="$EVAL_ROOT/wandb"
+
+FOCUS_TASKS=(
+  basic_arithmetic_metrics
+  multi_step_numerical_reasoning
+  multi_table_reasoning
+  cross_modal_multi_hop
+)
+FOCUS_ARGS=()
+for task in "${FOCUS_TASKS[@]}"; do
+  FOCUS_ARGS+=(--focus-task "$task")
+done
+
+test -d "$CHECKPOINT_ROOT" || { echo "missing checkpoint root: $CHECKPOINT_ROOT" >&2; exit 1; }
+test -f "$BENCHMARK" || { echo "missing benchmark: $BENCHMARK" >&2; exit 1; }
+test -f "$JUDGE_MODEL/config.json" || { echo "missing judge model: $JUDGE_MODEL/config.json" >&2; exit 1; }
+test -f "$CODE_ROOT/scripts/sft/run_eval_only.py" || { echo "missing eval runner" >&2; exit 1; }
+test -f "$CODE_ROOT/scripts/sft/checkpoint_eval_wandb.py" || { echo "missing W&B summary module" >&2; exit 1; }
+
+mkdir -p "$EVAL_ROOT/checkpoints" "$EVAL_ROOT/logs" "$WANDB_DIR"
+OUTPUT_PROBE="$EVAL_ROOT/.output_dir_write_probe.$$"
+printf 'writable\n' >"$OUTPUT_PROBE"
+rm -f "$OUTPUT_PROBE"
+echo "output_dir=$EVAL_ROOT writable=1 nas_root=$QWEN3VL_ROOT"
+echo "checkpoint_root=$CHECKPOINT_ROOT"
+echo "benchmark=$BENCHMARK judge_model=$JUDGE_MODEL"
+echo "eval_gpus=$EVAL_GPU_CSV judge_gpu=$JUDGE_GPU wandb_mode=$WANDB_MODE wandb_dir=$WANDB_DIR"
+
+"$PYTHON_BIN" -m scripts.sft.checkpoint_eval_wandb validate-benchmark \
+  --benchmark "$BENCHMARK" \
+  --expected-task-count "$EXPECTED_TASK_COUNT" \
+  "${FOCUS_ARGS[@]}"
+
+mapfile -t CHECKPOINTS < <(
+  for checkpoint in "$CHECKPOINT_ROOT"/checkpoint-*; do
+    [[ -d "$checkpoint" ]] || continue
+    [[ "$(basename "$checkpoint")" =~ ^checkpoint-[0-9]+$ ]] || continue
+    printf '%s\n' "$checkpoint"
+  done | sort -V
+)
+if (( ${#CHECKPOINTS[@]} == 0 )); then
+  echo "no checkpoint-<step> directories found in $CHECKPOINT_ROOT" >&2
+  exit 1
+fi
+for checkpoint in "${CHECKPOINTS[@]}"; do
+  test -f "$checkpoint/config.json" || { echo "missing checkpoint config: $checkpoint/config.json" >&2; exit 1; }
+done
+
+IFS=',' read -r -a EVAL_GPUS <<<"$EVAL_GPU_CSV"
+if (( ${#EVAL_GPUS[@]} != 7 )); then
+  echo "SFT_CHECKPOINT_EVAL_GPUS must contain exactly 7 GPU ids" >&2
+  exit 1
+fi
+
+JUDGE_LOG="$EVAL_ROOT/logs/qwen30_judge.log"
+(
+  export CUDA_VISIBLE_DEVICES="$JUDGE_GPU"
+  export WANDB_DISABLED=true
+  export WANDB_MODE=disabled
+  exec "$PYTHON_BIN" -m vllm.entrypoints.openai.api_server \
+    --model "$JUDGE_MODEL" \
+    --served-model-name qwen30-judge \
+    --host 127.0.0.1 \
+    --port "$JUDGE_PORT" \
+    --dtype bfloat16 \
+    --max-model-len 8192 \
+    --tensor-parallel-size 1 \
+    --gpu-memory-utilization 0.70 \
+    --max-num-seqs 8 \
+    --enforce-eager \
+    --generation-config vllm
+) >"$JUDGE_LOG" 2>&1 &
+JUDGE_PID=$!
+cleanup() { kill "$JUDGE_PID" 2>/dev/null || true; }
+trap cleanup EXIT
+
+judge_deadline=$((SECONDS + JUDGE_STARTUP_TIMEOUT))
+while (( SECONDS < judge_deadline )); do
+  if ! kill -0 "$JUDGE_PID" 2>/dev/null; then
+    echo "qwen30 judge exited before becoming healthy: $JUDGE_LOG" >&2
+    exit 1
+  fi
+  if "$PYTHON_BIN" -c "import urllib.request; urllib.request.urlopen('$SFT_JUDGE_URL/health', timeout=2)" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+if (( SECONDS >= judge_deadline )); then
+  echo "qwen30 judge failed to become healthy within ${JUDGE_STARTUP_TIMEOUT}s: $JUDGE_LOG" >&2
+  exit 1
+fi
+echo "judge_ready url=$SFT_JUDGE_URL model=qwen30-judge log=$JUDGE_LOG"
+
+for ((wave_start = 0; wave_start < ${#CHECKPOINTS[@]}; wave_start += 7)); do
+  pids=()
+  names=()
+  for ((slot = 0; slot < 7 && wave_start + slot < ${#CHECKPOINTS[@]}; slot++)); do
+    checkpoint="${CHECKPOINTS[$((wave_start + slot))]}"
+    checkpoint_name="$(basename "$checkpoint")"
+    checkpoint_output="$EVAL_ROOT/checkpoints/$checkpoint_name"
+    summary="$checkpoint_output/eval/step-000000/summary.json"
+    if "$PYTHON_BIN" -m scripts.sft.checkpoint_eval_wandb check-summary \
+      --benchmark "$BENCHMARK" \
+      --expected-task-count "$EXPECTED_TASK_COUNT" \
+      --summary "$summary"; then
+      echo "checkpoint_skip_complete checkpoint=$checkpoint_name summary=$summary"
+      continue
+    fi
+    if [[ -d "$checkpoint_output/eval" ]]; then
+      mv "$checkpoint_output/eval" "$checkpoint_output/eval.incomplete.$(date +%Y%m%d_%H%M%S)"
+    fi
+    mkdir -p "$checkpoint_output/eval"
+    checkpoint_log="$EVAL_ROOT/logs/${checkpoint_name}.log"
+    eval_gpu="${EVAL_GPUS[$slot]}"
+    echo "checkpoint_start checkpoint=$checkpoint_name gpu=$eval_gpu log=$checkpoint_log"
+    (
+      export CUDA_VISIBLE_DEVICES="$eval_gpu"
+      export WANDB_DISABLED=true
+      export WANDB_MODE=disabled
+      export SFT_EVAL_OUTPUT="$checkpoint_output/eval"
+      export TMPDIR="/tmp/qwen3vl-sft-eval-${checkpoint_name}"
+      export TMP="$TMPDIR"
+      export TEMP="$TMPDIR"
+      mkdir -p "$TMPDIR"
+      unset RANK WORLD_SIZE LOCAL_RANK MASTER_ADDR MASTER_PORT
+      exec "$PYTHON_BIN" "$CODE_ROOT/scripts/sft/run_eval_only.py" \
+        --model "$checkpoint" \
+        --model_type qwen3_vl \
+        --infer_backend transformers \
+        --torch_dtype bfloat16 \
+        --attn_impl sdpa \
+        --device_map cuda:0
+    ) >"$checkpoint_log" 2>&1 &
+    pids+=("$!")
+    names+=("$checkpoint_name")
+  done
+
+  wave_failed=0
+  for index in "${!pids[@]}"; do
+    if wait "${pids[$index]}"; then
+      echo "checkpoint_finished checkpoint=${names[$index]}"
+    else
+      echo "checkpoint_failed checkpoint=${names[$index]} log=$EVAL_ROOT/logs/${names[$index]}.log" >&2
+      wave_failed=1
+    fi
+  done
+  if (( wave_failed != 0 )); then
+    exit 1
+  fi
+done
+
+unset WANDB_DISABLED
+export WANDB_MODE=offline
+"$PYTHON_BIN" -m scripts.sft.checkpoint_eval_wandb log \
+  --checkpoint-root "$CHECKPOINT_ROOT" \
+  --eval-root "$EVAL_ROOT" \
+  --benchmark "$BENCHMARK" \
+  --expected-task-count "$EXPECTED_TASK_COUNT" \
+  "${FOCUS_ARGS[@]}" \
+  --wandb-dir "$WANDB_DIR" \
+  --wandb-project "$WANDB_PROJECT" \
+  --wandb-name "$WANDB_NAME" \
+  --wandb-mode "$WANDB_MODE"
+
+echo "GSPO_CHECKPOINT_EVAL_OK checkpoints=${#CHECKPOINTS[@]} output_dir=$EVAL_ROOT"
