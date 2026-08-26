@@ -13,7 +13,7 @@ EVAL_ROOT="${SFT_CHECKPOINT_EVAL_ROOT:-$CHECKPOINT_ROOT/eval_sft_all}"
 JUDGE_GPU="${SFT_CHECKPOINT_EVAL_JUDGE_GPU:-7}"
 EVAL_GPU_CSV="${SFT_CHECKPOINT_EVAL_GPUS:-0,1,2,3,4,5,6}"
 JUDGE_PORT="${SFT_JUDGE_PORT:-8001}"
-JUDGE_STARTUP_TIMEOUT="${SFT_JUDGE_STARTUP_TIMEOUT:-1800}"
+JUDGE_STARTUP_TIMEOUT="${SFT_JUDGE_STARTUP_TIMEOUT:-3600}"
 EXPECTED_TASK_COUNT=24
 NODE_WORLD_SIZE="${WORLD_SIZE:?DLC must provide WORLD_SIZE}"
 NODE_RANK="${RANK:?DLC must provide RANK}"
@@ -130,17 +130,19 @@ JUDGE_LOG="$EVAL_ROOT/logs/qwen30_judge_node_${NODE_RANK}.log"
 JUDGE_PID=$!
 
 judge_deadline=$((SECONDS + JUDGE_STARTUP_TIMEOUT))
+judge_ready=0
 while (( SECONDS < judge_deadline )); do
   if ! kill -0 "$JUDGE_PID" 2>/dev/null; then
     echo "qwen30 judge exited before becoming healthy: $JUDGE_LOG" >&2
     exit 1
   fi
   if "$PYTHON_BIN" -c "import urllib.request; urllib.request.urlopen('$SFT_JUDGE_URL/health', timeout=2)" >/dev/null 2>&1; then
+    judge_ready=1
     break
   fi
   sleep 2
 done
-if (( SECONDS >= judge_deadline )); then
+if (( judge_ready == 0 )); then
   echo "qwen30 judge failed to become healthy within ${JUDGE_STARTUP_TIMEOUT}s: $JUDGE_LOG" >&2
   exit 1
 fi

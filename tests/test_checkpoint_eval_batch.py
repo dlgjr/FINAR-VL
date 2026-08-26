@@ -125,6 +125,8 @@ def test_launcher_uses_sft_benchmark_seven_eval_gpus_and_qwen30_judge() -> None:
         'NODE_WORLD_SIZE="${WORLD_SIZE:?DLC must provide WORLD_SIZE}"',
         'NODE_RANK="${RANK:?DLC must provide RANK}"',
         'checkpoint evaluation requires WORLD_SIZE=2 and RANK=0/1',
+        'JUDGE_STARTUP_TIMEOUT="${SFT_JUDGE_STARTUP_TIMEOUT:-3600}"',
+        "if (( judge_ready == 0 )); then",
         "index % NODE_WORLD_SIZE == NODE_RANK",
         'qwen30_judge_node_${NODE_RANK}.log',
         "if (( NODE_RANK != 0 )); then",
