@@ -19,57 +19,28 @@ def _base_sample_id(row: Mapping[str, Any], line_number: int) -> str:
     )
 
 
-def _merge_shape(shape: Any, value: Any) -> Any:
-    if isinstance(value, dict):
-        shape = shape if isinstance(shape, dict) else {}
-        for key, item in value.items():
-            shape[key] = _merge_shape(shape.get(key), item)
-        return shape
-    if isinstance(value, list):
-        shape = shape if isinstance(shape, list) else [None]
-        for item in value:
-            shape[0] = _merge_shape(shape[0], item)
-        return shape
-    return shape
+def _compact_mopd_row(row: Mapping[str, Any], line_number: int) -> dict[str, Any] | None:
+    from .prepare_gspo_data import RejectedRecord, prepare_record
 
-
-def _normalize_shape(value: Any, shape: Any) -> Any:
-    if isinstance(shape, dict):
-        source = value if isinstance(value, dict) else {}
-        return {key: _normalize_shape(source.get(key), child) for key, child in shape.items()}
-    if isinstance(shape, list) and isinstance(value, list):
-        return [_normalize_shape(item, shape[0]) for item in value]
-    return value
-
-
-def _harmonize_mopd_sources(output_path: Path) -> None:
-    if output_path.name not in {"reasoning.unique_source.jsonl", "generation.unique_source.jsonl"}:
-        return
-    paths = [output_path.parent / "reasoning.unique_source.jsonl", output_path.parent / "generation.unique_source.jsonl"]
-    if not all(path.is_file() for path in paths):
-        return
-
-    shape: Any = None
-    for path in paths:
-        with path.open(encoding="utf-8") as source:
-            for line in source:
-                if line.strip():
-                    shape = _merge_shape(shape, json.loads(line))
-
-    for path in paths:
-        temp = path.with_suffix(path.suffix + ".tmp")
-        with path.open(encoding="utf-8") as source, temp.open("w", encoding="utf-8") as target:
-            for line in source:
-                if line.strip():
-                    target.write(json.dumps(_normalize_shape(json.loads(line), shape), ensure_ascii=False) + "\n")
-        temp.replace(path)
-    print("[GSPO_DATA] harmonized MOPD source schemas")
+    try:
+        prepared = prepare_record(row, line_number)
+    except RejectedRecord:
+        return None
+    return {
+        "messages": row.get("messages") or [],
+        "images": row.get("images") or [],
+        "solution": prepared["solution"],
+        "sample_id": prepared["sample_id"],
+        "reward_type": "judge",
+        "verifier_type": "model_judge",
+    }
 
 
 def rewrite_unique_ids(input_path: str | Path, output_path: str | Path) -> tuple[int, int]:
     input_path = Path(input_path)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    mopd_source = output_path.name in {"reasoning.unique_source.jsonl", "generation.unique_source.jsonl"}
 
     seen: set[str] = set()
     total = 0
@@ -90,14 +61,16 @@ def rewrite_unique_ids(input_path: str | Path, output_path: str | Path) -> tuple
                 while sample_id in seen:
                     sample_id = f"{base_id}:dup:{line_number}:{suffix}"
                     suffix += 1
-                row["_original_sample_id"] = base_id
                 renamed += 1
 
             row["sample_id"] = sample_id
             seen.add(sample_id)
+            if mopd_source:
+                row = _compact_mopd_row(row, line_number)
+                if row is None:
+                    continue
             target.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    _harmonize_mopd_sources(output_path)
     return total, renamed
 
 
