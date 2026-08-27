@@ -73,6 +73,7 @@ for required in \
   "$REASONING_SOURCE" \
   "$GENERATION_SOURCE" \
   "$BENCHMARK" \
+  "$CODE_ROOT/scripts/rl/ensure_unique_sample_ids.py" \
   "$CODE_ROOT/scripts/rl/prepare_gspo_data.py" \
   "$CODE_ROOT/scripts/sft/swift_sft_plugin.py"; do
   test -f "$required" || { echo "missing required file: $required" >&2; exit 1; }
@@ -115,16 +116,24 @@ mkdir -p "$WANDB_DIR"
 PREPARED_DIR="$OUTPUT_DIR/prepared_data"
 REASONING_DATA="$PREPARED_DIR/reasoning.jsonl"
 GENERATION_DATA="$PREPARED_DIR/generation.jsonl"
+REASONING_UNIQUE_SOURCE="$PREPARED_DIR/reasoning.unique_source.jsonl"
+GENERATION_UNIQUE_SOURCE="$PREPARED_DIR/generation.unique_source.jsonl"
 DATA_READY="$PREPARED_DIR/.ready"
 mkdir -p "$PREPARED_DIR"
 if [[ "$NODE_RANK" == "0" ]]; then
   rm -f "$DATA_READY"
-  "$PYTHON_BIN" -m scripts.rl.prepare_gspo_data \
+  "$PYTHON_BIN" -m scripts.rl.ensure_unique_sample_ids \
     "$REASONING_SOURCE" \
+    "$REASONING_UNIQUE_SOURCE"
+  "$PYTHON_BIN" -m scripts.rl.ensure_unique_sample_ids \
+    "$GENERATION_SOURCE" \
+    "$GENERATION_UNIQUE_SOURCE"
+  "$PYTHON_BIN" -m scripts.rl.prepare_gspo_data \
+    "$REASONING_UNIQUE_SOURCE" \
     "$REASONING_DATA" \
     "$PREPARED_DIR/reasoning.audit.json"
   "$PYTHON_BIN" -m scripts.rl.prepare_gspo_data \
-    "$GENERATION_SOURCE" \
+    "$GENERATION_UNIQUE_SOURCE" \
     "$GENERATION_DATA" \
     "$PREPARED_DIR/generation.audit.json"
   touch "$DATA_READY"
