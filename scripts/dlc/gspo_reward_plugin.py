@@ -124,16 +124,6 @@ class GSPOReward(ORM):
             "gspo/rule_samples": route_counts["rule"],
             "gspo/judge_samples": route_counts["judge"],
         }
-        generations = int(os.environ.get("GSPO_NUM_GENERATIONS", "16"))
-        groups = [rewards[index : index + generations] for index in range(0, len(rewards), generations)]
-        positive_counts = [sum(value > 0 for value in group) for group in groups]
-        summary["gspo/valid_group_ratio"] = sum(len(set(group)) > 1 for group in groups) / len(groups) if groups else 0.0
-        summary["gspo/group_all_zero_ratio"] = sum(count == 0 for count in positive_counts) / len(groups) if groups else 0.0
-        summary["gspo/group_all_success_ratio"] = sum(all(value >= 1 for value in group) for group in groups) / len(groups) if groups else 0.0
-        summary["gspo/group_mixed_ratio"] = sum(any(value > 0 for value in group) and any(value < 1 for value in group) for group in groups) / len(groups) if groups else 0.0
-        summary["gspo/group_positive_count_mean"] = mean(positive_counts) if positive_counts else 0.0
-        summary["gspo/group_positive_count_min"] = min(positive_counts) if positive_counts else 0.0
-        summary["gspo/group_positive_count_max"] = max(positive_counts) if positive_counts else 0.0
         errors_path = os.environ.get("GSPO_REWARD_ERRORS")
         if errors_path and scorer.errors:
             os.makedirs(os.path.dirname(errors_path) or ".", exist_ok=True)
