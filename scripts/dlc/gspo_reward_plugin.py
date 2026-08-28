@@ -27,6 +27,17 @@ def _column(kwargs: Mapping[str, Any], name: str, index: int, default: Any) -> A
     return default if value is None else value
 
 
+def _gather_rewards(rewards: Sequence[float]) -> list[float]:
+    import torch.distributed as dist
+
+    local = [float(value) for value in rewards]
+    if not dist.is_available() or not dist.is_initialized() or dist.get_world_size() == 1:
+        return local
+    gathered: list[list[float] | None] = [None] * dist.get_world_size()
+    dist.all_gather_object(gathered, local)
+    return [value for rank_rewards in gathered if rank_rewards is not None for value in rank_rewards]
+
+
 def records_from_kwargs(kwargs: Mapping[str, Any], count: int) -> list[dict[str, Any]]:
     supplied = kwargs.get("records", kwargs.get("data"))
     if isinstance(supplied, Sequence) and not isinstance(supplied, (str, bytes)) and supplied and isinstance(supplied[0], Mapping):
@@ -124,6 +135,16 @@ class GSPOReward(ORM):
             "gspo/rule_samples": route_counts["rule"],
             "gspo/judge_samples": route_counts["judge"],
         }
+        global_rewards = _gather_rewards(rewards)
+        generations = int(os.environ.get("GSPO_NUM_GENERATIONS", "16"))
+        groups = [global_rewards[index : index + generations] for index in range(0, len(global_rewards), generations)]
+        positive_counts = [sum(value > 0 for value in group) for group in groups]
+        summary["gspo/group_all_zero_ratio"] = sum(count == 0 for count in positive_counts) / len(groups) if groups else 0.0
+        summary["gspo/group_all_success_ratio"] = sum(all(value >= 1 for value in group) for group in groups) / len(groups) if groups else 0.0
+        summary["gspo/group_mixed_ratio"] = sum(len(set(group)) > 1 for group in groups) / len(groups) if groups else 0.0
+        summary["gspo/group_positive_count_mean"] = mean(positive_counts) if positive_counts else 0.0
+        summary["gspo/group_positive_count_min"] = min(positive_counts) if positive_counts else 0.0
+        summary["gspo/group_positive_count_max"] = max(positive_counts) if positive_counts else 0.0
         errors_path = os.environ.get("GSPO_REWARD_ERRORS")
         if errors_path and scorer.errors:
             os.makedirs(os.path.dirname(errors_path) or ".", exist_ok=True)
