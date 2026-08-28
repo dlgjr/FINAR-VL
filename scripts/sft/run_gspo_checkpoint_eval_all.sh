@@ -7,14 +7,14 @@ set -euo pipefail
 CODE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 export QWEN3VL_ROOT="${QWEN3VL_ROOT:-/mnt/nas/bihaoran/qwen3vl}"
 CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-/mnt/nas/bihaoran/qwen3vl/output/gspo/reasoning_qwen3vl4b_ckpt15500_20260826_retry3_tp4sleep2/v0-20260826-072528}"
-BENCHMARK="${SFT_BENCHMARK:-/mnt/nas/bihaoran/qwen3vl/data/benchmark/my_benchmark/all.jsonl}"
+BENCHMARK="${SFT_BENCHMARK:-/mnt/nas/bihaoran/qwen3vl/data/benchmark/reasoning_calc_val_50.jsonl}"
+IMAGE_DIR="${SFT_BENCHMARK_IMAGE_DIR:-/mnt/nas/bihaoran/qwen3vl/data/benchmark/assets}"
 JUDGE_MODEL="${JUDGE_MODEL:-/mnt/nas/bihaoran/model/qwen30}"
 EVAL_ROOT="${SFT_CHECKPOINT_EVAL_ROOT:-$CHECKPOINT_ROOT/eval_sft_all}"
 JUDGE_GPU="${SFT_CHECKPOINT_EVAL_JUDGE_GPU:-7}"
 EVAL_GPU_CSV="${SFT_CHECKPOINT_EVAL_GPUS:-0,1,2,3,4,5,6}"
 JUDGE_PORT="${SFT_JUDGE_PORT:-8001}"
 JUDGE_STARTUP_TIMEOUT="${SFT_JUDGE_STARTUP_TIMEOUT:-3600}"
-EXPECTED_TASK_COUNT=24
 NODE_WORLD_SIZE="${WORLD_SIZE:?DLC must provide WORLD_SIZE}"
 NODE_RANK="${RANK:?DLC must provide RANK}"
 if [[ "$NODE_WORLD_SIZE" != "2" || ! "$NODE_RANK" =~ ^[01]$ ]]; then
@@ -24,6 +24,53 @@ fi
 
 source "$CODE_ROOT/scripts/dlc/dlc_env.sh"
 PYTHON_BIN="${PYTHON_BIN:-/opt/ac2/bin/python}"
+
+test -d "$CHECKPOINT_ROOT" || { echo "missing checkpoint root: $CHECKPOINT_ROOT" >&2; exit 1; }
+test -f "$BENCHMARK" || { echo "missing benchmark: $BENCHMARK" >&2; exit 1; }
+test -d "$IMAGE_DIR" || { echo "missing benchmark image dir: $IMAGE_DIR" >&2; exit 1; }
+test -f "$JUDGE_MODEL/config.json" || { echo "missing judge model: $JUDGE_MODEL/config.json" >&2; exit 1; }
+test -f "$CODE_ROOT/scripts/sft/run_eval_only.py" || { echo "missing eval runner" >&2; exit 1; }
+test -f "$CODE_ROOT/scripts/sft/checkpoint_eval_wandb.py" || { echo "missing W&B summary module" >&2; exit 1; }
+
+mkdir -p "$EVAL_ROOT/checkpoints" "$EVAL_ROOT/logs"
+PREPARED_BENCHMARK="$EVAL_ROOT/reasoning_calc_val_50_abs_images_rank${NODE_RANK}.jsonl"
+"$PYTHON_BIN" - "$BENCHMARK" "$IMAGE_DIR" "$PREPARED_BENCHMARK" <<'PY'
+import json
+import os
+import sys
+
+src, image_dir, dst = sys.argv[1:4]
+
+def resolve(path):
+    if os.path.isabs(path):
+        return path
+    if path.startswith("assets/"):
+        path = path[len("assets/"):]
+    return os.path.join(image_dir, path)
+
+with open(src, "r", encoding="utf-8") as fin, open(dst, "w", encoding="utf-8") as fout:
+    for line in fin:
+        row = json.loads(line)
+        if isinstance(row.get("images"), list):
+            row["images"] = [resolve(path) for path in row["images"]]
+        if isinstance(row.get("image"), str):
+            row["image"] = resolve(row["image"])
+        fout.write(json.dumps(row, ensure_ascii=False) + "\n")
+PY
+BENCHMARK="$PREPARED_BENCHMARK"
+EXPECTED_TASK_COUNT="$("$PYTHON_BIN" - "$BENCHMARK" <<'PY'
+import json
+import sys
+
+tasks = set()
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for line in handle:
+        if line.strip():
+            tasks.add(str(json.loads(line)["task"]))
+print(len(tasks))
+PY
+)"
+
 export PYTHONPATH="$CODE_ROOT:$PYTHON_USER_SITE${PYTHONPATH:+:$PYTHONPATH}"
 export SFT_BENCHMARK="$BENCHMARK"
 export SFT_JUDGE_URL="http://127.0.0.1:$JUDGE_PORT"
@@ -36,24 +83,9 @@ export WANDB_NAME="${WANDB_NAME:-$(basename "$CHECKPOINT_ROOT")_sft_all}"
 export WANDB_MODE=offline
 export WANDB_DIR="$EVAL_ROOT/wandb"
 
-FOCUS_TASKS=(
-  financial_visual_data_reasoning
-  multi_step_numerical_reasoning
-  single_table_reasoning
-  cross_modal_multi_hop
-)
 FOCUS_ARGS=()
-for task in "${FOCUS_TASKS[@]}"; do
-  FOCUS_ARGS+=(--focus-task "$task")
-done
 
-test -d "$CHECKPOINT_ROOT" || { echo "missing checkpoint root: $CHECKPOINT_ROOT" >&2; exit 1; }
-test -f "$BENCHMARK" || { echo "missing benchmark: $BENCHMARK" >&2; exit 1; }
-test -f "$JUDGE_MODEL/config.json" || { echo "missing judge model: $JUDGE_MODEL/config.json" >&2; exit 1; }
-test -f "$CODE_ROOT/scripts/sft/run_eval_only.py" || { echo "missing eval runner" >&2; exit 1; }
-test -f "$CODE_ROOT/scripts/sft/checkpoint_eval_wandb.py" || { echo "missing W&B summary module" >&2; exit 1; }
-
-mkdir -p "$EVAL_ROOT/checkpoints" "$EVAL_ROOT/logs" "$WANDB_DIR"
+mkdir -p "$WANDB_DIR"
 SYNC_DIR="$EVAL_ROOT/sync"
 mkdir -p "$SYNC_DIR"
 NODE_STATUS="$SYNC_DIR/node_${NODE_RANK}.status"
@@ -72,7 +104,7 @@ printf 'writable\n' >"$OUTPUT_PROBE"
 rm -f "$OUTPUT_PROBE"
 echo "output_dir=$EVAL_ROOT writable=1 nas_root=$QWEN3VL_ROOT"
 echo "checkpoint_root=$CHECKPOINT_ROOT"
-echo "benchmark=$BENCHMARK judge_model=$JUDGE_MODEL"
+echo "benchmark=$BENCHMARK image_dir=$IMAGE_DIR judge_model=$JUDGE_MODEL"
 echo "node_rank=$NODE_RANK node_world_size=$NODE_WORLD_SIZE eval_gpus=$EVAL_GPU_CSV judge_gpu=$JUDGE_GPU wandb_mode=$WANDB_MODE wandb_dir=$WANDB_DIR"
 
 "$PYTHON_BIN" -m scripts.sft.checkpoint_eval_wandb validate-benchmark \
