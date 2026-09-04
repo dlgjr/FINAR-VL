@@ -1,2 +1,0 @@
-import{E as e,d as n,e as t,c as _,g as o,a as l,i as c,l as i,f as r,m,p as d,b as g,s as p,t as f}from"./2.XmRMbGVn.js";export{e as Embed,n as all_common_keys,t as changeLocale,_ as create_components,o as get_initial_locale,l as i18n_marker,c as is_translation_metadata,i as language_choices,r as load_translations,m as mount_css,d as prefix_css,g as process_langs,p as setupi18n,f as translate_if_needed};
-//# sourceMappingURL=index.Vrc5Br-P.js.map
