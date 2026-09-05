@@ -78,6 +78,9 @@ cd "$ROOT_IMAGE_DIR"
 PYTHON_BIN="${PYTHON_BIN:-/opt/ac2/bin/python}"
 SWIFT_BIN="${SWIFT_BIN:-$PYTHONUSERBASE/bin/swift}"
 if [[ ! -x "$SWIFT_BIN" ]]; then SWIFT_BIN=("$PYTHON_BIN" -m swift.cli); else SWIFT_BIN=("$SWIFT_BIN"); fi
+if [[ "$GSPO_USE_VLLM" == "true" ]]; then
+  "$PYTHON_BIN" "$ROOT/scripts/dlc/patch_vllm_training_logprob.py"
+fi
 GSPO_RUNTIME_MODEL_DIR="$TMPDIR/model"
 mkdir -p "$GSPO_RUNTIME_MODEL_DIR"
 while IFS= read -r -d '' MODEL_ENTRY; do
