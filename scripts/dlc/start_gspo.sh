@@ -9,41 +9,9 @@ export GSPO_LOCAL_TMPDIR="${GSPO_LOCAL_TMPDIR:-/tmp/qwen3vl-gspo-${GSPO_ROUTE_MO
 export TMPDIR="$GSPO_LOCAL_TMPDIR"
 export TMP="$TMPDIR"
 export TEMP="$TMPDIR"
-export GSPO_LOCAL_CACHE_ROOT="$TMPDIR/cache"
-export HF_HOME="$GSPO_LOCAL_CACHE_ROOT/huggingface"
-export HF_DATASETS_CACHE="$HF_HOME/datasets"
-export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
-export HF_HUB_CACHE="$HUGGINGFACE_HUB_CACHE"
-export HF_MODULES_CACHE="$HF_HOME/modules"
-export TRANSFORMERS_CACHE="$HF_HOME/transformers"
-export MODELSCOPE_CACHE="$GSPO_LOCAL_CACHE_ROOT/modelscope"
-export PIP_CACHE_DIR="$GSPO_LOCAL_CACHE_ROOT/pip"
-export TORCH_HOME="$GSPO_LOCAL_CACHE_ROOT/torch"
-export TORCH_EXTENSIONS_DIR="$GSPO_LOCAL_CACHE_ROOT/torch-extensions"
-export VLLM_CACHE_ROOT="$GSPO_LOCAL_CACHE_ROOT/vllm"
-export CUDA_CACHE_PATH="$GSPO_LOCAL_CACHE_ROOT/cuda"
-export PYTHONPYCACHEPREFIX="$GSPO_LOCAL_CACHE_ROOT/pycache"
-export XDG_CACHE_HOME="$GSPO_LOCAL_CACHE_ROOT/xdg"
-export MPLCONFIGDIR="$GSPO_LOCAL_CACHE_ROOT/matplotlib"
 export TORCHINDUCTOR_CACHE_DIR="$TMPDIR/torchinductor"
 export TRITON_CACHE_DIR="$TMPDIR/triton"
-mkdir -p \
-  "$HF_DATASETS_CACHE" \
-  "$HUGGINGFACE_HUB_CACHE" \
-  "$HF_MODULES_CACHE" \
-  "$TRANSFORMERS_CACHE" \
-  "$MODELSCOPE_CACHE" \
-  "$PIP_CACHE_DIR" \
-  "$TORCH_HOME" \
-  "$TORCH_EXTENSIONS_DIR" \
-  "$VLLM_CACHE_ROOT" \
-  "$CUDA_CACHE_PATH" \
-  "$PYTHONPYCACHEPREFIX" \
-  "$XDG_CACHE_HOME" \
-  "$XDG_CACHE_HOME/torch/kernels" \
-  "$MPLCONFIGDIR" \
-  "$TORCHINDUCTOR_CACHE_DIR" \
-  "$TRITON_CACHE_DIR"
+mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR"
 
 export QWEN3VL_ROOT="$ROOT"
 export CUDA_VISIBLE_DEVICES="$GSPO_TRAIN_GPUS"
@@ -61,6 +29,7 @@ export GSPO_REWARD_ERRORS="${GSPO_REWARD_ERRORS:-$GSPO_OUTPUT_DIR/reward_errors_
 export GSPO_STATUS_DIR="${GSPO_STATUS_DIR:-$GSPO_OUTPUT_DIR/rank_status}"
 export REWARD_PLUGIN="${REWARD_PLUGIN:-$ROOT/scripts/dlc/gspo_plugins.py}"
 export TRAINER_PLUGIN="${TRAINER_PLUGIN:-$ROOT/scripts/dlc/gspo_plugins.py}"
+export GSPO_BENCHMARK_ALLOWLIST
 export GSPO_MODEL="${GSPO_MODEL:-${SFT_MODEL:-}}"
 export ROOT_IMAGE_DIR="${ROOT_IMAGE_DIR:-${GSPO_SOURCE_DATA:+$(dirname "$GSPO_SOURCE_DATA")}}"
 export ROOT_IMAGE_DIR="${ROOT_IMAGE_DIR:-$ROOT/data/train_multi}"
@@ -81,18 +50,6 @@ if [[ ! -x "$SWIFT_BIN" ]]; then SWIFT_BIN=("$PYTHON_BIN" -m swift.cli); else SW
 if [[ "$GSPO_USE_VLLM" == "true" ]]; then
   "$PYTHON_BIN" "$ROOT/scripts/dlc/patch_vllm_training_logprob.py"
 fi
-GSPO_RUNTIME_MODEL_DIR="$TMPDIR/model"
-mkdir -p "$GSPO_RUNTIME_MODEL_DIR"
-while IFS= read -r -d '' MODEL_ENTRY; do
-  MODEL_ENTRY_NAME="${MODEL_ENTRY##*/}"
-  if [[ "$MODEL_ENTRY_NAME" != "tokenizer_config.json" ]]; then
-    ln -sfn "$MODEL_ENTRY" "$GSPO_RUNTIME_MODEL_DIR/$MODEL_ENTRY_NAME"
-  fi
-done < <(find "$GSPO_MODEL" -mindepth 1 -maxdepth 1 -print0)
-test -f "$GSPO_MODEL/tokenizer_config.json" || { echo "missing tokenizer config: $GSPO_MODEL/tokenizer_config.json" >&2; exit 1; }
-rm -f "$GSPO_RUNTIME_MODEL_DIR/tokenizer_config.json"
-cp "$GSPO_MODEL/tokenizer_config.json" "$GSPO_RUNTIME_MODEL_DIR/tokenizer_config.json"
-"$PYTHON_BIN" -c 'import json, pathlib, sys; path = pathlib.Path(sys.argv[1]); config = json.loads(path.read_text(encoding="utf-8")); config["fix_mistral_regex"] = False; path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")' "$GSPO_RUNTIME_MODEL_DIR/tokenizer_config.json"
 RUN_DIR="$GSPO_OUTPUT_DIR"
 mkdir -p "$RUN_DIR" "$WANDB_DIR"
 if [[ -n "$GSPO_SOURCE_DATA" ]]; then
@@ -155,11 +112,6 @@ trap cleanup EXIT
 if [[ "$GSPO_ENABLE_JUDGE" == "true" ]]; then
   for attempt in $(seq 1 1800); do
     if "$PYTHON_BIN" -c "import urllib.request; urllib.request.urlopen('$GSPO_JUDGE_URL/health', timeout=2)" >/dev/null 2>&1; then break; fi
-    if ! kill -0 "$JUDGE_PID" 2>/dev/null; then echo "judge server exited before becoming healthy: $JUDGE_LOG" >&2; exit 1; fi
-    if (( attempt % 30 == 0 )); then
-      echo "waiting_for_judge seconds=$((attempt * 2)) node_rank=$NODE_RANK log=$JUDGE_LOG"
-      tail -c 4096 "$JUDGE_LOG" | tr '\r' '\n' | tail -n 5
-    fi
     sleep 2
     if (( attempt == 1800 )); then echo "judge server failed to become healthy: $JUDGE_LOG" >&2; exit 1; fi
   done
@@ -169,24 +121,24 @@ if [[ "$NODE_RANK" == "0" ]]; then
   GSPO_EXPECTED_COUNT_VALUE="$GSPO_EXPECTED_COUNT"
   GSPO_GLOBAL_STEPS=$(( (GSPO_EXPECTED_COUNT_VALUE + GSPO_GENERATION_BATCH_SIZE - 1) / GSPO_GENERATION_BATCH_SIZE * GSPO_NUM_TRAIN_EPOCHS ))
   GSPO_CHECKPOINT_COUNT=$(( (GSPO_GLOBAL_STEPS + GSPO_SAVE_STEPS - 1) / GSPO_SAVE_STEPS + GSPO_NUM_TRAIN_EPOCHS + 1 ))
+  GSPO_BENCHMARK_GENERATIONS=$(( 94 * 9 * (GSPO_CHECKPOINT_COUNT + 2) ))
   echo "===== FULL GSPO DLC CONFIG ====="
   echo "nodes=$GSPO_NNODES train_ranks=$((GSPO_NNODES * GSPO_NPROC_PER_NODE)) train_gpus=$GSPO_TRAIN_GPUS judge_enabled=$GSPO_ENABLE_JUDGE judge_gpu=$GSPO_JUDGE_GPU"
-  echo "model=$GSPO_MODEL runtime_model=$GSPO_RUNTIME_MODEL_DIR judge_model=$GSPO_JUDGE_MODEL data=$GSPO_DATA"
+  echo "model=$GSPO_MODEL judge_model=$GSPO_JUDGE_MODEL data=$GSPO_DATA"
   echo "judge_serve_name=$GSPO_JUDGE_SERVE_NAME judge_max_tokens=$GSPO_JUDGE_MAX_TOKENS judge_tp=$GSPO_JUDGE_TENSOR_PARALLEL_SIZE judge_thinking=false"
   echo "epochs=$GSPO_NUM_TRAIN_EPOCHS generations=$GSPO_NUM_GENERATIONS iterations=$GSPO_NUM_ITERATIONS steps_per_generation=$GSPO_STEPS_PER_GENERATION generation_batch=$GSPO_GENERATION_BATCH_SIZE"
-  echo "max_length=$GSPO_MAX_LENGTH max_completion_length=$GSPO_MAX_COMPLETION_LENGTH save_steps=$GSPO_SAVE_STEPS logging_steps=$GSPO_LOGGING_STEPS log_entropy=$GSPO_LOG_ENTROPY"
-  echo "gradient_checkpointing=$GSPO_GRADIENT_CHECKPOINTING gradient_checkpointing_kwargs=$GSPO_GRADIENT_CHECKPOINTING_KWARGS ddp_find_unused_parameters=$GSPO_DDP_FIND_UNUSED_PARAMETERS"
+  echo "max_length=$GSPO_MAX_LENGTH max_completion_length=$GSPO_MAX_COMPLETION_LENGTH save_steps=$GSPO_SAVE_STEPS logging_steps=$GSPO_LOGGING_STEPS log_entropy=$GSPO_LOG_ENTROPY eval_steps=$GSPO_EVAL_STEPS"
   echo "kl_beta=$GSPO_BETA entropy_coef=$GSPO_ENTROPY_COEF"
   echo "top_reward_steps=$GSPO_TOP_REWARD_STEPS top_reward_k=$GSPO_TOP_REWARD_K"
-  echo "vllm_mode=$GSPO_VLLM_MODE vllm_max_model_len=$GSPO_VLLM_MAX_MODEL_LEN vllm_max_num_seqs=$GSPO_VLLM_MAX_NUM_SEQS vllm_mm_processor_cache_gb=$GSPO_VLLM_MM_PROCESSOR_CACHE_GB"
-  echo "allow_unverified_gold=$GSPO_ALLOW_UNVERIFIED_GOLD"
-  echo "expected_global_steps=$GSPO_GLOBAL_STEPS expected_checkpoints=$GSPO_CHECKPOINT_COUNT expected_reward_evaluations=$((GSPO_EXPECTED_COUNT_VALUE * GSPO_NUM_TRAIN_EPOCHS * GSPO_NUM_GENERATIONS))"
+  echo "vllm_mode=$GSPO_VLLM_MODE vllm_max_model_len=$GSPO_VLLM_MAX_MODEL_LEN vllm_max_num_seqs=$GSPO_VLLM_MAX_NUM_SEQS"
+  echo "benchmark_allowlist=$GSPO_BENCHMARK_ALLOWLIST allow_unverified_gold=$GSPO_ALLOW_UNVERIFIED_GOLD"
+  echo "expected_global_steps=$GSPO_GLOBAL_STEPS expected_checkpoints=$GSPO_CHECKPOINT_COUNT expected_reward_evaluations=$((GSPO_EXPECTED_COUNT_VALUE * GSPO_NUM_TRAIN_EPOCHS * GSPO_NUM_GENERATIONS)) benchmark_generation_count=$GSPO_BENCHMARK_GENERATIONS"
 fi
 
 ARGS=(
   rlhf
   --rlhf_type grpo
-  --model "$GSPO_RUNTIME_MODEL_DIR"
+  --model "$GSPO_MODEL"
   --dataset "$GSPO_DATA"
   --split_dataset_ratio 0
   --external_plugins "$TRAINER_PLUGIN"
@@ -199,10 +151,9 @@ ARGS=(
   --torch_dtype bfloat16
   --per_device_train_batch_size "$GSPO_BATCH_SIZE"
   --gradient_accumulation_steps "$GSPO_GRAD_ACC"
+  --ddp_find_unused_parameters "$GSPO_DDP_FIND_UNUSED_PARAMETERS"
   --gradient_checkpointing "$GSPO_GRADIENT_CHECKPOINTING"
   --vit_gradient_checkpointing "$GSPO_VIT_GRADIENT_CHECKPOINTING"
-  --gradient_checkpointing_kwargs "$GSPO_GRADIENT_CHECKPOINTING_KWARGS"
-  --ddp_find_unused_parameters "$GSPO_DDP_FIND_UNUSED_PARAMETERS"
   --num_train_epochs "$GSPO_NUM_TRAIN_EPOCHS"
   --num_generations "$GSPO_NUM_GENERATIONS"
   --num_iterations "$GSPO_NUM_ITERATIONS"
@@ -226,7 +177,7 @@ ARGS=(
   --vllm_max_model_len "$GSPO_VLLM_MAX_MODEL_LEN"
   --vllm_max_num_seqs "$GSPO_VLLM_MAX_NUM_SEQS"
   --vllm_gpu_memory_utilization "$GSPO_VLLM_GPU_MEMORY_UTILIZATION"
-  --vllm_mm_processor_cache_gb "$GSPO_VLLM_MM_PROCESSOR_CACHE_GB"
+  --vllm_mm_processor_cache_gb "${GSPO_VLLM_MM_PROCESSOR_CACHE_GB:-0}"
   --vllm_enforce_eager "$GSPO_VLLM_ENFORCE_EAGER"
   --sleep_level "$GSPO_VLLM_SLEEP_LEVEL"
   --save_strategy steps
@@ -237,7 +188,6 @@ ARGS=(
   --log_entropy "$GSPO_LOG_ENTROPY"
   --eval_strategy no
   --report_to wandb
-  --callbacks gspo_eval
   --output_dir "$RUN_DIR"
 )
 "${SWIFT_BIN[@]}" "${ARGS[@]}"

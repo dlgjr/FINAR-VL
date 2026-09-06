@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 import re
 from collections import Counter
 from decimal import Decimal, InvalidOperation
@@ -269,7 +270,7 @@ def _numeric_gold(row: Mapping[str, Any], solution: str) -> tuple[list[dict[str,
         value = metadata.get(key)
         if value not in (None, ""):
             return numeric_gold_from_text(str(value)), f"metadata.{key}"
-    candidate = _canonical_solution(solution)
+    candidate = str(row.get("gold_final_answer") or _canonical_solution(solution))
     return numeric_gold_from_text(candidate), "assistant.final_answer"
 
 
@@ -322,6 +323,34 @@ def _gold_verification(row: Mapping[str, Any], verifier_type: str, gold_source: 
     return {"status": status, "independent": independent, "gold_source": gold_source}
 
 
+def _resolve_training_image(image: Any) -> str:
+    raw = str(image or "").strip()
+    if not raw:
+        raise FileNotFoundError("empty image path")
+
+    path = Path(raw)
+    if path.is_absolute() and path.is_file():
+        return str(path)
+
+    normalized = raw.replace("\\", "/").lstrip("./")
+    if normalized.startswith("assets_rl/"):
+        relative = normalized[len("assets_rl/"):]
+    elif normalized.startswith("assets/"):
+        relative = normalized[len("assets/"):]
+    else:
+        relative = normalized
+
+    train_root = Path(os.environ.get("GSPO_TRAIN_ASSET_ROOT", "/mnt/nas/duolg/qwen3vl/data/train_multi/assets_rl"))
+    benchmark_root = Path(os.environ.get("GSPO_BENCH_ASSET_ROOT", "/mnt/nas/duolg/qwen3vl/data/benchmark/assets"))
+    candidates = (train_root / relative, benchmark_root / relative)
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+
+    raise FileNotFoundError(
+        f"image not found in priority roots: image={raw!r} "
+        f"tried={[str(candidate) for candidate in candidates]}"
+    )
 def prepare_record(row: Mapping[str, Any], line_number: int, claims: Sequence[Any] | None = None) -> dict[str, Any]:
     messages = row.get("messages") or []
     solution = _reference_solution(row, messages)
@@ -343,7 +372,16 @@ def prepare_record(row: Mapping[str, Any], line_number: int, claims: Sequence[An
         else claims if claims is not None else row.get("gold_claim_details") or row.get("gold_claims") or []
     )
     claim_ids, claim_details = _normalize_claims(explicit_claims)
-    canonical_solution = _canonical_solution(solution)
+    canonical_solution = str(row.get("gold_final_answer") or _canonical_solution(solution)).strip()
+    if not canonical_solution:
+        raise RejectedRecord("missing_gold_final_answer")
+    gold_final_answer = canonical_solution
+    gold_trajectory = str(row.get("gold_trajectory") or solution or "").strip()
+    terminal = f"答案：{gold_final_answer}"
+    if not gold_trajectory:
+        gold_trajectory = terminal
+    elif gold_trajectory.splitlines()[-1].strip() != terminal:
+        gold_trajectory = gold_trajectory.rstrip() + "\n\n" + terminal
     gold_numeric: list[dict[str, Any]] = []
     gold_source = "assistant.final_answer"
     judge_reference = ""
@@ -375,7 +413,10 @@ def prepare_record(row: Mapping[str, Any], line_number: int, claims: Sequence[An
             raise RejectedRecord(f"missing_{verifier_type}_gold")
     sample_id = _sample_id(row, line_number)
     input_messages = [copy.deepcopy(message) for message in messages if message.get("role") != "assistant"]
-    instruction = "\n请在回复最后一行按“答案：具体答案”的格式给出最终答案。"
+    instruction = (
+        "\n请先独立分析问题，结合相关文本、表格和图像信息，完成必要的推理、计算和结果核对后再作答。不要直接猜测答案。"
+        "\n请在回复最后一行按“答案：具体答案”的格式给出最终答案。"
+    )
     for message in reversed(input_messages):
         if message.get("role") != "user":
             continue
@@ -387,18 +428,13 @@ def prepare_record(row: Mapping[str, Any], line_number: int, claims: Sequence[An
         break
     prepared = {key: value for key, value in row.items() if key != "messages"}
     if "images" in prepared:
-        prepared["images"] = [
-            "assets_rl/finqa_rendered/" + image[len("assets/finder_rendered/") :]
-            if image.startswith("assets/finder_rendered/")
-            else "assets_rl/" + image[len("assets/") :]
-            if image.startswith("assets/")
-            else image
-            for image in prepared["images"]
-        ]
+        prepared["images"] = [_resolve_training_image(image) for image in prepared["images"]]
     prepared.update(
         {
             "messages": input_messages,
             "solution": solution,
+            "gold_final_answer": gold_final_answer,
+            "gold_trajectory": gold_trajectory,
             "sample_id": str(sample_id),
             "reward_type": reward_type,
             "reward_subtype": str(row.get("reward_subtype") or verifier_type),

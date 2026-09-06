@@ -59,6 +59,74 @@ def extract_prefixed_answer(completion: Any) -> str | None:
     return matches[-1].strip() if matches else None
 
 
+def extract_final_answer(completion: Any, verifier_type: str = "") -> str | None:
+    # Extract terminal answer from a full CoT without scoring the CoT body.
+    if completion is None:
+        return None
+    if isinstance(completion, Mapping):
+        completion = completion.get("content", completion.get("text", ""))
+    text = str(completion).strip()
+    if not text:
+        return None
+
+    tagged = _ANSWER_RE.findall(text)
+    if tagged:
+        value = tagged[-1].strip()
+        if value:
+            return value
+
+    prefixed = re.findall(
+        r"(?:最终答案|答案|最终结果|结论|Final\s+Answer|Answer)\s*[:：]\s*([^\r\n]+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if prefixed:
+        value = prefixed[-1].strip()
+        if value:
+            return value
+
+    json_matches = list(
+        re.finditer(
+            r'"answer"\s*:\s*(".*?"|\[[^\]]*\]|[-+]?\d+(?:\.\d+)?|true|false|null)',
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    )
+    if json_matches:
+        raw = json_matches[-1].group(1).strip()
+        if raw.startswith('"') and raw.endswith('"'):
+            try:
+                value = json.loads(raw)
+                return str(value).strip() or None
+            except json.JSONDecodeError:
+                return raw[1:-1].strip() or None
+        return raw or None
+
+    boxed = re.findall(r"\\boxed\s*\{([^{}]+)\}", text)
+    if boxed:
+        value = boxed[-1].strip()
+        if value:
+            return value
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    last_line = lines[-1] if lines else text
+
+    if verifier_type in {"numeric", "numeric_final"}:
+        atoms = _numeric_atoms(last_line)
+        if not atoms:
+            atoms = _numeric_atoms(text)
+        return atoms[-1].strip() if atoms else None
+
+    if verifier_type == "composite_numeric":
+        atoms = _numeric_atoms(last_line)
+        return last_line if atoms else None
+
+    if verifier_type in {"page_numbers", "true_false", "single_choice", "multiple_choice", "choice"}:
+        return last_line or None
+
+    if len(lines) == 1:
+        return last_line or None
+    return None
 def _fold_text(value: str) -> str:
     value = unicodedata.normalize("NFKC", str(value)).strip()
     value = value.replace("，", ",").replace("、", ",").replace("；", ";")
@@ -333,7 +401,7 @@ def score_programmatic_answer(
     """Score the last prefixed answer using deterministic verifier semantics."""
 
     del question
-    answer = extract_prefixed_answer(completion)
+    answer = extract_final_answer(completion, verifier_type)
     if answer is None:
         return -0.1
     if not answer:
@@ -427,7 +495,7 @@ class MixedReward:
         for index, completion in enumerate(completions):
             record = records[index] if index < len(records) else {}
             if record.get("reward_type") == "judge" or record.get("verifier_type") == "model_judge":
-                answer = extract_prefixed_answer(completion)
+                answer = extract_final_answer(completion, str(record.get("verifier_type", "")))
                 if answer is None:
                     rewards.append(-0.1)
                 elif not answer or self.judge is None:
@@ -446,7 +514,7 @@ class MixedReward:
                         self.errors.append({"sample_id": record.get("sample_id"), "error": str(error)})
                         rewards.append(0.0)
             else:
-                answer = extract_prefixed_answer(completion)
+                answer = extract_final_answer(completion, str(record.get("verifier_type", "")))
                 if isinstance(record, dict):
                     record["_parser_result"] = {"answer": answer, "verifier_type": record.get("verifier_type", "")}
                 rewards.append(
