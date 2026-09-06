@@ -49,6 +49,7 @@ SWIFT_BIN="${SWIFT_BIN:-$PYTHONUSERBASE/bin/swift}"
 if [[ ! -x "$SWIFT_BIN" ]]; then SWIFT_BIN=("$PYTHON_BIN" -m swift.cli); else SWIFT_BIN=("$SWIFT_BIN"); fi
 if [[ "$GSPO_USE_VLLM" == "true" ]]; then
   "$PYTHON_BIN" "$ROOT/scripts/dlc/patch_vllm_training_logprob.py"
+  "$PYTHON_BIN" "$ROOT/scripts/dlc/patch_swift_vllm_sleep_race.py"
 fi
 RUN_DIR="$GSPO_OUTPUT_DIR"
 mkdir -p "$RUN_DIR" "$WANDB_DIR"
@@ -179,6 +180,7 @@ ARGS=(
   --vllm_gpu_memory_utilization "$GSPO_VLLM_GPU_MEMORY_UTILIZATION"
   --vllm_mm_processor_cache_gb "${GSPO_VLLM_MM_PROCESSOR_CACHE_GB:-0}"
   --vllm_enforce_eager "$GSPO_VLLM_ENFORCE_EAGER"
+  --vllm_engine_kwargs '{"async_scheduling":false}'
   --sleep_level "$GSPO_VLLM_SLEEP_LEVEL"
   --save_strategy steps
   --save_steps "$GSPO_SAVE_STEPS"
@@ -188,6 +190,7 @@ ARGS=(
   --log_entropy "$GSPO_LOG_ENTROPY"
   --eval_strategy no
   --report_to wandb
+  --callbacks gspo_eval
   --output_dir "$RUN_DIR"
 )
 "${SWIFT_BIN[@]}" "${ARGS[@]}"
