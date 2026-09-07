@@ -24,6 +24,10 @@ export GSPO_NUM_GENERATIONS=8
 export GSPO_GENERATION_BATCH_SIZE=8
 export GSPO_SCHEDULE_BATCH_SIZE=4
 
+# Responses shorter than 20 generated tokens are treated as failed reasoning.
+export GSPO_REASONING_SHORT_TOKENS=20
+export GSPO_REASONING_SHORT_REWARD=-0.1
+
 # ===== Training =====
 export GSPO_NUM_TRAIN_EPOCHS=4
 export GSPO_BATCH_SIZE=1
@@ -50,15 +54,15 @@ export GSPO_LOGGING_STEPS=1
 export GSPO_GOLD_INJECT=true
 export GSPO_GOLD_REWARD=1.0
 
-# ===== Fixed RL eval set =====
-# The in-training eval callback must evaluate exactly this fixed 20-question file.
-export GSPO_EVAL_DATA="$ROOT/data/benchmark/rl_test.jsonl"
+# ===== Fixed RL eval set: 50 questions, 3 fixed seeds, mean Pass@k =====
+export GSPO_EVAL_DATA="$ROOT/data/benchmark/reasoning_calc_seen_50_clean.jsonl"
 export SFT_BENCHMARK="$GSPO_EVAL_DATA"
+export GSPO_EVAL_MAX_SAMPLES=50
+export GSPO_EVAL_SEEDS=17,42,73
 
 # ===== Image roots =====
 export GSPO_TRAIN_ASSET_ROOT="$ROOT/data/train_multi/assets_rl"
 export GSPO_BENCH_ASSET_ROOT="$ROOT/data/benchmark/assets"
-# Eval images in rl_test.jsonl are assets/finmmr/... and resolve under benchmark/assets.
 export SFT_BENCHMARK_ASSET_ROOT="$ROOT/data/benchmark/assets"
 export ROOT_IMAGE_DIR="$ROOT/data/train_multi"
 
@@ -92,7 +96,9 @@ echo "GPUS=$GSPO_TRAIN_GPUS"
 echo "NPROC=$GSPO_NPROC_PER_NODE"
 echo "GENERATIONS=$GSPO_NUM_GENERATIONS"
 echo "GENERATION_BATCH=$GSPO_GENERATION_BATCH_SIZE  # must be 1*4*2=8"
+echo "SHORT_RESPONSE=<${GSPO_REASONING_SHORT_TOKENS} tokens => reward ${GSPO_REASONING_SHORT_REWARD}"
 echo "EVAL_DATA=$GSPO_EVAL_DATA"
+echo "EVAL_SEEDS=$GSPO_EVAL_SEEDS"
 echo "EVAL_ASSET_ROOT=$GSPO_BENCH_ASSET_ROOT"
 
 if [[ ! -f "$REASONING_START_MODEL/config.json" ]]; then
@@ -111,8 +117,8 @@ if [[ ! -f "$GSPO_EVAL_DATA" ]]; then
 fi
 
 EVAL_ROWS=$(wc -l < "$GSPO_EVAL_DATA" | tr -d ' ')
-if [[ "$EVAL_ROWS" != "20" ]]; then
-  echo "EVAL DATA MUST HAVE EXACTLY 20 ROWS, got: $EVAL_ROWS"
+if [[ "$EVAL_ROWS" != "50" ]]; then
+  echo "EVAL DATA MUST HAVE EXACTLY 50 ROWS, got: $EVAL_ROWS"
   exit 1
 fi
 
