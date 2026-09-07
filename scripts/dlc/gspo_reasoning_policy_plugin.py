@@ -4,6 +4,8 @@ Side effects applied after ``gspo_wandb_plugin``:
 - put the generic calculation/reasoning policy in the system role for every rollout;
 - append only the two task-specific execution constraints to the user question;
 - assign total reward -0.1 to online responses shorter than 20 response tokens;
+- make in-training eval use the exact same reasoning prompt as online rollouts;
+- derive Pass@1 from the first sample of the same 8-way rollout used for Pass@8;
 - run each in-training evaluation with three fixed seeds and return their mean;
 - preserve evaluation Pass@1/Pass@8 logging from ``gspo_wandb_plugin``.
 """
@@ -71,7 +73,7 @@ def _clean_user_text(text: str) -> str:
     cleaned = text
     for legacy in (_OLD_PROMPT, _PREVIOUS_PROMPT):
         cleaned = cleaned.replace(legacy, "")
-    # Make the patch idempotent across repeated generation/resampling calls.
+    # Make the patch idempotent across repeated generation/resampling/eval calls.
     for sentence in _USER_SUFFIX_SENTENCES:
         cleaned = cleaned.replace("\n" + sentence, "")
         cleaned = cleaned.replace(sentence, "")
@@ -105,10 +107,9 @@ def _ensure_system_prompt(messages: list[Any]) -> None:
     messages.insert(0, {"role": "system", "content": _SYSTEM_PROMPT})
 
 
-def _patch_sample_prompt(sample: Any) -> None:
-    messages = getattr(sample, "messages", None) or []
+def _patch_messages(messages: list[Any], *, source: str) -> None:
     if not isinstance(messages, list):
-        raise TypeError(f"sample.messages must be a list, got {type(messages)!r}")
+        raise TypeError(f"{source} messages must be a list, got {type(messages)!r}")
 
     _ensure_system_prompt(messages)
 
@@ -126,10 +127,15 @@ def _patch_sample_prompt(sample: Any) -> None:
             else:
                 content.append({"type": "text", "text": _USER_SUFFIX.lstrip("\n")})
         else:
-            raise TypeError(f"user message content must be str/list, got {type(content)!r}")
+            raise TypeError(f"{source} user message content must be str/list, got {type(content)!r}")
         break
     else:
-        raise RuntimeError("GSPO rollout sample has no user message to patch")
+        raise RuntimeError(f"{source} sample has no user message to patch")
+
+
+def _patch_sample_prompt(sample: Any) -> None:
+    messages = getattr(sample, "messages", None) or []
+    _patch_messages(messages, source="GSPO rollout")
 
 
 # Apply the system reasoning policy and user-side suffix to every online rollout,
@@ -181,8 +187,26 @@ if not getattr(GSPOGRPOTrainer._compute_rewards_per_func, "_gspo_short_response_
     GSPOGRPOTrainer._compute_rewards_per_func = _compute_rewards_with_short_response_penalty
 
 
-# _evaluate_row currently derives row seeds from the historical base 42.
-# Shift that seed deterministically so the same evaluator can be run three times.
+# Make eval message construction use exactly the same system prompt and user
+# suffix transformation as online rollouts. The only eval-specific work here is
+# converting benchmark image paths into the multimodal user content format.
+def _make_reasoning_eval_messages(row: dict[str, Any]) -> list[dict[str, Any]]:
+    question = str(row["messages"][0]["content"]).replace("<image>", "")
+    content: list[dict[str, Any]] = [
+        {"type": "image", "image": str(path)}
+        for path in row["image_paths"]
+    ]
+    content.append({"type": "text", "text": question})
+    messages: list[dict[str, Any]] = [{"role": "user", "content": content}]
+    _patch_messages(messages, source="GSPO eval")
+    return messages
+
+
+eval_module._make_messages = _make_reasoning_eval_messages
+
+
+# _evaluate_row derives row seeds from the historical base 42. Shift that seed
+# deterministically so the same evaluator can be run with three fixed seeds.
 if not getattr(eval_module._generate_candidates, "_gspo_eval_seed_override", False):
     _original_generate_candidates = eval_module._generate_candidates
 
@@ -194,6 +218,55 @@ if not getattr(eval_module._generate_candidates, "_gspo_eval_seed_override", Fal
 
     _generate_candidates_with_seed_override._gspo_eval_seed_override = True
     eval_module._generate_candidates = _generate_candidates_with_seed_override
+
+
+def _reasoning_eval_temperature() -> float:
+    temperature = float(os.environ.get("GSPO_TEMPERATURE", "1.2"))
+    if temperature <= 0:
+        raise ValueError(f"GSPO_TEMPERATURE must be positive, got {temperature}")
+    return temperature
+
+
+# Pass@1 and Pass@8 must describe the same policy distribution. Generate exactly
+# eight candidates once, at the same temperature as training rollouts. Pass@1 is
+# candidate 0; Pass@8 is whether any of those same eight candidates is correct.
+def _evaluate_reasoning_row(model: Any, processor: Any, judge_url: str, row: dict[str, Any], step: int) -> dict[str, Any]:
+    del step
+    index = int(row["sample_id"].rsplit(":", 1)[1])
+    base_seed = 42 + index * 101
+    candidates = eval_module._generate_candidates(
+        model,
+        processor,
+        row,
+        seed=base_seed,
+        do_sample=True,
+        temperature=_reasoning_eval_temperature(),
+        num_return_sequences=8,
+    )
+    if len(candidates) != 8:
+        raise RuntimeError(f"reasoning eval expected exactly 8 candidates, got {len(candidates)}")
+
+    reference = str(row["messages"][-1]["content"])
+    generations = [
+        eval_module._judge_generation(judge_url, row, reference, candidate)
+        for candidate in candidates
+    ]
+    pass_at_1_generation = generations[0]
+    model_judged_count = sum(item["judge"] == "model" for item in generations)
+    return {
+        "sample_id": row["sample_id"],
+        "task": row["task"],
+        "reference_answer": eval_module.extract_answer(reference),
+        "correct_count": sum(item["correct"] for item in generations),
+        "first_correct": bool(pass_at_1_generation["correct"]),
+        "pass_at_1_generation": pass_at_1_generation,
+        "programmatic_count": len(generations) - model_judged_count,
+        "model_judged_count": model_judged_count,
+        "generations": generations,
+    }
+
+
+eval_module._evaluate_row = _evaluate_reasoning_row
 
 
 def _eval_seeds() -> list[int]:
@@ -277,6 +350,7 @@ def _three_seed_run_distributed_evaluation(*args, **kwargs):
             "dataset": str(eval_data),
             "seeds": seeds,
             "seed_count": len(seeds),
+            "temperature": _reasoning_eval_temperature(),
             "pass_at_1": float(mean_metrics.get("pass_at_1", 0.0)),
             "pass_at_8": float(mean_metrics.get("pass_at_8", 0.0)),
             "coverage": float(mean_metrics.get("coverage", 0.0)),
@@ -292,6 +366,7 @@ def _three_seed_run_distributed_evaluation(*args, **kwargs):
                 {
                     "step": step,
                     "seeds": seeds,
+                    "temperature": summary["temperature"],
                     "pass_at_1_mean": summary["pass_at_1"],
                     "pass_at_8_mean": summary["pass_at_8"],
                 },
