@@ -5,7 +5,7 @@ Side effects applied after ``gspo_wandb_plugin``:
 - append only the two task-specific execution constraints to the user question;
 - assign total reward -0.1 to online responses shorter than 20 response tokens;
 - run each in-training evaluation with three fixed seeds and return their mean;
-- keep evaluation Pass@k out of W&B (evaluation remains on disk/stdout).
+- preserve evaluation Pass@1/Pass@8 logging from ``gspo_wandb_plugin``.
 """
 
 from __future__ import annotations
@@ -16,9 +16,8 @@ from pathlib import Path
 from typing import Any
 
 import scripts.dlc.gspo_trainer_plugin as trainer_plugin
-import scripts.dlc.gspo_wandb_plugin as wandb_plugin
 import scripts.sft.pass_at_8_eval as eval_module
-from scripts.dlc.gspo_trainer_plugin import GSPOEvalCallback, GSPOGRPOTrainer
+from scripts.dlc.gspo_trainer_plugin import GSPOGRPOTrainer
 
 
 # Historical user-side rollout prompts. Strip them before applying the new
@@ -305,8 +304,3 @@ def _three_seed_run_distributed_evaluation(*args, **kwargs):
 
 
 trainer_plugin.run_distributed_evaluation = _three_seed_run_distributed_evaluation
-
-
-# Keep evaluation observational: artifacts/stdout only, no eval/pass@k W&B series.
-if hasattr(wandb_plugin, "_original_eval_run"):
-    GSPOEvalCallback._run = wandb_plugin._original_eval_run
