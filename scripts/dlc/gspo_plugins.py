@@ -17,3 +17,6 @@ import scripts.dlc.gspo_eval_cuda_cleanup_plugin  # noqa: F401,E402
 # Final eval-only guards: force the exact clean 50-row set and route terminal
 # answers through the repository's existing evaluator rules.
 import scripts.dlc.gspo_reasoning_eval_fix_plugin  # noqa: F401,E402
+
+# Apply final W&B history-axis fix after all eval wrappers are installed.
+import scripts.dlc.gspo_wandb_timeseries_fix  # noqa: F401,E402
