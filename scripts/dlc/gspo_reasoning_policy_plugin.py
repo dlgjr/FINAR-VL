@@ -1,7 +1,8 @@
 """Reasoning-policy controls for the 4-GPU Pass@8 GSPO run.
 
 Side effects applied after ``gspo_wandb_plugin``:
-- strengthen rollout prompting: read image -> analyze/calculate -> final answer;
+- put the generic calculation/reasoning policy in the system role for every rollout;
+- append only the two task-specific execution constraints to the user question;
 - assign total reward -0.1 to online responses shorter than 20 response tokens;
 - run each in-training evaluation with three fixed seeds and return their mean;
 - keep evaluation Pass@k out of W&B (evaluation remains on disk/stdout).
@@ -20,11 +21,13 @@ import scripts.sft.pass_at_8_eval as eval_module
 from scripts.dlc.gspo_trainer_plugin import GSPOEvalCallback, GSPOGRPOTrainer
 
 
+# Historical user-side rollout prompts. Strip them before applying the new
+# system/user split so dynamic resampling cannot accumulate conflicting rules.
 _OLD_PROMPT = (
     "\n请先独立分析问题，结合相关文本、表格和图像信息，完成必要的推理、计算和结果核对后再作答。不要直接猜测答案。"
     "\n请在回复最后一行按“答案：具体答案”的格式给出最终答案。"
 )
-_NEW_PROMPT = (
+_PREVIOUS_PROMPT = (
     "\n请严格按以下顺序作答："
     "\n1. 先仔细读取并理解图像、表格和文本中的相关信息，明确需要使用的数据；"
     "\n2. 再基于读取到的信息进行分析、推理和必要的计算，并核对结果；"
@@ -33,35 +36,106 @@ _NEW_PROMPT = (
     "\n请在回复最后一行按“答案：具体答案”的格式给出最终答案。"
 )
 
+_SYSTEM_PROMPT = """请仔细完成用户给出的计算题，并给出每一步的详细计算步骤，严禁直接输出答案。
 
-def _replace_prompt_text(text: str) -> str:
-    if _NEW_PROMPT in text:
-        return text
-    if _OLD_PROMPT in text:
-        return text.replace(_OLD_PROMPT, _NEW_PROMPT, 1)
-    return text + _NEW_PROMPT
+1. 先理解题意，明确题目要求计算的目标是什么。
+
+2. 如果题目已经明确描述了计算关系，必须首先严格按照题目原意写出计算公式。
+不得自行改变题目给出的运算关系，不得自行增加、删除或替换计算指标。
+
+3. 写出完成这个计算实际需要的数据。
+如果题目包含图片、表格或图表，请从中读取与当前计算直接相关的数据；
+如果没有图片，则从题干或文本中提取所需数据。
+
+只允许使用前面计算公式中出现的指标。
+不要读取、列举或计算题目没有要求的其他指标。
+不要用名称相似的指标替代题目明确指定的指标。
+如果题目已经直接给出了某个计算所需指标的数值，请直接使用该数值，不要根据其他相关指标重新推导或替代它。
+
+4. 将提取的数据代入前面确定的公式，并展示必要的计算过程。
+计算过程中必须保持与题目原始计算关系一致。
+
+5. 在完成前面的数据提取和计算步骤之前，不要直接输出最终答案。
+
+最后一行严格按照以下格式输出：
+
+最终答案：具体答案"""
+
+_USER_SUFFIX_SENTENCES = (
+    "严禁直接给出答案，必须给出计算的相关步骤。",
+    "只使用完成用户所问计算直接需要的数据；即使图片中存在其他指标，也不要把它们加入计算过程。",
+)
+_USER_SUFFIX = "\n" + "\n".join(_USER_SUFFIX_SENTENCES)
+
+
+def _clean_user_text(text: str) -> str:
+    cleaned = text
+    for legacy in (_OLD_PROMPT, _PREVIOUS_PROMPT):
+        cleaned = cleaned.replace(legacy, "")
+    # Make the patch idempotent across repeated generation/resampling calls.
+    for sentence in _USER_SUFFIX_SENTENCES:
+        cleaned = cleaned.replace("\n" + sentence, "")
+        cleaned = cleaned.replace(sentence, "")
+    return cleaned.rstrip()
+
+
+def _patch_user_text(text: str) -> str:
+    return _clean_user_text(text) + _USER_SUFFIX
+
+
+def _ensure_system_prompt(messages: list[Any]) -> None:
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "system":
+            continue
+        content = message.get("content", "")
+        if isinstance(content, str):
+            if _SYSTEM_PROMPT not in content:
+                message["content"] = _SYSTEM_PROMPT + ("\n\n" + content if content.strip() else "")
+            return
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
+                    if _SYSTEM_PROMPT not in item["text"]:
+                        item["text"] = _SYSTEM_PROMPT + ("\n\n" + item["text"] if item["text"].strip() else "")
+                    return
+            content.insert(0, {"type": "text", "text": _SYSTEM_PROMPT})
+            return
+        message["content"] = _SYSTEM_PROMPT
+        return
+
+    messages.insert(0, {"role": "system", "content": _SYSTEM_PROMPT})
 
 
 def _patch_sample_prompt(sample: Any) -> None:
     messages = getattr(sample, "messages", None) or []
+    if not isinstance(messages, list):
+        raise TypeError(f"sample.messages must be a list, got {type(messages)!r}")
+
+    _ensure_system_prompt(messages)
+
     for message in reversed(messages):
         if not isinstance(message, dict) or message.get("role") != "user":
             continue
         content = message.get("content", "")
         if isinstance(content, str):
-            message["content"] = _replace_prompt_text(content)
+            message["content"] = _patch_user_text(content)
         elif isinstance(content, list):
             for item in reversed(content):
                 if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
-                    item["text"] = _replace_prompt_text(item["text"])
+                    item["text"] = _patch_user_text(item["text"])
                     break
             else:
-                content.append({"type": "text", "text": _NEW_PROMPT.lstrip("\n")})
+                content.append({"type": "text", "text": _USER_SUFFIX.lstrip("\n")})
+        else:
+            raise TypeError(f"user message content must be str/list, got {type(content)!r}")
         break
+    else:
+        raise RuntimeError("GSPO rollout sample has no user message to patch")
 
 
-# Apply the strengthened prompt to every online rollout, including dynamic resamples.
-if not getattr(GSPOGRPOTrainer._generate_completions, "_gspo_read_analyze_calculate_prompt", False):
+# Apply the system reasoning policy and user-side suffix to every online rollout,
+# including dynamic resamples.
+if not getattr(GSPOGRPOTrainer._generate_completions, "_gspo_system_reasoning_prompt", False):
     _original_generate_completions = GSPOGRPOTrainer._generate_completions
 
     def _generate_completions_with_reasoning_prompt(self, samples):
@@ -69,7 +143,7 @@ if not getattr(GSPOGRPOTrainer._generate_completions, "_gspo_read_analyze_calcul
             _patch_sample_prompt(sample)
         return _original_generate_completions(self, samples)
 
-    _generate_completions_with_reasoning_prompt._gspo_read_analyze_calculate_prompt = True
+    _generate_completions_with_reasoning_prompt._gspo_system_reasoning_prompt = True
     GSPOGRPOTrainer._generate_completions = _generate_completions_with_reasoning_prompt
 
 
