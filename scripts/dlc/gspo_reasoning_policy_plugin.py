@@ -6,6 +6,7 @@ Side effects applied after ``gspo_wandb_plugin``:
 - assign total reward -0.1 to online responses shorter than 20 response tokens;
 - make in-training eval use the exact same reasoning prompt as online rollouts;
 - derive Pass@1 from the first sample of the same 8-way rollout used for Pass@8;
+- score reasoning eval with the same terminal-answer programmatic verifier as training;
 - run each in-training evaluation with three fixed seeds and return their mean;
 - preserve evaluation Pass@1/Pass@8 logging from ``gspo_wandb_plugin``.
 """
@@ -227,11 +228,23 @@ def _reasoning_eval_temperature() -> float:
     return temperature
 
 
+def _judge_reasoning_generation(row: dict[str, Any], reference: str, candidate: str) -> dict[str, Any]:
+    # Use the same terminal-answer verifier as GSPO training reward. This avoids
+    # false positives from a correct number appearing only inside the reasoning body.
+    correct = eval_module._benchmark_programmatic_judge(row, reference, candidate)
+    return {
+        "text": candidate,
+        "extracted_answer": eval_module.extract_answer(candidate),
+        "correct": bool(correct),
+        "judge": "programmatic_reward",
+    }
+
+
 # Pass@1 and Pass@8 must describe the same policy distribution. Generate exactly
 # eight candidates once, at the same temperature as training rollouts. Pass@1 is
 # candidate 0; Pass@8 is whether any of those same eight candidates is correct.
 def _evaluate_reasoning_row(model: Any, processor: Any, judge_url: str, row: dict[str, Any], step: int) -> dict[str, Any]:
-    del step
+    del judge_url, step
     index = int(row["sample_id"].rsplit(":", 1)[1])
     base_seed = 42 + index * 101
     candidates = eval_module._generate_candidates(
@@ -248,20 +261,20 @@ def _evaluate_reasoning_row(model: Any, processor: Any, judge_url: str, row: dic
 
     reference = str(row["messages"][-1]["content"])
     generations = [
-        eval_module._judge_generation(judge_url, row, reference, candidate)
+        _judge_reasoning_generation(row, reference, candidate)
         for candidate in candidates
     ]
     pass_at_1_generation = generations[0]
-    model_judged_count = sum(item["judge"] == "model" for item in generations)
+    correct_count = sum(item["correct"] for item in generations)
     return {
         "sample_id": row["sample_id"],
         "task": row["task"],
         "reference_answer": eval_module.extract_answer(reference),
-        "correct_count": sum(item["correct"] for item in generations),
+        "correct_count": correct_count,
         "first_correct": bool(pass_at_1_generation["correct"]),
         "pass_at_1_generation": pass_at_1_generation,
-        "programmatic_count": len(generations) - model_judged_count,
-        "model_judged_count": model_judged_count,
+        "programmatic_count": len(generations),
+        "model_judged_count": 0,
         "generations": generations,
     }
 
