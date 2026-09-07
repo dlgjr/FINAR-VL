@@ -4,10 +4,9 @@ This module is imported last by ``gspo_plugins``. It intentionally does two
 things only:
 1. force the reasoning eval to the exact 50-row clean benchmark with no accidental
    20-sample cap;
-2. extract only the terminal answer from a reasoning response, then feed that
-   terminal answer into the repository's existing ``programmatic_judge`` rules.
-
-Training reward semantics remain the canonical rules in ``scripts.rl.gspo_reward``.
+2. extract only the terminal answer from a reasoning response, then use the same
+   canonical numeric reward semantics as training for numeric questions while
+   preserving the repository's existing deterministic rules for non-numeric tasks.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ from pathlib import Path
 
 import scripts.dlc.gspo_reasoning_policy_plugin as reasoning_policy
 import scripts.sft.pass_at_8_eval as eval_module
-from scripts.rl.gspo_reward import extract_final_answer
+from scripts.rl.gspo_reward import extract_final_answer, score_programmatic_answer
 
 
 ROOT = Path(os.environ.get("QWEN3VL_ROOT", "/mnt/nas/duolg/qwen3vl"))
@@ -42,7 +41,7 @@ os.environ["GSPO_EVAL_MAX_SAMPLES"] = str(EXPECTED_ROWS)
 
 
 def _judge_reasoning_generation(row: dict, reference: str, candidate: str) -> dict:
-    """Judge only the terminal answer using the repository's existing rules."""
+    """Judge only the terminal answer, sharing numeric semantics with training."""
     verifier_type = eval_module._benchmark_verifier_type(row, reference)
     terminal = extract_final_answer(candidate, verifier_type)
 
@@ -50,19 +49,26 @@ def _judge_reasoning_generation(row: dict, reference: str, candidate: str) -> di
         correct = False
         extracted = eval_module.extract_answer(candidate)
         judge = "programmatic_terminal_missing"
+    elif verifier_type in {"numeric", "numeric_final", "composite_numeric"}:
+        reference_answer = eval_module.extract_answer(reference)
+        question = str(row.get("messages", [{}])[0].get("content", ""))
+        score = score_programmatic_answer(
+            terminal,
+            [reference_answer],
+            verifier_type,
+            question=question,
+        )
+        correct = score >= 1.0 - 1e-12
+        extracted = terminal
+        judge = "programmatic_reward_precision"
     else:
-        # pass_at_8_eval.programmatic_judge is the existing benchmark rule set.
-        # Feeding only the extracted terminal answer avoids its historical
-        # whole-response numeric scan while preserving its established numeric,
-        # choice, page, date, JSON, OCR and extraction semantics.
+        # Preserve the repository's existing deterministic non-numeric rules.
         verdict = eval_module.programmatic_judge(
             reference,
             terminal,
             task=str(row.get("task", "")),
         )
         if verdict is None:
-            # Existing deterministic benchmark fallback for cases not covered by
-            # programmatic_judge. Keep the same terminal-only input.
             verdict = eval_module._benchmark_programmatic_judge(row, reference, terminal)
             judge = "programmatic_reward_fallback"
         else:
@@ -85,6 +91,6 @@ reasoning_policy._judge_reasoning_generation = _judge_reasoning_generation
 if reasoning_policy._rank() == 0:
     print(
         f"[GSPO_EVAL_CONFIG] dataset={EVAL_DATA} rows={row_count} "
-        f"max_samples={EXPECTED_ROWS} verifier=existing_programmatic_terminal_only",
+        f"max_samples={EXPECTED_ROWS} verifier=terminal_shared_numeric_precision_window",
         flush=True,
     )
