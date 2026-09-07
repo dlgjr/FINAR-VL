@@ -34,11 +34,17 @@ export GSPO_MAX_RESAMPLE_TIMES=3
 export GSPO_LEARNING_RATE=1e-6
 export GSPO_BETA=0.01
 export GSPO_ENTROPY_COEF=0.001
-export GSPO_MAX_GRAD_NORM=0.5
+export GSPO_MAX_GRAD_NORM=1.0
+export GSPO_EPSILON=0.03
+export GSPO_EPSILON_HIGH=0.05
 
 export GSPO_STEPS_PER_GENERATION=2
 export GSPO_NUM_ITERATIONS=2
 export GSPO_TEMPERATURE=1.2
+
+# ===== Checkpoint / logging =====
+export GSPO_SAVE_TOTAL_LIMIT=30
+export GSPO_LOGGING_STEPS=1
 
 # ===== Gold injection =====
 export GSPO_GOLD_INJECT=true
