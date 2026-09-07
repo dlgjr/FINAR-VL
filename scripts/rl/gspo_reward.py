@@ -6,7 +6,7 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Callable, Mapping, Sequence
 
 
@@ -24,6 +24,32 @@ _NUMBER_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 _EDGE_PUNCTUATION = " \t\r\n.,;:!?，。；：！？、\"'“”‘’`()[]{}<>《》"
+_PRECISION_WORDS = {
+    "zero": 0,
+    "one": 1,
+    "single": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "零": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+}
 
 
 @dataclass(frozen=True)
@@ -127,6 +153,8 @@ def extract_final_answer(completion: Any, verifier_type: str = "") -> str | None
     if len(lines) == 1:
         return last_line or None
     return None
+
+
 def _fold_text(value: str) -> str:
     value = unicodedata.normalize("NFKC", str(value)).strip()
     value = value.replace("，", ",").replace("、", ",").replace("；", ";")
@@ -353,6 +381,81 @@ def _decimal_setting(spec: Mapping[str, Any] | None, key: str) -> Decimal | None
     return value
 
 
+def _precision_token(value: str) -> int | None:
+    token = _fold_text(value).casefold()
+    if token.isdigit():
+        return int(token)
+    return _PRECISION_WORDS.get(token)
+
+
+def _requested_decimal_places(question: str) -> int | None:
+    text = unicodedata.normalize("NFKC", str(question or ""))
+    folded = text.casefold()
+
+    if re.search(r"\b(?:nearest|closest)\s+(?:whole\s+number|integer)\b", folded):
+        return 0
+    if re.search(r"(?:保留|精确到|精确至|四舍五入(?:到|至)?)\s*(?:为|至)?\s*整数|取整", text):
+        return 0
+
+    match = re.search(
+        r"(?:保留|精确到|精确至|四舍五入(?:到|至)?)\s*([0-9一二两三四五六七八九十]+)\s*位小数",
+        text,
+    )
+    if match:
+        return _precision_token(match.group(1))
+
+    match = re.search(
+        r"\b(?:to|at)\s+(?:the\s+)?(single|one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+decimal\s+places?\b",
+        folded,
+    )
+    if match:
+        return _precision_token(match.group(1))
+    return None
+
+
+def _within_precision_window(predicted: Decimal, expected: Decimal, places: int) -> bool:
+    quantum = Decimal(1).scaleb(-places)
+    predicted = predicted.quantize(quantum, rounding=ROUND_HALF_UP)
+    expected = expected.quantize(quantum, rounding=ROUND_HALF_UP)
+    return abs(predicted - expected) <= Decimal(2) * quantum
+
+
+def _precision_window_match(
+    pred: NumericValue,
+    gold: NumericValue,
+    question: str,
+    spec: Mapping[str, Any] | None = None,
+) -> bool | None:
+    # Explicit per-example tolerances keep their existing semantics.
+    if _decimal_setting(spec, "abs_tol") is not None or _decimal_setting(spec, "rel_tol") is not None:
+        return None
+
+    places = _requested_decimal_places(question)
+    if places is None:
+        return None
+
+    # When gold omits a unit, treat a candidate's visible unit as presentation
+    # only. This keeps answers such as 26.74% vs gold 26.74 and 15.1亿元 vs
+    # gold 15.1 valid, while still applying the requested decimal-place window.
+    if gold.dimension == "scalar" and gold.unit == "":
+        return _within_precision_window(pred.value, gold.value, places)
+
+    # For explicit-unit gold, an unlabeled candidate may be written either in
+    # the gold display unit or in canonical/base units. Preserve that existing
+    # compatibility, but compare in the gold display unit before applying the
+    # decimal-place window.
+    if pred.dimension == "scalar" and pred.unit == "":
+        if _within_precision_window(pred.value, gold.value, places):
+            return True
+        return _within_precision_window(pred.value / gold.factor, gold.value, places)
+
+    if pred.dimension != gold.dimension:
+        return False
+
+    pred_in_gold_unit = pred.base_value / gold.factor
+    return _within_precision_window(pred_in_gold_unit, gold.value, places)
+
+
 def _numeric_tolerance(gold: NumericValue, spec: Mapping[str, Any] | None = None) -> tuple[Decimal, Decimal]:
     abs_override = _decimal_setting(spec, "abs_tol")
     rel_override = _decimal_setting(spec, "rel_tol")
@@ -371,7 +474,16 @@ def _numeric_tolerance(gold: NumericValue, spec: Mapping[str, Any] | None = None
     return abs_override if abs_override is not None else default_abs, rel_override if rel_override is not None else default_rel
 
 
-def _numeric_match(pred: NumericValue, gold: NumericValue, spec: Mapping[str, Any] | None = None) -> bool:
+def _numeric_match(
+    pred: NumericValue,
+    gold: NumericValue,
+    spec: Mapping[str, Any] | None = None,
+    question: str = "",
+) -> bool:
+    precision_match = _precision_window_match(pred, gold, question, spec)
+    if precision_match is not None:
+        return precision_match
+
     abs_tol, rel_tol = _numeric_tolerance(gold, spec)
     if pred.dimension == "scalar" and pred.unit == "":
         targets = {gold.base_value, gold.value}
@@ -398,9 +510,8 @@ def score_programmatic_answer(
     question: str = "",
     gold_numeric: Sequence[Mapping[str, Any]] | None = None,
 ) -> float:
-    """Score the last prefixed answer using deterministic verifier semantics."""
+    """Score the terminal answer using deterministic verifier semantics."""
 
-    del question
     answer = extract_final_answer(completion, verifier_type)
     if answer is None:
         return -0.1
@@ -439,7 +550,10 @@ def score_programmatic_answer(
                 if index in matched_gold:
                     continue
                 candidates = [(spec, gold), *aliases]
-                if any(_numeric_match(pred, candidate, candidate_spec) for candidate_spec, candidate in candidates):
+                if any(
+                    _numeric_match(pred, candidate, candidate_spec, question)
+                    for candidate_spec, candidate in candidates
+                ):
                     matched_gold.add(index)
                     matched_pred += 1
                     break
