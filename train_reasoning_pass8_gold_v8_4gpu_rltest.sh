@@ -143,9 +143,32 @@ fi
 echo "DATA_ROWS=$(wc -l < "$REASONING_RL_DATA" | tr -d ' ')"
 echo "EVAL_ROWS=$EVAL_ROWS"
 
-bash "$ROOT/scripts/dlc/start_gspo_reasoning.sh" \
-  2>&1 | tee "$REASONING_RL_OUTPUT_DIR/train.log"
+TRAIN_SESSION_PID=""
+kill_training_session() {
+  local signal="$1"
+  local pids
+  [[ -n "$TRAIN_SESSION_PID" ]] || return 0
+  pids="$(ps -eo pid=,sid= | awk -v sid="$TRAIN_SESSION_PID" '$2 == sid {print $1}')"
+  [[ -n "$pids" ]] && kill "-$signal" $pids 2>/dev/null || true
+}
+cleanup_training() {
+  [[ -n "$TRAIN_SESSION_PID" ]] || return 0
+  kill_training_session TERM
+  for _ in $(seq 1 10); do
+    ps -eo sid= | awk -v sid="$TRAIN_SESSION_PID" '$1 == sid {found=1} END {exit !found}' || return 0
+    sleep 0.5
+  done
+  kill_training_session KILL
+}
+trap cleanup_training INT TERM EXIT
 
-rc=${PIPESTATUS[0]}
+setsid bash -c 'set -o pipefail; bash "$1" 2>&1 | tee "$2"' _ \
+  "$ROOT/scripts/dlc/start_gspo_reasoning.sh" "$REASONING_RL_OUTPUT_DIR/train.log" &
+TRAIN_SESSION_PID=$!
+wait "$TRAIN_SESSION_PID"
+rc=$?
+cleanup_training
+trap - INT TERM EXIT
+
 echo "training_exit_code=$rc"
 exit "$rc"
