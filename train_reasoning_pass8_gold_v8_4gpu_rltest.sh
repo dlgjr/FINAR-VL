@@ -42,6 +42,10 @@ export GSPO_MAX_RESAMPLE_TIMES=3
 
 export GSPO_LEARNING_RATE=1e-6
 export GSPO_BETA=0.01
+# Refresh KL reference after each 8-step rollout cycle; alpha=1 uses the previous cycle policy exactly.
+export GSPO_SYNC_REF_MODEL=true
+export GSPO_REF_MODEL_SYNC_STEPS=8
+export GSPO_REF_MODEL_MIXUP_ALPHA=1.0
 export GSPO_ENTROPY_COEF=0.001
 export GSPO_MAX_GRAD_NORM=1.0
 export GSPO_EPSILON=0.03
