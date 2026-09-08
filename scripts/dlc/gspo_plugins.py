@@ -27,3 +27,6 @@ import scripts.dlc.gspo_wandb_run_compat_plugin  # noqa: F401,E402
 
 # Final observability patch: >0.5 rollout success threshold and concise stdout.
 import scripts.dlc.gspo_console_plugin  # noqa: F401,E402
+
+# Keep full resume state only in the newest step checkpoint.
+import scripts.dlc.gspo_latest_state_plugin  # noqa: F401,E402
