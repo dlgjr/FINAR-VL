@@ -52,10 +52,10 @@ export GSPO_TEMPERATURE=1.2
 export GSPO_LR_DECAY_STEPS=1000000000
 
 # ===== Checkpoint / logging =====
-# One W&B train point per 32-completion generation batch; fixed eval runs on save.
+# One W&B train point per 32-completion generation batch; fixed eval every 40 steps via save.
 export GSPO_LOGGING_STEPS=8
-export GSPO_SAVE_STEPS=1000
-export GSPO_EVAL_STEPS=1000
+export GSPO_SAVE_STEPS=40
+export GSPO_EVAL_STEPS=40
 export GSPO_SAVE_TOTAL_LIMIT=30
 
 # ===== Gold injection =====
