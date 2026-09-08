@@ -1,8 +1,8 @@
 """Post-evaluation CUDA cleanup for colocated GSPO/vLLM training.
 
 Runs after the complete distributed evaluation returns and before training resumes.
-The cleanup is intentionally narrow: synchronize CUDA work, release PyTorch's
-unused cache, synchronize all ranks, then synchronize CUDA once more.
+The cleanup is intentionally narrow: collect dead Python objects, release PyTorch's
+unused CUDA cache, synchronize all ranks, then synchronize CUDA once more.
 """
 
 from __future__ import annotations
@@ -16,8 +16,10 @@ if not getattr(trainer_plugin.run_distributed_evaluation, "_gspo_post_eval_cuda_
     def _run_with_post_eval_cuda_cleanup(*args, **kwargs):
         metrics = _original_run_distributed_evaluation(*args, **kwargs)
 
+        import gc
         import torch
 
+        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
