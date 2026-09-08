@@ -44,6 +44,21 @@ def _checkpoint_step(path: Path) -> int | None:
     return int(suffix) if suffix.isdigit() else None
 
 
+# start_gspo.sh historically passes --save_only_model true. Flip the live
+# TrainingArguments before the first checkpoint so the newest checkpoint has
+# optimizer/scheduler/RNG/trainer state and can be resumed exactly.
+_original_on_train_begin = GSPOEvalCallback.on_train_begin
+
+
+def _on_train_begin_enable_resume_state(self, args, state, control, **kwargs):
+    args.save_only_model = False
+    self.trainer.args.save_only_model = False
+    return _original_on_train_begin(self, args, state, control, **kwargs)
+
+
+GSPOEvalCallback.on_train_begin = _on_train_begin_enable_resume_state
+
+
 def _on_save_keep_latest_state(self, args, state, control, **kwargs):
     # Preserve the existing save-triggered fixed evaluation.
     self._run(state, control, force=True)
