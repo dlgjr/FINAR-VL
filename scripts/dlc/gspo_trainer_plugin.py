@@ -272,9 +272,10 @@ class GSPOGRPOTrainer(GRPOTrainer):
 
         for attempt in range(self.max_resample_times + 1):
             all_samples = self._gather_samples_equal_size(current_samples)
-            all_samples, current_rewards, _ = self._inject_gold_into_all_failed_groups(
-                all_samples, current_rewards
-            )
+            if attempt == self.max_resample_times:
+                all_samples, current_rewards, _ = self._inject_gold_into_all_failed_groups(
+                    all_samples, current_rewards
+                )
 
             rewards_std = self.compute_std(current_samples, current_rewards)
             valid_mask = rewards_std > 0
