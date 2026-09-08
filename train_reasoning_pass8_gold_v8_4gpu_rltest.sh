@@ -79,7 +79,8 @@ export GSPO_USE_VLLM=true
 export GSPO_VLLM_MODE=colocate
 export GSPO_VLLM_TENSOR_PARALLEL_SIZE=4
 export GSPO_VLLM_MAX_NUM_SEQS=4
-export GSPO_VLLM_GPU_MEMORY_UTILIZATION=0.30
+# Leave extra headroom for optimizer state and repeated eval -> vLLM sleep/wake cycles.
+export GSPO_VLLM_GPU_MEMORY_UTILIZATION=0.20
 export GSPO_VLLM_ENFORCE_EAGER=true
 export GSPO_VLLM_MM_PROCESSOR_CACHE_GB=0
 export GSPO_VLLM_SLEEP_LEVEL=1
