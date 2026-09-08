@@ -48,10 +48,15 @@ export GSPO_EPSILON_HIGH=0.05
 export GSPO_STEPS_PER_GENERATION=8
 export GSPO_NUM_ITERATIONS=1
 export GSPO_TEMPERATURE=1.2
+# start_gspo.sh uses a constant scheduler; keep the legacy callback decay out of this run.
+export GSPO_LR_DECAY_STEPS=1000000000
 
 # ===== Checkpoint / logging =====
+# One W&B train point per 32-completion generation batch; fixed eval runs on save.
+export GSPO_LOGGING_STEPS=8
+export GSPO_SAVE_STEPS=1000
+export GSPO_EVAL_STEPS=1000
 export GSPO_SAVE_TOTAL_LIMIT=30
-export GSPO_LOGGING_STEPS=1
 
 # ===== Gold injection =====
 export GSPO_GOLD_INJECT=true
@@ -99,6 +104,9 @@ echo "GPUS=$GSPO_TRAIN_GPUS"
 echo "NPROC=$GSPO_NPROC_PER_NODE"
 echo "GENERATIONS=$GSPO_NUM_GENERATIONS"
 echo "GENERATION_BATCH=$GSPO_GENERATION_BATCH_SIZE  # must be 1*4*8=32"
+echo "NUM_ITERATIONS=$GSPO_NUM_ITERATIONS"
+echo "SAVE_EVAL_STEPS=$GSPO_SAVE_STEPS"
+echo "LOGGING_STEPS=$GSPO_LOGGING_STEPS"
 echo "LENGTH_REWARD=<${GSPO_REASONING_DIRECT_TOKENS}: -${GSPO_REASONING_LENGTH_PENALTY}, >${GSPO_REASONING_LONG_TOKENS}: -${GSPO_REASONING_LENGTH_PENALTY}, shortest correct: +${GSPO_REASONING_SHORTEST_BONUS}"
 echo "EVAL_DATA=$GSPO_EVAL_DATA"
 echo "EVAL_SEEDS=$GSPO_EVAL_SEEDS"
