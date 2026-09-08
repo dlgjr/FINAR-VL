@@ -70,7 +70,7 @@ if [[ -n "$GSPO_SOURCE_DATA" ]]; then
       if [[ -f "$DATA_READY" ]]; then break; fi
       sleep 1
       if (( attempt % 30 == 0 )); then echo "waiting_for_prepared_data seconds=$attempt node_rank=$NODE_RANK"; fi
-      if (( attempt == 1800 )); then echo "timed out waiting for prepared GSPO data: $DATA_READY" >&2; exit 1; fi
+      if (( attempt == 1800 )); then echo "timed out waiting for prepared GSPO data: $GSPO_DATA" >&2; exit 1; fi
     done
   fi
 fi
@@ -94,7 +94,7 @@ else
     if [[ -f "$VALIDATION_READY" ]]; then break; fi
     sleep 1
     if (( attempt % 30 == 0 )); then echo "waiting_for_data_validation seconds=$attempt node_rank=$NODE_RANK"; fi
-    if (( attempt == 1800 )); then echo "timed out waiting for GSPO data validation: $VALIDATION_READY" >&2; exit 1; fi
+    if (( attempt == 1800 )); then echo "timed out waiting for data validation: $VALIDATION_READY" >&2; exit 1; fi
   done
 fi
 
@@ -187,7 +187,7 @@ ARGS=(
   --save_strategy steps
   --save_steps "$GSPO_SAVE_STEPS"
   --save_total_limit "$GSPO_SAVE_TOTAL_LIMIT"
-  --save_only_model true
+  --save_only_model false
   --logging_steps "$GSPO_LOGGING_STEPS"
   --log_entropy "$GSPO_LOG_ENTROPY"
   --eval_strategy no
