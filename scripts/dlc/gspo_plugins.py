@@ -21,5 +21,9 @@ import scripts.dlc.gspo_reasoning_eval_fix_plugin  # noqa: F401,E402
 # Apply final W&B history-axis fix after all eval wrappers are installed.
 import scripts.dlc.gspo_wandb_timeseries_fix  # noqa: F401,E402
 
+# W&B Run compatibility: keep axis state outside the immutable Run object and
+# print the distributed eval summary only on rank 0.
+import scripts.dlc.gspo_wandb_run_compat_plugin  # noqa: F401,E402
+
 # Final observability patch: >0.5 rollout success threshold and concise stdout.
 import scripts.dlc.gspo_console_plugin  # noqa: F401,E402
