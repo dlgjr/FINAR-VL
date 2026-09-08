@@ -1,16 +1,39 @@
-"""Final W&B history-axis and reasoning-length fixes for GSPO.
+"""Final W&B axis and concise reasoning diagnostics for GSPO.
 
-Imported after gspo_wandb_plugin. It does not change reward/loss/Gold behavior.
+Imported after gspo_wandb_plugin. It changes observability only.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import scripts.dlc.gspo_wandb_plugin as wandb_plugin
 from scripts.dlc.gspo_trainer_plugin import GSPOEvalCallback, GSPOGRPOTrainer
+
+
+# Keep the selected-batch reward diagnostics, but replace the misleading
+# post-selection zero-std panel with raw pre-resample group diagnostics.
+wandb_plugin.TRAIN_WANDB_KEYS.discard("frac_reward_zero_std")
+wandb_plugin.TRAIN_WANDB_KEYS.update(
+    {
+        "learning_rate",
+        "rollout/raw_zero_std_group_ratio",
+        "sampling/resample_rounds",
+    }
+)
+
+_METRIC_ALIASES = {
+    "rollout/pass8": "rollout/raw_pass_at_8",
+    "rollout/positive_per_8": "rollout/raw_positive_per_8",
+    "intervention/gold_group_ratio": "intervention/gold_fallback_group_ratio",
+}
+
+
+def _wandb_key(raw_key: str) -> str:
+    return _METRIC_ALIASES.get(raw_key, raw_key)
 
 
 def _tokenizer(trainer):
@@ -31,17 +54,11 @@ def _completion_text(trainer, sample) -> str:
     """Decode the actual online response, preferring response_token_ids."""
     token_ids = getattr(sample, "response_token_ids", None)
     if token_ids is not None:
-        try:
-            ids = token_ids.tolist() if hasattr(token_ids, "tolist") else list(token_ids)
-        except Exception:
-            ids = []
+        ids = token_ids.tolist() if hasattr(token_ids, "tolist") else list(token_ids)
         if ids:
             tokenizer = _tokenizer(trainer)
             if tokenizer is not None and hasattr(tokenizer, "decode"):
-                try:
-                    return str(tokenizer.decode(ids, skip_special_tokens=True))
-                except Exception:
-                    pass
+                return str(tokenizer.decode(ids, skip_special_tokens=True))
 
     for attr in ("response", "completion"):
         value = getattr(sample, attr, None)
@@ -71,33 +88,90 @@ def _reasoning_token_count(trainer, sample) -> int:
 
     tokenizer = _tokenizer(trainer)
     if tokenizer is not None and hasattr(tokenizer, "encode"):
-        try:
-            return len(tokenizer.encode(text, add_special_tokens=False))
-        except Exception:
-            pass
+        return len(tokenizer.encode(text, add_special_tokens=False))
 
     compact = "".join(text.split())
     return max(1, (len(compact) + 1) // 2)
 
 
-# Existing too-short-ratio code resolves this module global dynamically.
+def _reasoning_too_short_ratio(trainer, samples) -> float:
+    import torch
+
+    # This is observational only. Match the <100-token length-shaping boundary,
+    # while GSPO_REASONING_SHORT_TOKENS=0 keeps the separate hard penalty disabled.
+    threshold = int(os.environ.get("GSPO_REASONING_DIRECT_TOKENS", "100"))
+    flags = [float(_reasoning_token_count(trainer, sample) < threshold) for sample in samples]
+    if not flags:
+        return 0.0
+    local = torch.tensor(flags, dtype=torch.float32, device=trainer.accelerator.device)
+    gathered = trainer.accelerator.gather_for_metrics(local)
+    return float(gathered.float().mean().item())
+
+
+# Existing rollout wrappers resolve these module globals dynamically.
 wandb_plugin._reasoning_token_count = _reasoning_token_count
+wandb_plugin._reasoning_too_short_ratio = _reasoning_too_short_ratio
 
 
-# Also attach the ratio directly to raw rollout metrics. The existing concise
-# recorder may set the same key later; dict overwrite is harmless and identical.
-if not getattr(GSPOGRPOTrainer._initial_rollout_metrics, "_gspo_short_ratio_v3", False):
-    _original_initial_rollout_metrics = GSPOGRPOTrainer._initial_rollout_metrics
+# Attach raw zero-variance ratio and the reasoning-short ratio to the initial
+# policy rollout, before resampling and before Gold fallback.
+_original_initial_rollout_metrics = GSPOGRPOTrainer._initial_rollout_metrics
 
-    def _initial_rollout_metrics_v3(self, rewards_per_func):
-        metrics = _original_initial_rollout_metrics(self, rewards_per_func)
-        too_short = self.__dict__.get("_gspo_reasoning_too_short_ratio")
-        if too_short is not None:
-            metrics["reasoning/too_short_ratio"] = float(too_short)
-        return metrics
 
-    _initial_rollout_metrics_v3._gspo_short_ratio_v3 = True
-    GSPOGRPOTrainer._initial_rollout_metrics = _initial_rollout_metrics_v3
+def _initial_rollout_metrics_v4(self, rewards_per_func):
+    import torch
+
+    metrics = _original_initial_rollout_metrics(self, rewards_per_func)
+    rewards = self._weighted_rewards(rewards_per_func).float().view(-1, 8)
+    finite = torch.isfinite(rewards).all(dim=1)
+    finite_rewards = rewards[finite]
+    metrics["rollout/raw_zero_std_group_ratio"] = (
+        float((finite_rewards.max(dim=1).values == finite_rewards.min(dim=1).values).float().mean().item())
+        if finite_rewards.numel()
+        else 0.0
+    )
+    too_short = self.__dict__.get("_gspo_reasoning_too_short_ratio")
+    if too_short is not None:
+        metrics["reasoning/too_short_ratio"] = float(too_short)
+    return metrics
+
+
+_initial_rollout_metrics_v4._gspo_short_ratio_v4 = True
+GSPOGRPOTrainer._initial_rollout_metrics = _initial_rollout_metrics_v4
+
+
+# Count only extra generation rounds triggered from inside dynamic sampling.
+_original_generate_completions = GSPOGRPOTrainer._generate_completions
+
+
+def _generate_completions_with_resample_count(self, samples):
+    if self.__dict__.get("_gspo_count_resamples", False):
+        self._gspo_resample_rounds = int(self.__dict__.get("_gspo_resample_rounds", 0)) + 1
+    return _original_generate_completions(self, samples)
+
+
+_generate_completions_with_resample_count._gspo_resample_count_v4 = True
+GSPOGRPOTrainer._generate_completions = _generate_completions_with_resample_count
+
+_original_dynamic_sampling = GSPOGRPOTrainer._dynamic_sampling
+
+
+def _dynamic_sampling_with_resample_metric(self, samples, rewards_per_func):
+    self._gspo_count_resamples = True
+    self._gspo_resample_rounds = 0
+    try:
+        result = _original_dynamic_sampling(self, samples, rewards_per_func)
+        self._record_concise_train_metrics(
+            {"sampling/resample_rounds": float(self._gspo_resample_rounds)}
+        )
+        return result
+    finally:
+        self.__dict__.pop("_gspo_count_resamples", None)
+        self.__dict__.pop("_gspo_resample_rounds", None)
+
+
+_dynamic_sampling_with_resample_metric._gspo_resample_metric_v4 = True
+GSPOGRPOTrainer._dynamic_sampling = _dynamic_sampling_with_resample_metric
 
 
 try:
@@ -110,15 +184,13 @@ def _configure_axis(wandb_module) -> Any:
     run = getattr(wandb_module, "run", None)
     if run is None:
         return None
-    if getattr(run, "_gspo_axis_configured_v3", False):
+    if getattr(run, "_gspo_axis_configured_v4", False):
         return run
 
-    # Use an explicit hidden metric as x-axis. overwrite=True replaces the
-    # Transformers train/global_step binding established during callback setup.
     run.define_metric("_gspo_step", hidden=True, summary="none", overwrite=True)
     for raw_key in wandb_plugin.TRAIN_WANDB_KEYS:
         run.define_metric(
-            f"train/{raw_key}",
+            f"train/{_wandb_key(raw_key)}",
             step_metric="_gspo_step",
             step_sync=True,
             overwrite=True,
@@ -131,11 +203,22 @@ def _configure_axis(wandb_module) -> Any:
             overwrite=True,
         )
 
-    run._gspo_axis_configured_v3 = True
+    run.config.update(
+        {
+            "gspo/generation_batch_size": int(os.environ.get("GSPO_GENERATION_BATCH_SIZE", "0")),
+            "gspo/steps_per_generation": int(os.environ.get("GSPO_STEPS_PER_GENERATION", "0")),
+            "gspo/num_iterations": int(os.environ.get("GSPO_NUM_ITERATIONS", "0")),
+            "gspo/max_resample_times": int(os.environ.get("GSPO_MAX_RESAMPLE_TIMES", "0")),
+            "gspo/gold_mode": "fallback_after_resample",
+            "gspo/reasoning_short_metric_tokens": int(os.environ.get("GSPO_REASONING_DIRECT_TOKENS", "100")),
+        },
+        allow_val_change=True,
+    )
+    run._gspo_axis_configured_v4 = True
     return run
 
 
-def _concise_wandb_on_log_v3(self, args, state, control, model=None, logs=None, **kwargs):
+def _concise_wandb_on_log_v4(self, args, state, control, model=None, logs=None, **kwargs):
     if self._wandb is None:
         return control
     if not self._initialized:
@@ -151,23 +234,22 @@ def _concise_wandb_on_log_v3(self, args, state, control, model=None, logs=None, 
     for key, value in (logs or {}).items():
         raw_key = key.removeprefix("train/")
         if raw_key in wandb_plugin.TRAIN_WANDB_KEYS:
-            payload[f"train/{raw_key}"] = value
+            payload[f"train/{_wandb_key(raw_key)}"] = value
 
     if len(payload) > 1:
         run.log(payload)
     return control
 
 
-_concise_wandb_on_log_v3._gspo_concise_wandb_v3 = True
-WandbCallback.on_log = _concise_wandb_on_log_v3
+_concise_wandb_on_log_v4._gspo_concise_wandb_v4 = True
+WandbCallback.on_log = _concise_wandb_on_log_v4
 
 
-# Replace the previous eval wrapper so Pass@k is logged exactly once and uses
-# the same hidden training-step axis.
+# Publish Pass@k exactly once on the same hidden training-step axis.
 _original_eval_run = wandb_plugin._original_eval_run
 
 
-def _eval_run_v3(self, state, control=None, *, force: bool = False):
+def _eval_run_v4(self, state, control=None, *, force: bool = False):
     step = int(state.global_step)
     previous_step = self.last_eval_step
     result = _original_eval_run(self, state, control, force=force)
@@ -203,5 +285,5 @@ def _eval_run_v3(self, state, control=None, *, force: bool = False):
     return result
 
 
-_eval_run_v3._gspo_eval_passk_wandb_v3 = True
-GSPOEvalCallback._run = _eval_run_v3
+_eval_run_v4._gspo_eval_passk_wandb_v4 = True
+GSPOEvalCallback._run = _eval_run_v4
