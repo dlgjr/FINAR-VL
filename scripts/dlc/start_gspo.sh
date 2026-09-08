@@ -132,6 +132,7 @@ if [[ "$NODE_RANK" == "0" ]]; then
   echo "epochs=$GSPO_NUM_TRAIN_EPOCHS generations=$GSPO_NUM_GENERATIONS iterations=$GSPO_NUM_ITERATIONS steps_per_generation=$GSPO_STEPS_PER_GENERATION generation_batch=$GSPO_GENERATION_BATCH_SIZE"
   echo "max_length=$GSPO_MAX_LENGTH max_completion_length=$GSPO_MAX_COMPLETION_LENGTH save_steps=$GSPO_SAVE_STEPS logging_steps=$GSPO_LOGGING_STEPS log_entropy=$GSPO_LOG_ENTROPY eval_steps=$GSPO_EVAL_STEPS"
   echo "kl_beta=$GSPO_BETA entropy_coef=$GSPO_ENTROPY_COEF"
+  echo "sync_ref_model=${GSPO_SYNC_REF_MODEL:-false} ref_model_sync_steps=${GSPO_REF_MODEL_SYNC_STEPS:-512} ref_model_mixup_alpha=${GSPO_REF_MODEL_MIXUP_ALPHA:-0.6}"
   echo "top_reward_steps=$GSPO_TOP_REWARD_STEPS top_reward_k=$GSPO_TOP_REWARD_K"
   echo "vllm_mode=$GSPO_VLLM_MODE vllm_max_model_len=$GSPO_VLLM_MAX_MODEL_LEN vllm_max_num_seqs=$GSPO_VLLM_MAX_NUM_SEQS"
   echo "benchmark_allowlist=$GSPO_BENCHMARK_ALLOWLIST allow_unverified_gold=$GSPO_ALLOW_UNVERIFIED_GOLD"
@@ -171,6 +172,9 @@ ARGS=(
   --learning_rate "$GSPO_LEARNING_RATE"
   --lr_scheduler_type constant
   --beta "$GSPO_BETA"
+  --sync_ref_model "${GSPO_SYNC_REF_MODEL:-false}"
+  --ref_model_sync_steps "${GSPO_REF_MODEL_SYNC_STEPS:-512}"
+  --ref_model_mixup_alpha "${GSPO_REF_MODEL_MIXUP_ALPHA:-0.6}"
   --epsilon "$GSPO_EPSILON"
   --epsilon_high "$GSPO_EPSILON_HIGH"
   --max_grad_norm "$GSPO_MAX_GRAD_NORM"
