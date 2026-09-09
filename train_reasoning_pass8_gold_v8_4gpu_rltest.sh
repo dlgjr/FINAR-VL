@@ -24,14 +24,15 @@ export GSPO_NUM_GENERATIONS=8
 export GSPO_GENERATION_BATCH_SIZE=32
 export GSPO_SCHEDULE_BATCH_SIZE=4
 
-# Length shaping uses reasoning-prefix tokens: <100 or >400 gets -0.3;
-# shortest correct 100-400 response gets +0.1; if all 8 are short, the longest gets +0.2.
+# Length shaping is applied only after dynamic sampling has selected the train batch.
+# In each Pass@8 group, the 3 shortest reasoning responses get -0.3;
+# reasoning >400 gets -0.3; the shortest correct response <=400 gets +0.1.
+# DIRECT_TOKENS=100 remains only as the W&B observational too_short threshold.
 export GSPO_REASONING_SHORT_TOKENS=0
 export GSPO_REASONING_DIRECT_TOKENS=100
 export GSPO_REASONING_LONG_TOKENS=400
 export GSPO_REASONING_LENGTH_PENALTY=0.3
 export GSPO_REASONING_SHORTEST_BONUS=0.1
-export GSPO_REASONING_ALL_SHORT_LONGEST_BONUS=0.2
 
 # ===== Training =====
 export GSPO_NUM_TRAIN_EPOCHS=4
@@ -42,10 +43,8 @@ export GSPO_MAX_RESAMPLE_TIMES=3
 
 export GSPO_LEARNING_RATE=1e-6
 export GSPO_BETA=0.01
-# Refresh KL reference after each 8-step rollout cycle; alpha=1 uses the previous cycle policy exactly.
-export GSPO_SYNC_REF_MODEL=true
-export GSPO_REF_MODEL_SYNC_STEPS=8
-export GSPO_REF_MODEL_MIXUP_ALPHA=1.0
+# Keep KL anchored to the original reference model.
+export GSPO_SYNC_REF_MODEL=false
 export GSPO_ENTROPY_COEF=0.001
 export GSPO_MAX_GRAD_NORM=1.0
 export GSPO_EPSILON=0.03
@@ -114,7 +113,8 @@ echo "GENERATION_BATCH=$GSPO_GENERATION_BATCH_SIZE  # must be 1*4*8=32"
 echo "NUM_ITERATIONS=$GSPO_NUM_ITERATIONS"
 echo "SAVE_EVAL_STEPS=$GSPO_SAVE_STEPS"
 echo "LOGGING_STEPS=$GSPO_LOGGING_STEPS"
-echo "LENGTH_REWARD=reasoning<${GSPO_REASONING_DIRECT_TOKENS}: -${GSPO_REASONING_LENGTH_PENALTY}, reasoning>${GSPO_REASONING_LONG_TOKENS}: -${GSPO_REASONING_LENGTH_PENALTY}, shortest correct: +${GSPO_REASONING_SHORTEST_BONUS}, all-short longest: +${GSPO_REASONING_ALL_SHORT_LONGEST_BONUS}"
+echo "LENGTH_REWARD=post-selection shortest3: -${GSPO_REASONING_LENGTH_PENALTY}, reasoning>${GSPO_REASONING_LONG_TOKENS}: -${GSPO_REASONING_LENGTH_PENALTY}, shortest correct <=${GSPO_REASONING_LONG_TOKENS}: +${GSPO_REASONING_SHORTEST_BONUS}"
+echo "KL_REFERENCE=fixed_initial beta=$GSPO_BETA"
 echo "EVAL_DATA=$GSPO_EVAL_DATA"
 echo "EVAL_SEEDS=$GSPO_EVAL_SEEDS"
 echo "EVAL_ASSET_ROOT=$GSPO_BENCH_ASSET_ROOT"
