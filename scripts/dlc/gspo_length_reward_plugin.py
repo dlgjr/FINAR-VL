@@ -22,11 +22,12 @@ if not getattr(GSPOGRPOTrainer._dynamic_sampling, "_gspo_post_selection_length_s
         penalty = float(os.environ.get("GSPO_REASONING_LENGTH_PENALTY", "0.3"))
         shortest_bonus = float(os.environ.get("GSPO_REASONING_SHORTEST_BONUS", "0.1"))
 
-        lengths = torch.tensor(
+        local_lengths = torch.tensor(
             [wandb_plugin._reasoning_token_count(self, sample) for sample in selected_samples],
             dtype=torch.long,
             device=self.accelerator.device,
         )
+        lengths = self.accelerator.gather_for_metrics(local_lengths).reshape(-1)
 
         shaped = rewards.clone()
         base_correct = shaped[:, 0] == 1.0
