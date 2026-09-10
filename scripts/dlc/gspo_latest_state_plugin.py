@@ -67,6 +67,20 @@ _original_on_train_begin = GSPOEvalCallback.on_train_begin
 def _on_train_begin_enable_resume_state(self, args, state, control, **kwargs):
     args.save_only_model = False
     self.trainer.args.save_only_model = False
+
+    # A normal checkpoint resume has already evaluated the checkpoint at the time
+    # it was saved. Do not run the same fixed eval again at on_train_begin; apart
+    # from wasting time this used to append a second copy of step-N artifacts.
+    resume_path = os.environ.get("GSPO_RESUME_FROM_CHECKPOINT", "").strip()
+    if resume_path and int(state.global_step) > 0:
+        self.last_eval_step = int(state.global_step)
+        if getattr(state, "is_world_process_zero", True):
+            print(
+                f"[GSPO_RESUME] step={int(state.global_step)} skip_initial_eval=true "
+                f"checkpoint={resume_path}",
+                flush=True,
+            )
+
     return _original_on_train_begin(self, args, state, control, **kwargs)
 
 
