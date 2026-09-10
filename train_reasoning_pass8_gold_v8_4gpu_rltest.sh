@@ -25,16 +25,18 @@ export GSPO_GENERATION_BATCH_SIZE=32
 export GSPO_SCHEDULE_BATCH_SIZE=4
 
 # Post-selection shaping:
-# - the 3 shortest reasoning responses in each Pass@8 group get -0.3;
+# - the 3 shortest wrong/partial responses in each Pass@8 group get -0.3;
+# - correct responses that fall in the shortest 3 get only -0.1;
 # - reasoning >400 gets -0.3;
-# - exact numeric hits get +0.2 on top of the normal tolerance-window reward;
+# - exact numeric hits get +0.4 on top of the normal tolerance-window reward;
 # - the longest correct online response <=400 gets +0.2.
 # DIRECT_TOKENS=100 remains only as the W&B observational too-short threshold.
 export GSPO_REASONING_SHORT_TOKENS=0
 export GSPO_REASONING_DIRECT_TOKENS=100
 export GSPO_REASONING_LONG_TOKENS=400
 export GSPO_REASONING_LENGTH_PENALTY=0.3
-export GSPO_EXACT_NUMERIC_BONUS=0.2
+export GSPO_REASONING_CORRECT_SHORT_PENALTY=0.1
+export GSPO_EXACT_NUMERIC_BONUS=0.4
 export GSPO_REASONING_LONGEST_CORRECT_BONUS=0.2
 
 # ===== Training =====
@@ -189,7 +191,7 @@ echo "GENERATION_BATCH=$GSPO_GENERATION_BATCH_SIZE  # must be 1*4*8=32"
 echo "NUM_ITERATIONS=$GSPO_NUM_ITERATIONS"
 echo "SAVE_EVAL_STEPS=$GSPO_SAVE_STEPS"
 echo "LOGGING_STEPS=$GSPO_LOGGING_STEPS"
-echo "REWARD_SHAPING=exact_numeric:+${GSPO_EXACT_NUMERIC_BONUS}, longest_correct<=${GSPO_REASONING_LONG_TOKENS}:+${GSPO_REASONING_LONGEST_CORRECT_BONUS}, shortest3:-${GSPO_REASONING_LENGTH_PENALTY}, reasoning>${GSPO_REASONING_LONG_TOKENS}:-${GSPO_REASONING_LENGTH_PENALTY}"
+echo "REWARD_SHAPING=exact_numeric:+${GSPO_EXACT_NUMERIC_BONUS}, longest_correct<=${GSPO_REASONING_LONG_TOKENS}:+${GSPO_REASONING_LONGEST_CORRECT_BONUS}, shortest3_wrong:-${GSPO_REASONING_LENGTH_PENALTY}, shortest3_correct:-${GSPO_REASONING_CORRECT_SHORT_PENALTY}, reasoning>${GSPO_REASONING_LONG_TOKENS}:-${GSPO_REASONING_LENGTH_PENALTY}"
 echo "KL_REFERENCE=fixed_initial beta=$GSPO_BETA"
 echo "EVAL_DATA=$GSPO_EVAL_DATA"
 echo "EVAL_SEEDS=$GSPO_EVAL_SEEDS"
