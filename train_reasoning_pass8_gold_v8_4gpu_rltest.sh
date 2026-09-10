@@ -9,11 +9,12 @@ export QWEN3VL_ROOT="$ROOT"
 REFERENCE_MODEL="$ROOT/output/sft_test_unclean/checkpoint-550"
 export REASONING_RL_DATA="$ROOT/data/train_multi/train_rl_reasoning_rule_12835_gold.jsonl"
 # Optional fresh branch mode: initialize policy weights from an existing model
-# checkpoint without loading Trainer/optimizer/RNG state. KL remains anchored to
-# the original SFT reference unless GSPO_REF_MODEL is explicitly overridden.
+# checkpoint without loading Trainer/optimizer/RNG state. A weight-only branch
+# uses that same init checkpoint as its fixed KL reference by default; explicit
+# GSPO_REF_MODEL still overrides this behavior.
 export GSPO_INIT_MODEL="${GSPO_INIT_MODEL:-}"
 export REASONING_START_MODEL="${GSPO_INIT_MODEL:-$REFERENCE_MODEL}"
-export GSPO_REF_MODEL="${GSPO_REF_MODEL:-$REFERENCE_MODEL}"
+export GSPO_REF_MODEL="${GSPO_REF_MODEL:-${GSPO_INIT_MODEL:-$REFERENCE_MODEL}}"
 
 # ===== Single node, 4 GPUs =====
 export GSPO_NNODES=1
@@ -54,7 +55,7 @@ export GSPO_MAX_RESAMPLE_TIMES=3
 
 export GSPO_LEARNING_RATE=1e-6
 export GSPO_BETA=0.01
-# Keep KL anchored to the original reference model.
+# Keep the selected KL reference fixed throughout each run.
 export GSPO_SYNC_REF_MODEL=false
 export GSPO_ENTROPY_COEF=0.001
 export GSPO_MAX_GRAD_NORM=1.0
