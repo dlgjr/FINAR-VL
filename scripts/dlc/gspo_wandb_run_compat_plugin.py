@@ -47,6 +47,7 @@ def _configure_axis_compat(wandb_module):
             "gspo/max_resample_times": int(timeseries_fix.os.environ.get("GSPO_MAX_RESAMPLE_TIMES", "0")),
             "gspo/gold_mode": "fallback_after_resample",
             "gspo/reasoning_short_metric_tokens": int(timeseries_fix.os.environ.get("GSPO_REASONING_DIRECT_TOKENS", "100")),
+            "gspo/wandb_step_offset": timeseries_fix._wandb_step_offset(),
         },
         allow_val_change=True,
     )
