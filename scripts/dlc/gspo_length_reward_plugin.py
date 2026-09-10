@@ -13,10 +13,11 @@ import scripts.rl.gspo_reward as reward_module
 
 _NUMERIC_VERIFIERS = {"numeric", "numeric_final", "composite_numeric"}
 
-# Expose the two new shaping diagnostics through the existing concise Trainer -> W&B sink.
+# Expose shaping diagnostics through the existing concise Trainer -> W&B sink.
 wandb_plugin.TRAIN_WANDB_KEYS.update(
     {
         "reward/exact_numeric_ratio",
+        "reward/exact_given_correct_numeric_ratio",
         "reasoning/longest_correct_bonus_ratio",
     }
 )
@@ -172,7 +173,10 @@ if not getattr(GSPOGRPOTrainer._dynamic_sampling, "_gspo_post_selection_length_s
 
         long_tokens = int(os.environ.get("GSPO_REASONING_LONG_TOKENS", "400"))
         penalty = float(os.environ.get("GSPO_REASONING_LENGTH_PENALTY", "0.3"))
-        exact_bonus = float(os.environ.get("GSPO_EXACT_NUMERIC_BONUS", "0.2"))
+        correct_short_penalty = float(
+            os.environ.get("GSPO_REASONING_CORRECT_SHORT_PENALTY", "0.1")
+        )
+        exact_bonus = float(os.environ.get("GSPO_EXACT_NUMERIC_BONUS", "0.4"))
         longest_bonus = float(os.environ.get("GSPO_REASONING_LONGEST_CORRECT_BONUS", "0.2"))
 
         local_lengths = torch.tensor(
@@ -206,23 +210,28 @@ if not getattr(GSPOGRPOTrainer._dynamic_sampling, "_gspo_post_selection_length_s
         generations = int(self.num_generations)
         grouped_lengths = lengths.view(-1, generations)
 
-        # Preserve the existing anti-collapse / anti-verbosity boundaries.
+        # Keep the anti-collapse signal strong for wrong/partial responses, but do
+        # not erase most of the reward from an otherwise correct short response.
         shortest_three = torch.zeros_like(grouped_lengths, dtype=torch.bool)
         shortest_three.scatter_(
             1,
             torch.argsort(grouped_lengths, dim=1)[:, :3],
             True,
         )
-        shaped[shortest_three.reshape(-1), 0] -= penalty
+        shortest_mask = shortest_three.reshape(-1)
+        shaped[shortest_mask & ~base_correct, 0] -= penalty
+        shaped[shortest_mask & base_correct, 0] -= correct_short_penalty
+
+        # The hard upper-length boundary is unchanged for both correct and wrong samples.
         shaped[lengths > long_tokens, 0] -= penalty
 
         # A tolerance-window hit remains correct at 1.0. Exact numeric agreement
-        # receives +0.2 without changing the underlying verifier/eval semantics.
+        # receives the stronger bonus without changing verifier/eval semantics.
         exact_bonus_mask = base_correct & exact_mask & ~injected_mask
         shaped[exact_bonus_mask, 0] += exact_bonus
 
-        # Replace the old shortest-correct bonus with one longest correct online
-        # response per Pass@8 group, capped at the existing 400-token boundary.
+        # Reward one longest correct online response per Pass@8 group, capped at
+        # the existing 400-token boundary.
         eligible = (
             base_correct & ~injected_mask & (lengths <= long_tokens)
         ).view(-1, generations)
@@ -236,11 +245,19 @@ if not getattr(GSPOGRPOTrainer._dynamic_sampling, "_gspo_post_selection_length_s
 
         online_numeric = numeric_mask & ~injected_mask
         numeric_count = int(online_numeric.sum().item())
+        correct_online_numeric = online_numeric & base_correct
+        correct_numeric_count = int(correct_online_numeric.sum().item())
         self._record_concise_train_metrics(
             {
                 "reward/exact_numeric_ratio": (
                     float((exact_mask & online_numeric).sum().item()) / numeric_count
                     if numeric_count
+                    else 0.0
+                ),
+                "reward/exact_given_correct_numeric_ratio": (
+                    float((exact_mask & correct_online_numeric).sum().item())
+                    / correct_numeric_count
+                    if correct_numeric_count
                     else 0.0
                 ),
                 "reasoning/longest_correct_bonus_ratio": float(
