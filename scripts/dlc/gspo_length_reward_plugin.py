@@ -128,7 +128,7 @@ if not getattr(GSPOGRPOTrainer._dynamic_sampling, "_gspo_post_selection_length_s
         long_tokens = int(os.environ.get("GSPO_REASONING_LONG_TOKENS", "400"))
         penalty = float(os.environ.get("GSPO_REASONING_LENGTH_PENALTY", "0.3"))
         exact_bonus = float(os.environ.get("GSPO_EXACT_NUMERIC_BONUS", "0.2"))
-        longest_bonus = float(os.environ.get("GSPO_REASONING_LONGEST_CORRECT_BONUS", "0.1"))
+        longest_bonus = float(os.environ.get("GSPO_REASONING_LONGEST_CORRECT_BONUS", "0.2"))
 
         local_lengths = torch.tensor(
             [wandb_plugin._reasoning_token_count(self, sample) for sample in selected_samples],
