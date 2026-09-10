@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+from decimal import ROUND_HALF_UP, Decimal
 
 import scripts.dlc.gspo_wandb_plugin as wandb_plugin
 from scripts.dlc.gspo_trainer_plugin import GSPOGRPOTrainer
-from scripts.rl.gspo_reward import numeric_gold_from_text, score_programmatic_answer
+import scripts.rl.gspo_reward as reward_module
 
 
 _NUMERIC_VERIFIERS = {"numeric", "numeric_final", "composite_numeric"}
@@ -27,24 +28,33 @@ def _list_value(value):
     return value or []
 
 
-def _exact_numeric_gold(extra):
-    gold_numeric = _list_value(extra.get("gold_numeric"))
-    if not gold_numeric:
-        gold_numeric = []
-        for atom in _list_value(extra.get("gold_atoms")):
-            gold_numeric.extend(numeric_gold_from_text(str(atom)))
+def _equal_numeric(left: Decimal, right: Decimal, places: int | None) -> bool:
+    if places is None:
+        return left == right
+    quantum = Decimal(1).scaleb(-places)
+    return left.quantize(quantum, rounding=ROUND_HALF_UP) == right.quantize(
+        quantum, rounding=ROUND_HALF_UP
+    )
 
-    exact = []
-    for item in gold_numeric:
-        spec = dict(item)
-        spec["abs_tol"] = "0"
-        spec["rel_tol"] = "0"
-        spec["aliases"] = [
-            {**dict(alias), "abs_tol": "0", "rel_tol": "0"}
-            for alias in item.get("aliases", []) or []
-        ]
-        exact.append(spec)
-    return exact
+
+def _numeric_exact_match(pred, gold, question: str) -> bool:
+    places = reward_module._requested_decimal_places(question)
+
+    # Preserve the verifier's existing presentation compatibility while making
+    # the numerical comparison exact rather than using the +/-2 precision window.
+    if gold.dimension == "scalar" and gold.unit == "":
+        return _equal_numeric(pred.value, gold.value, places)
+
+    if pred.dimension == "scalar" and pred.unit == "":
+        if _equal_numeric(pred.value, gold.value, places):
+            return True
+        return _equal_numeric(pred.value / gold.factor, gold.value, places)
+
+    if pred.dimension != gold.dimension:
+        return False
+
+    pred_in_gold_unit = pred.base_value / gold.factor
+    return _equal_numeric(pred_in_gold_unit, gold.value, places)
 
 
 def _sample_exact_numeric(sample) -> tuple[bool, bool]:
@@ -56,21 +66,53 @@ def _sample_exact_numeric(sample) -> tuple[bool, bool]:
     if verifier_type not in _NUMERIC_VERIFIERS:
         return False, False
 
-    try:
-        exact_gold = _exact_numeric_gold(extra)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return True, False
-    if not exact_gold:
+    completion = wandb_plugin._completion_text(sample)
+    answer = reward_module.extract_final_answer(completion, verifier_type)
+    if not answer:
         return True, False
 
-    score = score_programmatic_answer(
-        wandb_plugin._completion_text(sample),
-        [],
-        verifier_type,
-        question=str(extra.get("question", "")),
-        gold_numeric=exact_gold,
-    )
-    return True, score == 1.0
+    try:
+        pred_values = [
+            reward_module._parse_numeric(atom)
+            for atom in reward_module._numeric_atoms(answer)
+        ]
+        gold_numeric = _list_value(extra.get("gold_numeric"))
+        if gold_numeric:
+            gold_specs = []
+            for item in gold_numeric:
+                primary = reward_module._structured_numeric(item)
+                aliases = [
+                    reward_module._structured_numeric(alias)
+                    for alias in item.get("aliases", []) or []
+                ]
+                gold_specs.append((primary, aliases))
+        else:
+            gold_specs = [
+                (reward_module._parse_numeric(str(atom)), [])
+                for atom in _list_value(extra.get("gold_atoms"))
+            ]
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return True, False
+
+    if not pred_values or len(pred_values) != len(gold_specs):
+        return True, False
+
+    question = str(extra.get("question", ""))
+    matched_gold: set[int] = set()
+    for pred in pred_values:
+        for index, (gold, aliases) in enumerate(gold_specs):
+            if index in matched_gold:
+                continue
+            if any(
+                _numeric_exact_match(pred, candidate, question)
+                for candidate in (gold, *aliases)
+            ):
+                matched_gold.add(index)
+                break
+        else:
+            return True, False
+
+    return True, len(matched_gold) == len(gold_specs)
 
 
 if not getattr(GSPOGRPOTrainer._dynamic_sampling, "_gspo_post_selection_length_shaping", False):
@@ -129,8 +171,8 @@ if not getattr(GSPOGRPOTrainer._dynamic_sampling, "_gspo_post_selection_length_s
         shaped[shortest_three.reshape(-1), 0] -= penalty
         shaped[lengths > long_tokens, 0] -= penalty
 
-        # A tolerance-window hit remains correct at 1.0. Only an exact numeric
-        # match under zero abs/rel tolerance receives the extra precision bonus.
+        # A tolerance-window hit remains correct at 1.0. Exact numeric agreement
+        # receives +0.2 without changing the underlying verifier/eval semantics.
         exact_bonus_mask = base_correct & exact_mask & ~injected_mask
         shaped[exact_bonus_mask, 0] += exact_bonus
 
