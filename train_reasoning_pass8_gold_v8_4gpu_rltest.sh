@@ -95,13 +95,11 @@ export GSPO_VLLM_SLEEP_LEVEL=1
 
 # ===== W&B =====
 export WANDB_PROJECT=FINAR-VL-GSPO
+export WANDB_ENTITY="${WANDB_ENTITY:-985039081-jilindaxue}"
 
 RESUME_CHECKPOINT="${GSPO_RESUME_FROM_CHECKPOINT:-}"
 if [[ -n "$RESUME_CHECKPOINT" ]]; then
-  : "${WANDB_RUN_ID:?Set WANDB_RUN_ID to the original synced W&B run before resuming}"
-  # W&B explicitly ignores resume while offline. Resume the already-synced run
-  # online so new history is appended to the original run instead of creating a
-  # second offline-run directory with the same ID.
+  : "${WANDB_RUN_ID:?Set WANDB_RUN_ID before resuming}"
   export WANDB_MODE="${WANDB_MODE:-online}"
   export WANDB_RESUME="${WANDB_RESUME:-must}"
   RUN_ROOT="$(dirname "$(dirname "$RESUME_CHECKPOINT")")"
@@ -114,7 +112,58 @@ else
 fi
 export GSPO_RESUME_FROM_CHECKPOINT="$RESUME_CHECKPOINT"
 export GSPO_RUN_ID="$RUN_ID"
-export WANDB_NAME="$RUN_ID"
+
+# Optional W&B branch mode. When WANDB_HISTORY_SOURCE_RUN_ID is set, seed a
+# fresh target run with the source run's scalar history through the checkpoint
+# step, then continue logging new reward-v2 training data into that target run.
+WANDB_HISTORY_SOURCE_RUN_ID="${WANDB_HISTORY_SOURCE_RUN_ID:-}"
+WANDB_HISTORY_UNTIL_STEP="${WANDB_HISTORY_UNTIL_STEP:-}"
+if [[ -n "$WANDB_HISTORY_SOURCE_RUN_ID" ]]; then
+  if [[ -z "$RESUME_CHECKPOINT" ]]; then
+    echo "WANDB history cloning requires GSPO_RESUME_FROM_CHECKPOINT"
+    exit 1
+  fi
+  if [[ "$WANDB_MODE" != "online" ]]; then
+    echo "WANDB history cloning requires WANDB_MODE=online"
+    exit 1
+  fi
+  if [[ "$WANDB_RUN_ID" == "$WANDB_HISTORY_SOURCE_RUN_ID" ]]; then
+    echo "WANDB_RUN_ID must differ from WANDB_HISTORY_SOURCE_RUN_ID"
+    exit 1
+  fi
+  if [[ -z "$WANDB_HISTORY_UNTIL_STEP" ]]; then
+    CKPT_NAME="$(basename "$RESUME_CHECKPOINT")"
+    if [[ "$CKPT_NAME" != checkpoint-* || ! "${CKPT_NAME#checkpoint-}" =~ ^[0-9]+$ ]]; then
+      echo "Cannot derive W&B history branch step from checkpoint: $RESUME_CHECKPOINT"
+      exit 1
+    fi
+    WANDB_HISTORY_UNTIL_STEP="${CKPT_NAME#checkpoint-}"
+  fi
+  export WANDB_HISTORY_UNTIL_STEP
+  export WANDB_NAME="${WANDB_NAME:-${RUN_ID}_rewardv2_from${WANDB_HISTORY_UNTIL_STEP}}"
+
+  echo "===== W&B HISTORY BRANCH ====="
+  echo "WANDB_ENTITY=$WANDB_ENTITY"
+  echo "WANDB_PROJECT=$WANDB_PROJECT"
+  echo "WANDB_HISTORY_SOURCE_RUN_ID=$WANDB_HISTORY_SOURCE_RUN_ID"
+  echo "WANDB_HISTORY_UNTIL_STEP=$WANDB_HISTORY_UNTIL_STEP"
+  echo "WANDB_TARGET_RUN_ID=$WANDB_RUN_ID"
+  echo "WANDB_TARGET_NAME=$WANDB_NAME"
+
+  /opt/ac2/bin/python "$ROOT/scripts/dlc/clone_wandb_history.py" \
+    --entity "$WANDB_ENTITY" \
+    --project "$WANDB_PROJECT" \
+    --source-run-id "$WANDB_HISTORY_SOURCE_RUN_ID" \
+    --target-run-id "$WANDB_RUN_ID" \
+    --until-step "$WANDB_HISTORY_UNTIL_STEP" \
+    --target-name "$WANDB_NAME" || exit $?
+
+  # The clone helper creates/seeds the target run and closes it. Trainer then
+  # reopens exactly that target run and appends post-branch history.
+  export WANDB_RESUME=must
+else
+  export WANDB_NAME="${WANDB_NAME:-$RUN_ID}"
+fi
 
 mkdir -p "$REASONING_RL_OUTPUT_DIR"
 TRAIN_LOG="$REASONING_RL_OUTPUT_DIR/train.log"
@@ -129,7 +178,9 @@ echo "DATA=$REASONING_RL_DATA"
 echo "OUTPUT=$REASONING_RL_OUTPUT_DIR"
 echo "RESUME_FROM=$RESUME_CHECKPOINT"
 echo "WANDB_MODE=$WANDB_MODE"
+echo "WANDB_ENTITY=$WANDB_ENTITY"
 echo "WANDB_RUN_ID=${WANDB_RUN_ID:-}"
+echo "WANDB_NAME=${WANDB_NAME:-}"
 echo "WANDB_RESUME=${WANDB_RESUME:-}"
 echo "GPUS=$GSPO_TRAIN_GPUS"
 echo "NPROC=$GSPO_NPROC_PER_NODE"
