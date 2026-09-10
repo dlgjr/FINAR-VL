@@ -24,6 +24,7 @@ export WANDB_MODE=offline
 export WANDB_PROJECT="${WANDB_PROJECT:-FINAR-VL-GSPO}"
 export WANDB_DIR="${WANDB_DIR:-$ROOT/output/gspo/wandb}"
 export GSPO_OUTPUT_DIR="${GSPO_OUTPUT_DIR:-$ROOT/output/gspo/${GSPO_RUN_ID:-$(date +%Y%m%d_%H%M%S)}}"
+export GSPO_RESUME_FROM_CHECKPOINT="${GSPO_RESUME_FROM_CHECKPOINT:-}"
 export GSPO_REWARD_POOL="${GSPO_REWARD_POOL:-$GSPO_OUTPUT_DIR/reward_pool_rank_${NODE_RANK}.jsonl}"
 export GSPO_REWARD_ERRORS="${GSPO_REWARD_ERRORS:-$GSPO_OUTPUT_DIR/reward_errors_rank_${NODE_RANK}.jsonl}"
 export GSPO_STATUS_DIR="${GSPO_STATUS_DIR:-$GSPO_OUTPUT_DIR/rank_status}"
@@ -52,12 +53,18 @@ if [[ "$GSPO_USE_VLLM" == "true" ]]; then
   "$PYTHON_BIN" "$ROOT/scripts/dlc/patch_swift_vllm_sleep_race.py"
 fi
 RUN_DIR="$GSPO_OUTPUT_DIR"
+TRAIN_OUTPUT_DIR="$RUN_DIR"
+if [[ -n "$GSPO_RESUME_FROM_CHECKPOINT" ]]; then
+  TRAIN_OUTPUT_DIR="$(dirname "$GSPO_RESUME_FROM_CHECKPOINT")"
+fi
 mkdir -p "$RUN_DIR" "$WANDB_DIR"
 if [[ -n "$GSPO_SOURCE_DATA" ]]; then
   test -f "$GSPO_SOURCE_DATA" || { echo "missing RL source data: $GSPO_SOURCE_DATA" >&2; exit 1; }
   export GSPO_DATA="${GSPO_PREPARED_DATA:-$RUN_DIR/train_gspo.jsonl}"
   DATA_READY="$RUN_DIR/data_preparation.ready"
-  if [[ "$NODE_RANK" == "0" ]]; then
+  if [[ -n "$GSPO_RESUME_FROM_CHECKPOINT" && -f "$GSPO_DATA" ]]; then
+    :
+  elif [[ "$NODE_RANK" == "0" ]]; then
     rm -f "$DATA_READY"
     UNSCHEDULED_DATA="$GSPO_DATA.unscheduled"
     "$PYTHON_BIN" -m scripts.rl.prepare_gspo_data "$GSPO_SOURCE_DATA" "$UNSCHEDULED_DATA" "$RUN_DIR/data_preparation.audit.json"
@@ -128,6 +135,7 @@ if [[ "$NODE_RANK" == "0" ]]; then
   echo "===== FULL GSPO DLC CONFIG ====="
   echo "nodes=$GSPO_NNODES train_ranks=$((GSPO_NNODES * GSPO_NPROC_PER_NODE)) train_gpus=$GSPO_TRAIN_GPUS judge_enabled=$GSPO_ENABLE_JUDGE judge_gpu=$GSPO_JUDGE_GPU"
   echo "model=$GSPO_MODEL judge_model=$GSPO_JUDGE_MODEL data=$GSPO_DATA"
+  echo "resume_from_checkpoint=$GSPO_RESUME_FROM_CHECKPOINT train_output_dir=$TRAIN_OUTPUT_DIR"
   echo "judge_serve_name=$GSPO_JUDGE_SERVE_NAME judge_max_tokens=$GSPO_JUDGE_MAX_TOKENS judge_tp=$GSPO_JUDGE_TENSOR_PARALLEL_SIZE judge_thinking=false"
   echo "epochs=$GSPO_NUM_TRAIN_EPOCHS generations=$GSPO_NUM_GENERATIONS iterations=$GSPO_NUM_ITERATIONS steps_per_generation=$GSPO_STEPS_PER_GENERATION generation_batch=$GSPO_GENERATION_BATCH_SIZE"
   echo "max_length=$GSPO_MAX_LENGTH max_completion_length=$GSPO_MAX_COMPLETION_LENGTH save_steps=$GSPO_SAVE_STEPS logging_steps=$GSPO_LOGGING_STEPS log_entropy=$GSPO_LOG_ENTROPY eval_steps=$GSPO_EVAL_STEPS"
@@ -197,9 +205,12 @@ ARGS=(
   --eval_strategy no
   --report_to wandb
   --callbacks gspo_eval
-  --output_dir "$RUN_DIR"
+  --output_dir "$TRAIN_OUTPUT_DIR"
 )
+if [[ -n "$GSPO_RESUME_FROM_CHECKPOINT" ]]; then
+  ARGS+=(--resume_from_checkpoint "$GSPO_RESUME_FROM_CHECKPOINT" --add_version false)
+fi
 "${SWIFT_BIN[@]}" "${ARGS[@]}"
 
-test -d "$RUN_DIR" || { echo "GSPO output directory missing" >&2; exit 1; }
-echo "DLC_FULL_GSPO_OK output=$RUN_DIR"
+test -d "$TRAIN_OUTPUT_DIR" || { echo "GSPO output directory missing" >&2; exit 1; }
+echo "DLC_FULL_GSPO_OK output=$TRAIN_OUTPUT_DIR"
