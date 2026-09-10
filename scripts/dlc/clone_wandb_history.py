@@ -16,6 +16,7 @@ import wandb
 
 _CLONE_SOURCE_KEY = "gspo/history_clone_source_run_id"
 _CLONE_UNTIL_KEY = "gspo/history_clone_until_step"
+_CLONE_COMPLETE_KEY = "gspo/history_clone_complete"
 
 
 def _logical_step(row: dict[str, Any]) -> int | None:
@@ -76,13 +77,21 @@ def clone_history(
     if existing is not None:
         configured_source = existing.config.get(_CLONE_SOURCE_KEY)
         configured_until = existing.config.get(_CLONE_UNTIL_KEY)
-        if configured_source == source_run_id and int(configured_until) == until_step:
+        clone_complete = bool(existing.config.get(_CLONE_COMPLETE_KEY, False))
+        same_source = configured_source == source_run_id
+        same_until = str(configured_until) == str(until_step)
+        if same_source and same_until and clone_complete:
             print(
                 f"[WANDB_HISTORY_CLONE] target={target_run_id} already_seeded=true "
                 f"source={source_run_id} until_step={until_step}",
                 flush=True,
             )
             return
+        if same_source and same_until and not clone_complete:
+            raise RuntimeError(
+                f"target W&B run {target_path} contains an incomplete history clone; "
+                "delete that target run or use a fresh WANDB_RUN_ID"
+            )
         raise RuntimeError(
             f"target W&B run {target_path} already exists without the expected clone marker; "
             "use a fresh WANDB_RUN_ID"
@@ -97,6 +106,7 @@ def clone_history(
         config={
             _CLONE_SOURCE_KEY: source_run_id,
             _CLONE_UNTIL_KEY: until_step,
+            _CLONE_COMPLETE_KEY: False,
             "gspo/history_clone_source_name": source.name,
             "gspo/history_clone_mode": "prefix_then_branch",
         },
@@ -132,10 +142,15 @@ def clone_history(
             raise RuntimeError(
                 f"no scalar history rows with a logical GSPO step <= {until_step} were found in {source_path}"
             )
+        if max_copied_step < until_step:
+            raise RuntimeError(
+                f"source history only reached logical step {max_copied_step}, below requested branch step {until_step}"
+            )
 
         run.summary["gspo/history_clone_rows"] = copied_rows
         run.summary["gspo/history_clone_max_step"] = max_copied_step
         run.summary["gspo/history_clone_skipped_without_step"] = skipped_without_step
+        run.config.update({_CLONE_COMPLETE_KEY: True}, allow_val_change=True)
     finally:
         run.finish()
 
