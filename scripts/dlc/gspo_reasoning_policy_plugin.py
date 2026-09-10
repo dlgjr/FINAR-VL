@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -300,6 +301,24 @@ def _rank() -> int:
     return 0
 
 
+def _eval_barrier() -> None:
+    try:
+        import torch.distributed as dist
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+    except ImportError:
+        pass
+
+
+def _reset_eval_step_dir(path: Path) -> None:
+    # Base evaluator appends rank prediction JSONL files. Remove an existing
+    # seed/step directory before re-running the same checkpoint so retries and
+    # resumes are idempotent instead of doubling coverage and Pass@k.
+    if _rank() == 0 and path.exists():
+        shutil.rmtree(path)
+    _eval_barrier()
+
+
 # Replace the W&B plugin's old fixed-20 eval wrapper with a fixed-dataset,
 # three-seed wrapper. Each seed writes its own artifacts; step summary stores the mean.
 def _three_seed_run_distributed_evaluation(*args, **kwargs):
@@ -331,6 +350,7 @@ def _three_seed_run_distributed_evaluation(*args, **kwargs):
             seed_kwargs["project_root"] = eval_data.parent
             seed_kwargs["output_dir"] = base_output / f"seed-{seed}"
             seed_kwargs["max_samples"] = max_samples
+            _reset_eval_step_dir(seed_kwargs["output_dir"] / f"step-{step:06d}")
             metrics = eval_module.run_distributed_evaluation(*args, **seed_kwargs)
             per_seed.append({"seed": seed, **metrics})
     finally:
