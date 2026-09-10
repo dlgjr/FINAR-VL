@@ -101,15 +101,6 @@ class GSPOGRPOTrainer(GRPOTrainer):
             self._metrics[mode]["entropy/regularized_mean"].append(regularization["mean"])
             self._metrics[mode]["entropy/regularization_loss"].append(regularization["loss"])
 
-
-
-
-
-
-
-
-
-
     # PASS8_GOLD_V11_BEGIN
     @staticmethod
     def _gather_samples_equal_size(samples):
@@ -352,6 +343,7 @@ class GSPOGRPOTrainer(GRPOTrainer):
             (self.accelerator.process_index + 1) * local_size,
         )
         return selected_samples[process_slice], selected_rewards
+
     def _get_per_token_logps_and_entropies(self, *args, **kwargs):
         per_token_logps, entropies = super()._get_per_token_logps_and_entropies(
             *args, **kwargs
@@ -452,7 +444,6 @@ class GSPOEvalCallback(TrainerCallback):
             "optimizer.bin",
             "scheduler.pt",
             "scheduler.bin",
-            "rng_state.pth",
             "trainer_state.json",
             "training_args.bin",
         }
@@ -460,9 +451,34 @@ class GSPOEvalCallback(TrainerCallback):
             target = path / name
             if target.is_file():
                 target.unlink()
-        remaining = [str(target) for target in path.iterdir() if target.name in state_names] if path.is_dir() else []
-        if remaining:
-            raise RuntimeError(f"GSPO checkpoint contains trainer state: {remaining}")
+        for target in path.glob("rng_state*.pth") if path.is_dir() else ():
+            target.unlink()
+
+    @staticmethod
+    def _checkpoint_step(path: Path) -> int | None:
+        prefix = "checkpoint-"
+        if not path.is_dir() or not path.name.startswith(prefix):
+            return None
+        suffix = path.name[len(prefix):]
+        return int(suffix) if suffix.isdigit() else None
+
+    def _cleanup_previous_checkpoint(self, args, state) -> None:
+        current_step = int(state.global_step)
+        previous = []
+        for path in Path(args.output_dir).glob("checkpoint-*"):
+            step = self._checkpoint_step(path)
+            if step is not None and step < current_step:
+                previous.append((step, path))
+        resume_path = os.environ.get("GSPO_RESUME_FROM_CHECKPOINT", "").strip()
+        if resume_path:
+            path = Path(resume_path)
+            step = self._checkpoint_step(path)
+            if step is not None and step < current_step:
+                previous.append((step, path))
+        if previous:
+            _, checkpoint = max(previous, key=lambda item: item[0])
+            self._cleanup_checkpoint(checkpoint)
+            print(f"[GSPO_CHECKPOINT_STATE] kept=checkpoint-{current_step} cleaned={checkpoint}", flush=True)
 
     @staticmethod
     def _reward_pool_paths(pool_path: Path) -> list[Path]:
@@ -588,8 +604,7 @@ class GSPOEvalCallback(TrainerCallback):
     def on_save(self, args, state, control, **kwargs):
         self._run(state, control, force=True)
         if getattr(state, "is_world_process_zero", True):
-            checkpoint = Path(args.output_dir) / f"checkpoint-{state.global_step}"
-            self._cleanup_checkpoint(checkpoint)
+            self._cleanup_previous_checkpoint(args, state)
         return control
 
     def on_epoch_end(self, args, state, control, **kwargs):
