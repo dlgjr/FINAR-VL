@@ -32,6 +32,10 @@ export REWARD_PLUGIN="${REWARD_PLUGIN:-$ROOT/scripts/dlc/gspo_plugins.py}"
 export TRAINER_PLUGIN="${TRAINER_PLUGIN:-$ROOT/scripts/dlc/gspo_plugins.py}"
 export GSPO_BENCHMARK_ALLOWLIST
 export GSPO_MODEL="${GSPO_MODEL:-${SFT_MODEL:-}}"
+# Full-parameter GRPO accepts an explicit reference model. Keep the default
+# identical to the policy init model, while allowing branch runs to initialize
+# policy weights from an RL checkpoint and still anchor KL to the original SFT.
+export GSPO_REF_MODEL="${GSPO_REF_MODEL:-$GSPO_MODEL}"
 export ROOT_IMAGE_DIR="${ROOT_IMAGE_DIR:-${GSPO_SOURCE_DATA:+$(dirname "$GSPO_SOURCE_DATA")}}"
 export ROOT_IMAGE_DIR="${ROOT_IMAGE_DIR:-$ROOT/data/train_multi}"
 
@@ -50,6 +54,7 @@ if [[ "$GSPO_ENABLE_JUDGE" == "true" ]]; then
 fi
 : "${GSPO_MODEL:?GSPO_MODEL must be the merged full SFT model (LoRA adapter is not accepted)}"
 test -f "$GSPO_MODEL/config.json" || { echo "missing merged model config: $GSPO_MODEL/config.json" >&2; exit 1; }
+test -f "$GSPO_REF_MODEL/config.json" || { echo "missing reference model config: $GSPO_REF_MODEL/config.json" >&2; exit 1; }
 test -f "$ROOT/scripts/dlc/gspo_plugins.py" || { echo "missing GSPO plugin" >&2; exit 1; }
 test -d "$ROOT_IMAGE_DIR" || { echo "missing ROOT_IMAGE_DIR: $ROOT_IMAGE_DIR" >&2; exit 1; }
 cd "$ROOT_IMAGE_DIR"
@@ -143,7 +148,7 @@ if [[ "$NODE_RANK" == "0" ]]; then
   GSPO_BENCHMARK_GENERATIONS=$(( 94 * 9 * (GSPO_CHECKPOINT_COUNT + 2) ))
   echo "===== FULL GSPO DLC CONFIG ====="
   echo "nodes=$GSPO_NNODES train_ranks=$((GSPO_NNODES * GSPO_NPROC_PER_NODE)) train_gpus=$GSPO_TRAIN_GPUS judge_enabled=$GSPO_ENABLE_JUDGE judge_gpu=$GSPO_JUDGE_GPU"
-  echo "model=$GSPO_MODEL judge_model=$GSPO_JUDGE_MODEL data=$GSPO_DATA"
+  echo "model=$GSPO_MODEL ref_model=$GSPO_REF_MODEL judge_model=$GSPO_JUDGE_MODEL data=$GSPO_DATA"
   echo "resume_from_checkpoint=$GSPO_RESUME_FROM_CHECKPOINT train_output_dir=$TRAIN_OUTPUT_DIR"
   echo "wandb_mode=$WANDB_MODE wandb_project=$WANDB_PROJECT wandb_run_id=${WANDB_RUN_ID:-} wandb_resume=${WANDB_RESUME:-}"
   echo "judge_serve_name=$GSPO_JUDGE_SERVE_NAME judge_max_tokens=$GSPO_JUDGE_MAX_TOKENS judge_tp=$GSPO_JUDGE_TENSOR_PARALLEL_SIZE judge_thinking=false"
@@ -161,6 +166,7 @@ ARGS=(
   rlhf
   --rlhf_type grpo
   --model "$GSPO_MODEL"
+  --ref_model "$GSPO_REF_MODEL"
   --dataset "$GSPO_DATA"
   --split_dataset_ratio 0
   --external_plugins "$TRAINER_PLUGIN"
