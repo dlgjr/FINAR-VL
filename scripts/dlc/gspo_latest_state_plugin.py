@@ -7,6 +7,7 @@ multiplying state-storage cost across every saved model checkpoint.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from scripts.dlc.gspo_trainer_plugin import GSPOEvalCallback
@@ -50,7 +51,11 @@ def _has_complete_resume_state(checkpoint: Path) -> bool:
     has_optimizer = any((checkpoint / name).is_file() for name in ("optimizer.pt", "optimizer.bin"))
     has_scheduler = any((checkpoint / name).is_file() for name in ("scheduler.pt", "scheduler.bin"))
     has_trainer_state = (checkpoint / "trainer_state.json").is_file()
-    has_rng_state = any(checkpoint.glob("rng_state*.pth"))
+    world_size = int(os.environ.get("GSPO_NNODES", "1")) * int(os.environ.get("GSPO_NPROC_PER_NODE", "1"))
+    if world_size > 1:
+        has_rng_state = all((checkpoint / f"rng_state_{rank}.pth").is_file() for rank in range(world_size))
+    else:
+        has_rng_state = any(checkpoint.glob("rng_state*.pth"))
     return has_optimizer and has_scheduler and has_trainer_state and has_rng_state
 
 
