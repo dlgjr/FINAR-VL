@@ -20,7 +20,7 @@ export NODE_RANK="$GSPO_NODE_RANK"
 export NPROC_PER_NODE="$GSPO_NPROC_PER_NODE"
 export MASTER_ADDR="$GSPO_MASTER_ADDR"
 export MASTER_PORT="$GSPO_MASTER_PORT"
-export WANDB_MODE=offline
+export WANDB_MODE="${WANDB_MODE:-offline}"
 export WANDB_PROJECT="${WANDB_PROJECT:-FINAR-VL-GSPO}"
 export WANDB_DIR="${WANDB_DIR:-$ROOT/output/gspo/wandb}"
 export GSPO_OUTPUT_DIR="${GSPO_OUTPUT_DIR:-$ROOT/output/gspo/${GSPO_RUN_ID:-$(date +%Y%m%d_%H%M%S)}}"
@@ -34,6 +34,15 @@ export GSPO_BENCHMARK_ALLOWLIST
 export GSPO_MODEL="${GSPO_MODEL:-${SFT_MODEL:-}}"
 export ROOT_IMAGE_DIR="${ROOT_IMAGE_DIR:-${GSPO_SOURCE_DATA:+$(dirname "$GSPO_SOURCE_DATA")}}"
 export ROOT_IMAGE_DIR="${ROOT_IMAGE_DIR:-$ROOT/data/train_multi}"
+
+if [[ -n "$GSPO_RESUME_FROM_CHECKPOINT" ]]; then
+  : "${WANDB_RUN_ID:?GSPO checkpoint resume requires WANDB_RUN_ID of the existing W&B run}"
+  if [[ "$WANDB_MODE" != "online" ]]; then
+    echo "GSPO checkpoint resume requires WANDB_MODE=online; W&B ignores resume in offline mode" >&2
+    exit 1
+  fi
+  export WANDB_RESUME="${WANDB_RESUME:-must}"
+fi
 
 if [[ "$GSPO_ENABLE_JUDGE" == "true" ]]; then
   : "${GSPO_JUDGE_MODEL:?GSPO_JUDGE_MODEL must point to Qwen3-VL-235B weights}"
@@ -77,7 +86,7 @@ if [[ -n "$GSPO_SOURCE_DATA" ]]; then
       if [[ -f "$DATA_READY" ]]; then break; fi
       sleep 1
       if (( attempt % 30 == 0 )); then echo "waiting_for_prepared_data seconds=$attempt node_rank=$NODE_RANK"; fi
-      if (( attempt == 1800 )); then echo "timed out waiting for prepared GSPO data: $DATA_READY" >&2; exit 1; fi
+      if (( attempt == 1800 )); then echo "timed out waiting for prepared GSPO data: $GSPO_DATA" >&2; exit 1; fi
     done
   fi
 fi
@@ -136,6 +145,7 @@ if [[ "$NODE_RANK" == "0" ]]; then
   echo "nodes=$GSPO_NNODES train_ranks=$((GSPO_NNODES * GSPO_NPROC_PER_NODE)) train_gpus=$GSPO_TRAIN_GPUS judge_enabled=$GSPO_ENABLE_JUDGE judge_gpu=$GSPO_JUDGE_GPU"
   echo "model=$GSPO_MODEL judge_model=$GSPO_JUDGE_MODEL data=$GSPO_DATA"
   echo "resume_from_checkpoint=$GSPO_RESUME_FROM_CHECKPOINT train_output_dir=$TRAIN_OUTPUT_DIR"
+  echo "wandb_mode=$WANDB_MODE wandb_project=$WANDB_PROJECT wandb_run_id=${WANDB_RUN_ID:-} wandb_resume=${WANDB_RESUME:-}"
   echo "judge_serve_name=$GSPO_JUDGE_SERVE_NAME judge_max_tokens=$GSPO_JUDGE_MAX_TOKENS judge_tp=$GSPO_JUDGE_TENSOR_PARALLEL_SIZE judge_thinking=false"
   echo "epochs=$GSPO_NUM_TRAIN_EPOCHS generations=$GSPO_NUM_GENERATIONS iterations=$GSPO_NUM_ITERATIONS steps_per_generation=$GSPO_STEPS_PER_GENERATION generation_batch=$GSPO_GENERATION_BATCH_SIZE"
   echo "max_length=$GSPO_MAX_LENGTH max_completion_length=$GSPO_MAX_COMPLETION_LENGTH save_steps=$GSPO_SAVE_STEPS logging_steps=$GSPO_LOGGING_STEPS log_entropy=$GSPO_LOG_ENTROPY eval_steps=$GSPO_EVAL_STEPS"
@@ -204,6 +214,7 @@ ARGS=(
   --log_entropy "$GSPO_LOG_ENTROPY"
   --eval_strategy no
   --report_to wandb
+  --run_name "${WANDB_NAME:-${GSPO_RUN_ID:-GSPO}}"
   --callbacks gspo_eval
   --output_dir "$TRAIN_OUTPUT_DIR"
 )
