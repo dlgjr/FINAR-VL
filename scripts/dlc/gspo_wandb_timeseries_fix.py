@@ -36,6 +36,17 @@ def _wandb_key(raw_key: str) -> str:
     return _METRIC_ALIASES.get(raw_key, raw_key)
 
 
+def _wandb_step_offset() -> int:
+    value = int(os.environ.get("GSPO_WANDB_STEP_OFFSET", "0"))
+    if value < 0:
+        raise ValueError(f"GSPO_WANDB_STEP_OFFSET must be non-negative, got {value}")
+    return value
+
+
+def _logical_wandb_step(trainer_step: int) -> int:
+    return int(trainer_step) + _wandb_step_offset()
+
+
 def _tokenizer(trainer):
     template = getattr(trainer, "template", None)
     tokenizer = getattr(template, "tokenizer", None)
@@ -211,6 +222,7 @@ def _configure_axis(wandb_module) -> Any:
             "gspo/max_resample_times": int(os.environ.get("GSPO_MAX_RESAMPLE_TIMES", "0")),
             "gspo/gold_mode": "fallback_after_resample",
             "gspo/reasoning_short_metric_tokens": int(os.environ.get("GSPO_REASONING_DIRECT_TOKENS", "100")),
+            "gspo/wandb_step_offset": _wandb_step_offset(),
         },
         allow_val_change=True,
     )
@@ -230,7 +242,7 @@ def _concise_wandb_on_log_v4(self, args, state, control, model=None, logs=None, 
     if run is None:
         return control
 
-    payload: dict[str, Any] = {"_gspo_step": int(state.global_step)}
+    payload: dict[str, Any] = {"_gspo_step": _logical_wandb_step(state.global_step)}
     for key, value in (logs or {}).items():
         raw_key = key.removeprefix("train/")
         if raw_key in wandb_plugin.TRAIN_WANDB_KEYS:
@@ -258,6 +270,16 @@ def _eval_run_v4(self, state, control=None, *, force: bool = False):
     if not actually_ran or not getattr(state, "is_world_process_zero", True):
         return result
 
+    # A weight-only branch with cloned history already contains the source
+    # checkpoint's eval point at the logical offset. Do not duplicate it when
+    # the fresh Trainer performs its internal step-0 evaluation.
+    if (
+        step == 0
+        and _wandb_step_offset() > 0
+        and os.environ.get("WANDB_HISTORY_SOURCE_RUN_ID", "").strip()
+    ):
+        return result
+
     summary_path = (
         Path(self.args.output_dir)
         / "eval"
@@ -277,7 +299,7 @@ def _eval_run_v4(self, state, control=None, *, force: bool = False):
     if run is not None:
         run.log(
             {
-                "_gspo_step": step,
+                "_gspo_step": _logical_wandb_step(step),
                 "eval/pass_at_1": float(summary.get("pass_at_1", 0.0)),
                 "eval/pass_at_8": float(summary.get("pass_at_8", 0.0)),
             }
