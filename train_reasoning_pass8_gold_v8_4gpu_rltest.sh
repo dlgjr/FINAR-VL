@@ -94,18 +94,31 @@ export GSPO_VLLM_SLEEP_LEVEL=1
 export WANDB_PROJECT=FINAR-VL-GSPO
 export WANDB_MODE=offline
 
-RUN_ID="reasoning_pass8_gold_v8_4gpu_$(date +%Y%m%d_%H%M%S)"
+RESUME_CHECKPOINT="${GSPO_RESUME_FROM_CHECKPOINT:-}"
+if [[ -n "$RESUME_CHECKPOINT" ]]; then
+  RUN_ROOT="$(dirname "$(dirname "$RESUME_CHECKPOINT")")"
+  RUN_ID="$(basename "$RUN_ROOT")"
+  export REASONING_RL_OUTPUT_DIR="$RUN_ROOT"
+else
+  RUN_ID="reasoning_pass8_gold_v8_4gpu_$(date +%Y%m%d_%H%M%S)"
+  export REASONING_RL_OUTPUT_DIR="$ROOT/output/gspo/$RUN_ID"
+fi
+export GSPO_RESUME_FROM_CHECKPOINT="$RESUME_CHECKPOINT"
 export GSPO_RUN_ID="$RUN_ID"
 export WANDB_NAME="$RUN_ID"
-export REASONING_RL_OUTPUT_DIR="$ROOT/output/gspo/$RUN_ID"
 
 mkdir -p "$REASONING_RL_OUTPUT_DIR"
+TRAIN_LOG="$REASONING_RL_OUTPUT_DIR/train.log"
+if [[ -n "$RESUME_CHECKPOINT" ]]; then
+  TRAIN_LOG="$REASONING_RL_OUTPUT_DIR/train_resume_$(basename "$RESUME_CHECKPOINT").log"
+fi
 
 echo "===== RUN CONFIG ====="
 echo "ROOT=$ROOT"
 echo "MODEL=$REASONING_START_MODEL"
 echo "DATA=$REASONING_RL_DATA"
 echo "OUTPUT=$REASONING_RL_OUTPUT_DIR"
+echo "RESUME_FROM=$RESUME_CHECKPOINT"
 echo "GPUS=$GSPO_TRAIN_GPUS"
 echo "NPROC=$GSPO_NPROC_PER_NODE"
 echo "GENERATIONS=$GSPO_NUM_GENERATIONS"
@@ -163,7 +176,7 @@ cleanup_training() {
 trap cleanup_training INT TERM EXIT
 
 setsid bash -c 'set -o pipefail; bash "$1" 2>&1 | tee "$2"' _ \
-  "$ROOT/scripts/dlc/start_gspo_reasoning.sh" "$REASONING_RL_OUTPUT_DIR/train.log" &
+  "$ROOT/scripts/dlc/start_gspo_reasoning.sh" "$TRAIN_LOG" &
 TRAIN_SESSION_PID=$!
 wait "$TRAIN_SESSION_PID"
 rc=$?
