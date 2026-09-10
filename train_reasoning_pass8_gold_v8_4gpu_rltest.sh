@@ -6,8 +6,14 @@ cd "$ROOT" || exit 1
 export QWEN3VL_ROOT="$ROOT"
 
 # ===== Data / model =====
+REFERENCE_MODEL="$ROOT/output/sft_test_unclean/checkpoint-550"
 export REASONING_RL_DATA="$ROOT/data/train_multi/train_rl_reasoning_rule_12835_gold.jsonl"
-export REASONING_START_MODEL="$ROOT/output/sft_test_unclean/checkpoint-550"
+# Optional fresh branch mode: initialize policy weights from an existing model
+# checkpoint without loading Trainer/optimizer/RNG state. KL remains anchored to
+# the original SFT reference unless GSPO_REF_MODEL is explicitly overridden.
+export GSPO_INIT_MODEL="${GSPO_INIT_MODEL:-}"
+export REASONING_START_MODEL="${GSPO_INIT_MODEL:-$REFERENCE_MODEL}"
+export GSPO_REF_MODEL="${GSPO_REF_MODEL:-$REFERENCE_MODEL}"
 
 # ===== Single node, 4 GPUs =====
 export GSPO_NNODES=1
@@ -100,6 +106,11 @@ export WANDB_PROJECT=FINAR-VL-GSPO
 export WANDB_ENTITY="${WANDB_ENTITY:-985039081-jilindaxue}"
 
 RESUME_CHECKPOINT="${GSPO_RESUME_FROM_CHECKPOINT:-}"
+if [[ -n "$RESUME_CHECKPOINT" && -n "$GSPO_INIT_MODEL" ]]; then
+  echo "Use either GSPO_RESUME_FROM_CHECKPOINT (full-state resume) or GSPO_INIT_MODEL (fresh weight-only branch), not both"
+  exit 1
+fi
+
 if [[ -n "$RESUME_CHECKPOINT" ]]; then
   : "${WANDB_RUN_ID:?Set WANDB_RUN_ID before resuming}"
   export WANDB_MODE="${WANDB_MODE:-online}"
@@ -109,7 +120,12 @@ if [[ -n "$RESUME_CHECKPOINT" ]]; then
   export REASONING_RL_OUTPUT_DIR="$RUN_ROOT"
 else
   export WANDB_MODE="${WANDB_MODE:-offline}"
-  RUN_ID="reasoning_pass8_gold_v8_4gpu_$(date +%Y%m%d_%H%M%S)"
+  if [[ -n "$GSPO_INIT_MODEL" ]]; then
+    INIT_TAG="$(basename "$GSPO_INIT_MODEL")"
+    RUN_ID="reasoning_pass8_gold_v8_fresh_${INIT_TAG}_$(date +%Y%m%d_%H%M%S)"
+  else
+    RUN_ID="reasoning_pass8_gold_v8_4gpu_$(date +%Y%m%d_%H%M%S)"
+  fi
   export REASONING_RL_OUTPUT_DIR="$ROOT/output/gspo/$RUN_ID"
 fi
 export GSPO_RESUME_FROM_CHECKPOINT="$RESUME_CHECKPOINT"
@@ -176,6 +192,8 @@ fi
 echo "===== RUN CONFIG ====="
 echo "ROOT=$ROOT"
 echo "MODEL=$REASONING_START_MODEL"
+echo "REF_MODEL=$GSPO_REF_MODEL"
+echo "INIT_MODEL=${GSPO_INIT_MODEL:-}"
 echo "DATA=$REASONING_RL_DATA"
 echo "OUTPUT=$REASONING_RL_OUTPUT_DIR"
 echo "RESUME_FROM=$RESUME_CHECKPOINT"
@@ -192,13 +210,18 @@ echo "NUM_ITERATIONS=$GSPO_NUM_ITERATIONS"
 echo "SAVE_EVAL_STEPS=$GSPO_SAVE_STEPS"
 echo "LOGGING_STEPS=$GSPO_LOGGING_STEPS"
 echo "REWARD_SHAPING=exact_numeric:+${GSPO_EXACT_NUMERIC_BONUS}, longest_correct<=${GSPO_REASONING_LONG_TOKENS}:+${GSPO_REASONING_LONGEST_CORRECT_BONUS}, shortest3_wrong:-${GSPO_REASONING_LENGTH_PENALTY}, shortest3_correct:-${GSPO_REASONING_CORRECT_SHORT_PENALTY}, reasoning>${GSPO_REASONING_LONG_TOKENS}:-${GSPO_REASONING_LENGTH_PENALTY}"
-echo "KL_REFERENCE=fixed_initial beta=$GSPO_BETA"
+echo "KL_REFERENCE=$GSPO_REF_MODEL beta=$GSPO_BETA"
 echo "EVAL_DATA=$GSPO_EVAL_DATA"
 echo "EVAL_SEEDS=$GSPO_EVAL_SEEDS"
 echo "EVAL_ASSET_ROOT=$GSPO_BENCH_ASSET_ROOT"
 
 if [[ ! -f "$REASONING_START_MODEL/config.json" ]]; then
   echo "MODEL NOT FOUND: $REASONING_START_MODEL/config.json"
+  exit 1
+fi
+
+if [[ ! -f "$GSPO_REF_MODEL/config.json" ]]; then
+  echo "REF MODEL NOT FOUND: $GSPO_REF_MODEL/config.json"
   exit 1
 fi
 
