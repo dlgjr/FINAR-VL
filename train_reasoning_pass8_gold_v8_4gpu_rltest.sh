@@ -92,14 +92,20 @@ export GSPO_VLLM_SLEEP_LEVEL=1
 
 # ===== W&B =====
 export WANDB_PROJECT=FINAR-VL-GSPO
-export WANDB_MODE=offline
 
 RESUME_CHECKPOINT="${GSPO_RESUME_FROM_CHECKPOINT:-}"
 if [[ -n "$RESUME_CHECKPOINT" ]]; then
+  : "${WANDB_RUN_ID:?Set WANDB_RUN_ID to the original synced W&B run before resuming}"
+  # W&B explicitly ignores resume while offline. Resume the already-synced run
+  # online so new history is appended to the original run instead of creating a
+  # second offline-run directory with the same ID.
+  export WANDB_MODE="${WANDB_MODE:-online}"
+  export WANDB_RESUME="${WANDB_RESUME:-must}"
   RUN_ROOT="$(dirname "$(dirname "$RESUME_CHECKPOINT")")"
   RUN_ID="$(basename "$RUN_ROOT")"
   export REASONING_RL_OUTPUT_DIR="$RUN_ROOT"
 else
+  export WANDB_MODE="${WANDB_MODE:-offline}"
   RUN_ID="reasoning_pass8_gold_v8_4gpu_$(date +%Y%m%d_%H%M%S)"
   export REASONING_RL_OUTPUT_DIR="$ROOT/output/gspo/$RUN_ID"
 fi
@@ -119,6 +125,9 @@ echo "MODEL=$REASONING_START_MODEL"
 echo "DATA=$REASONING_RL_DATA"
 echo "OUTPUT=$REASONING_RL_OUTPUT_DIR"
 echo "RESUME_FROM=$RESUME_CHECKPOINT"
+echo "WANDB_MODE=$WANDB_MODE"
+echo "WANDB_RUN_ID=${WANDB_RUN_ID:-}"
+echo "WANDB_RESUME=${WANDB_RESUME:-}"
 echo "GPUS=$GSPO_TRAIN_GPUS"
 echo "NPROC=$GSPO_NPROC_PER_NODE"
 echo "GENERATIONS=$GSPO_NUM_GENERATIONS"
