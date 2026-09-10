@@ -28,6 +28,51 @@ def _list_value(value):
     return value or []
 
 
+def _tokenizer(trainer):
+    template = getattr(trainer, "template", None)
+    tokenizer = getattr(template, "tokenizer", None)
+    if tokenizer is not None:
+        return tokenizer
+
+    processor = (
+        getattr(trainer, "processing_class", None)
+        or getattr(trainer, "processor", None)
+    )
+    tokenizer = getattr(processor, "tokenizer", None)
+    return tokenizer or processor
+
+
+def _completion_text(trainer, sample) -> str:
+    """Decode the actual online response without depending on W&B helper arity."""
+    token_ids = getattr(sample, "response_token_ids", None)
+    if token_ids is not None:
+        ids = token_ids.tolist() if hasattr(token_ids, "tolist") else list(token_ids)
+        if ids:
+            tokenizer = _tokenizer(trainer)
+            if tokenizer is not None and hasattr(tokenizer, "decode"):
+                return str(tokenizer.decode(ids, skip_special_tokens=True))
+
+    for attr in ("response", "completion"):
+        value = getattr(sample, attr, None)
+        if isinstance(value, str) and value:
+            return value
+
+    messages = getattr(sample, "messages", None) or []
+    if messages and isinstance(messages[-1], dict) and messages[-1].get("role") == "assistant":
+        content = messages[-1].get("content", "")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+            return "".join(parts)
+    return ""
+
+
 def _equal_numeric(left: Decimal, right: Decimal, places: int | None) -> bool:
     if places is None:
         return left == right
@@ -57,7 +102,7 @@ def _numeric_exact_match(pred, gold, question: str) -> bool:
     return _equal_numeric(pred_in_gold_unit, gold.value, places)
 
 
-def _sample_exact_numeric(sample) -> tuple[bool, bool]:
+def _sample_exact_numeric(trainer, sample) -> tuple[bool, bool]:
     extra = getattr(sample, "extra", {}) or {}
     if extra.get("_gold_injected"):
         return False, False
@@ -66,7 +111,7 @@ def _sample_exact_numeric(sample) -> tuple[bool, bool]:
     if verifier_type not in _NUMERIC_VERIFIERS:
         return False, False
 
-    completion = wandb_plugin._completion_text(sample)
+    completion = _completion_text(trainer, sample)
     answer = reward_module.extract_final_answer(completion, verifier_type)
     if not answer:
         return True, False
@@ -141,7 +186,7 @@ if not getattr(GSPOGRPOTrainer._dynamic_sampling, "_gspo_post_selection_length_s
         local_exact = []
         local_injected = []
         for sample in selected_samples:
-            is_numeric, is_exact = _sample_exact_numeric(sample)
+            is_numeric, is_exact = _sample_exact_numeric(self, sample)
             local_numeric.append(is_numeric)
             local_exact.append(is_exact)
             local_injected.append(bool((getattr(sample, "extra", {}) or {}).get("_gold_injected")))
