@@ -106,6 +106,7 @@ export WANDB_PROJECT=FINAR-VL-GSPO
 export WANDB_ENTITY="${WANDB_ENTITY:-985039081-jilindaxue}"
 
 RESUME_CHECKPOINT="${GSPO_RESUME_FROM_CHECKPOINT:-}"
+WANDB_STEP_OFFSET_INPUT="${GSPO_WANDB_STEP_OFFSET:-}"
 if [[ -n "$RESUME_CHECKPOINT" && -n "$GSPO_INIT_MODEL" ]]; then
   echo "Use either GSPO_RESUME_FROM_CHECKPOINT (full-state resume) or GSPO_INIT_MODEL (fresh weight-only branch), not both"
   exit 1
@@ -118,6 +119,9 @@ if [[ -n "$RESUME_CHECKPOINT" ]]; then
   RUN_ROOT="$(dirname "$(dirname "$RESUME_CHECKPOINT")")"
   RUN_ID="$(basename "$RUN_ROOT")"
   export REASONING_RL_OUTPUT_DIR="$RUN_ROOT"
+  if [[ -z "$WANDB_STEP_OFFSET_INPUT" && -f "$RUN_ROOT/wandb_step_offset.txt" ]]; then
+    export GSPO_WANDB_STEP_OFFSET="$(tr -d '[:space:]' < "$RUN_ROOT/wandb_step_offset.txt")"
+  fi
 else
   export WANDB_MODE="${WANDB_MODE:-offline}"
   if [[ -n "$GSPO_INIT_MODEL" ]]; then
@@ -131,40 +135,59 @@ fi
 export GSPO_RESUME_FROM_CHECKPOINT="$RESUME_CHECKPOINT"
 export GSPO_RUN_ID="$RUN_ID"
 
-# Optional W&B branch mode. When WANDB_HISTORY_SOURCE_RUN_ID is set, seed a
-# fresh target run with the source run's scalar history through the checkpoint
-# step, then continue logging new reward-v2 training data into that target run.
+# Optional W&B branch mode. Seed a fresh target run with source scalar history
+# through the branch point. For a full-state resume the Trainer step already
+# equals that branch point. For a weight-only branch the Trainer restarts at 0,
+# so W&B receives a logical step offset equal to the source checkpoint step.
 WANDB_HISTORY_SOURCE_RUN_ID="${WANDB_HISTORY_SOURCE_RUN_ID:-}"
 WANDB_HISTORY_UNTIL_STEP="${WANDB_HISTORY_UNTIL_STEP:-}"
 if [[ -n "$WANDB_HISTORY_SOURCE_RUN_ID" ]]; then
-  if [[ -z "$RESUME_CHECKPOINT" ]]; then
-    echo "WANDB history cloning requires GSPO_RESUME_FROM_CHECKPOINT"
+  if [[ -z "$RESUME_CHECKPOINT" && -z "$GSPO_INIT_MODEL" ]]; then
+    echo "WANDB history cloning requires either GSPO_RESUME_FROM_CHECKPOINT or GSPO_INIT_MODEL"
     exit 1
   fi
   if [[ "$WANDB_MODE" != "online" ]]; then
     echo "WANDB history cloning requires WANDB_MODE=online"
     exit 1
   fi
+  : "${WANDB_RUN_ID:?Set a fresh WANDB_RUN_ID for history branch mode}"
   if [[ "$WANDB_RUN_ID" == "$WANDB_HISTORY_SOURCE_RUN_ID" ]]; then
     echo "WANDB_RUN_ID must differ from WANDB_HISTORY_SOURCE_RUN_ID"
     exit 1
   fi
+  BRANCH_MODEL_PATH="${RESUME_CHECKPOINT:-$GSPO_INIT_MODEL}"
   if [[ -z "$WANDB_HISTORY_UNTIL_STEP" ]]; then
-    CKPT_NAME="$(basename "$RESUME_CHECKPOINT")"
+    CKPT_NAME="$(basename "$BRANCH_MODEL_PATH")"
     if [[ "$CKPT_NAME" != checkpoint-* || ! "${CKPT_NAME#checkpoint-}" =~ ^[0-9]+$ ]]; then
-      echo "Cannot derive W&B history branch step from checkpoint: $RESUME_CHECKPOINT"
+      echo "Cannot derive W&B history branch step from checkpoint: $BRANCH_MODEL_PATH"
       exit 1
     fi
     WANDB_HISTORY_UNTIL_STEP="${CKPT_NAME#checkpoint-}"
   fi
+  if [[ ! "$WANDB_HISTORY_UNTIL_STEP" =~ ^[0-9]+$ ]]; then
+    echo "WANDB_HISTORY_UNTIL_STEP must be a non-negative integer, got: $WANDB_HISTORY_UNTIL_STEP"
+    exit 1
+  fi
   export WANDB_HISTORY_UNTIL_STEP
-  export WANDB_NAME="${WANDB_NAME:-${RUN_ID}_rewardv2_from${WANDB_HISTORY_UNTIL_STEP}}"
+
+  if [[ -n "$GSPO_INIT_MODEL" && -z "$RESUME_CHECKPOINT" ]]; then
+    if [[ -n "$WANDB_STEP_OFFSET_INPUT" && "$WANDB_STEP_OFFSET_INPUT" != "$WANDB_HISTORY_UNTIL_STEP" ]]; then
+      echo "For a weight-only history branch, GSPO_WANDB_STEP_OFFSET must equal WANDB_HISTORY_UNTIL_STEP"
+      exit 1
+    fi
+    export GSPO_WANDB_STEP_OFFSET="$WANDB_HISTORY_UNTIL_STEP"
+  else
+    export GSPO_WANDB_STEP_OFFSET="${GSPO_WANDB_STEP_OFFSET:-0}"
+  fi
+
+  export WANDB_NAME="${WANDB_NAME:-${RUN_ID}_from${WANDB_HISTORY_UNTIL_STEP}}"
 
   echo "===== W&B HISTORY BRANCH ====="
   echo "WANDB_ENTITY=$WANDB_ENTITY"
   echo "WANDB_PROJECT=$WANDB_PROJECT"
   echo "WANDB_HISTORY_SOURCE_RUN_ID=$WANDB_HISTORY_SOURCE_RUN_ID"
   echo "WANDB_HISTORY_UNTIL_STEP=$WANDB_HISTORY_UNTIL_STEP"
+  echo "GSPO_WANDB_STEP_OFFSET=$GSPO_WANDB_STEP_OFFSET"
   echo "WANDB_TARGET_RUN_ID=$WANDB_RUN_ID"
   echo "WANDB_TARGET_NAME=$WANDB_NAME"
 
@@ -180,10 +203,17 @@ if [[ -n "$WANDB_HISTORY_SOURCE_RUN_ID" ]]; then
   # reopens exactly that target run and appends post-branch history.
   export WANDB_RESUME=must
 else
+  export GSPO_WANDB_STEP_OFFSET="${GSPO_WANDB_STEP_OFFSET:-0}"
   export WANDB_NAME="${WANDB_NAME:-$RUN_ID}"
 fi
 
+if [[ ! "$GSPO_WANDB_STEP_OFFSET" =~ ^[0-9]+$ ]]; then
+  echo "GSPO_WANDB_STEP_OFFSET must be a non-negative integer, got: $GSPO_WANDB_STEP_OFFSET"
+  exit 1
+fi
+
 mkdir -p "$REASONING_RL_OUTPUT_DIR"
+printf '%s\n' "$GSPO_WANDB_STEP_OFFSET" > "$REASONING_RL_OUTPUT_DIR/wandb_step_offset.txt"
 TRAIN_LOG="$REASONING_RL_OUTPUT_DIR/train.log"
 if [[ -n "$RESUME_CHECKPOINT" ]]; then
   TRAIN_LOG="$REASONING_RL_OUTPUT_DIR/train_resume_$(basename "$RESUME_CHECKPOINT").log"
@@ -202,6 +232,7 @@ echo "WANDB_ENTITY=$WANDB_ENTITY"
 echo "WANDB_RUN_ID=${WANDB_RUN_ID:-}"
 echo "WANDB_NAME=${WANDB_NAME:-}"
 echo "WANDB_RESUME=${WANDB_RESUME:-}"
+echo "WANDB_STEP_OFFSET=$GSPO_WANDB_STEP_OFFSET"
 echo "GPUS=$GSPO_TRAIN_GPUS"
 echo "NPROC=$GSPO_NPROC_PER_NODE"
 echo "GENERATIONS=$GSPO_NUM_GENERATIONS"
