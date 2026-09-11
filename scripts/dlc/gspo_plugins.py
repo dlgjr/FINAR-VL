@@ -6,6 +6,9 @@ from scripts.dlc.gspo_trainer_plugin import GSPOEvalCallback
 # Core live k/8 curriculum must patch the trainer before observability wrappers
 # snapshot those methods.
 import scripts.dlc.gspo_direct_curriculum_plugin  # noqa: F401,E402
+# Gold auxiliary CE can be present on only one rank in a micro-step. Install the
+# distributed-safe loss wrapper before W&B snapshots _compute_loss_and_metrics.
+import scripts.dlc.gspo_direct_curriculum_distributed_fix  # noqa: F401,E402
 
 # Concise W&B sink + fixed-set evaluation plumbing.
 import scripts.dlc.gspo_wandb_plugin as wandb_plugin  # noqa: F401,E402
