@@ -1,4 +1,4 @@
-"""Drive dynamic resampling from raw verifier rewards only."""
+"""Resample only Pass@8 groups whose raw verifier rewards are all zero."""
 
 from __future__ import annotations
 
@@ -21,9 +21,11 @@ if not getattr(GSPOGRPOTrainer._compute_rewards_per_func, "_gspo_raw_reward_snap
     GSPOGRPOTrainer._compute_rewards_per_func = _compute_rewards_with_raw_snapshot
 
 
-# Keep groups only when the original verifier reward has non-zero within-group
-# variance. At the final attempt, Gold injection is allowed to create variance
-# for final selection. Increase the retry budget from 3 to 4.
+# Dynamic sampling in the base trainer keeps entries where compute_std() > 0.
+# Return a synthetic positive value for every finite raw-reward group except an
+# all-zero group. Thus all-1, all-partial, and mixed groups move on immediately;
+# only all-zero raw-verifier groups are retried. Gold injection on the final
+# attempt retains the existing fallback behavior.
 if not getattr(GSPOGRPOTrainer._dynamic_sampling, "_gspo_raw_reward_resampling", False):
     _original_dynamic_sampling = GSPOGRPOTrainer._dynamic_sampling
 
@@ -32,7 +34,9 @@ if not getattr(GSPOGRPOTrainer._dynamic_sampling, "_gspo_raw_reward_resampling",
 
         original_compute_std = self.compute_std
         original_max_resample_times = self.max_resample_times
-        raw_max_resample_times = int(os.environ.get("GSPO_RAW_MAX_RESAMPLE_TIMES", "4"))
+        raw_max_resample_times = int(
+            os.environ.get("GSPO_RAW_MAX_RESAMPLE_TIMES", str(original_max_resample_times))
+        )
 
         def _raw_reward_std(samples_for_std, rewards_for_std):
             raw_rewards = getattr(self, "_gspo_raw_rewards_per_func", None)
@@ -44,12 +48,24 @@ if not getattr(GSPOGRPOTrainer._dynamic_sampling, "_gspo_raw_reward_resampling",
             # final selection so Gold keeps its existing fallback semantics.
             if bool(torch.any(rewards_for_std > raw_rewards + 1e-12)):
                 return original_compute_std(samples_for_std, rewards_for_std)
-            return original_compute_std(samples_for_std, raw_rewards)
+
+            generations = int(self.num_generations)
+            weighted = self._weighted_rewards(raw_rewards)
+            if weighted.numel() % generations:
+                raise RuntimeError(
+                    "raw-reward resampling requires complete generation groups: "
+                    f"rewards={weighted.numel()} generations={generations}"
+                )
+            grouped = weighted.view(-1, generations)
+            finite_group = torch.isfinite(grouped).all(dim=1)
+            all_zero_group = (grouped == 0).all(dim=1)
+            keep_group = finite_group & ~all_zero_group
+            return keep_group.repeat_interleave(generations).to(dtype=weighted.dtype)
 
         if not getattr(self, "_gspo_raw_resample_announced", False):
             if self.accelerator.is_main_process:
                 print(
-                    "[GSPO_RAW_RESAMPLE] criterion=raw_verifier_reward_std "
+                    "[GSPO_RAW_RESAMPLE] criterion=raw_verifier_all_zero_only "
                     f"max_resample_times={raw_max_resample_times}",
                     flush=True,
                 )
