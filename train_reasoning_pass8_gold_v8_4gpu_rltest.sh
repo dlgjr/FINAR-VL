@@ -6,7 +6,7 @@ cd "$ROOT" || exit 1
 export QWEN3VL_ROOT="$ROOT"
 
 # ===== Data / model =====
-REFERENCE_MODEL="$ROOT/output/sft_test_unclean/checkpoint-550"
+REFERENCE_MODEL="$ROOT/output/sft/visual_repair_from_ckpt120_20260912_013822/v0-20260912-013855/checkpoint-556"
 export REASONING_RL_DATA="$ROOT/data/train_multi/train_rl_reasoning_rule_12835_gold.jsonl"
 # Optional fresh branch mode: initialize policy weights from an existing model
 # checkpoint without loading Trainer/optimizer/RNG state. A weight-only branch
@@ -24,34 +24,23 @@ export GSPO_TRAIN_GPUS=0,1,2,3
 export GSPO_MASTER_ADDR=127.0.0.1
 export GSPO_MASTER_PORT=29500
 
-# ===== Reasoning / Pass@8 =====
+# ===== Direct-answer / Pass@8 =====
 export GSPO_ROUTE_MODE=reasoning
 export GSPO_ENABLE_JUDGE=false
 export GSPO_NUM_GENERATIONS=8
 export GSPO_GENERATION_BATCH_SIZE=32
 export GSPO_SCHEDULE_BATCH_SIZE=4
 
-# Post-selection shaping:
-# - the 3 shortest wrong/partial responses in each Pass@8 group get -0.3;
-# - correct responses that fall in the shortest 3 get only -0.1;
-# - reasoning >400 gets -0.3;
-# - exact numeric hits get +0.4 on top of the normal tolerance-window reward;
-# - the longest correct online response <=400 gets +0.2.
-# DIRECT_TOKENS=100 remains only as the W&B observational too-short threshold.
-export GSPO_REASONING_SHORT_TOKENS=0
-export GSPO_REASONING_DIRECT_TOKENS=100
-export GSPO_REASONING_LONG_TOKENS=400
-export GSPO_REASONING_LENGTH_PENALTY=0.3
-export GSPO_REASONING_CORRECT_SHORT_PENALTY=0.1
-export GSPO_EXACT_NUMERIC_BONUS=0.4
-export GSPO_REASONING_LONGEST_CORRECT_BONUS=0.2
+# The rollout policy is patched to direct-answer mode in
+# scripts/dlc/gspo_reasoning_policy_plugin.py. No response-length reward shaping.
+export GSPO_DIRECT_ANSWER=true
 
 # ===== Training =====
 export GSPO_NUM_TRAIN_EPOCHS=4
 export GSPO_BATCH_SIZE=1
 export GSPO_GRAD_ACC=1
 export GSPO_DYNAMIC_SAMPLE=true
-export GSPO_MAX_RESAMPLE_TIMES=3
+export GSPO_MAX_RESAMPLE_TIMES=1
 
 export GSPO_LEARNING_RATE=1e-6
 export GSPO_BETA=0.01
@@ -68,16 +57,37 @@ export GSPO_TEMPERATURE=1.2
 # start_gspo.sh uses a constant scheduler; keep the legacy callback decay out of this run.
 export GSPO_LR_DECAY_STEPS=1000000000
 
+# ===== Multimodal budget =====
+export IMAGE_MAX_TOKEN_NUM=16384
+
+# ===== Online group curriculum (computed from each live 8-way rollout) =====
+# Correct means raw verifier reward > 0.5. These are RL advantage multipliers.
+export GSPO_GROUP_WEIGHT_K0=0.0
+export GSPO_GROUP_WEIGHT_K1=1.0
+export GSPO_GROUP_WEIGHT_K2=1.0
+export GSPO_GROUP_WEIGHT_K3=1.0
+export GSPO_GROUP_WEIGHT_K4=1.0
+export GSPO_GROUP_WEIGHT_K5=1.0
+export GSPO_GROUP_WEIGHT_K6=0.7
+export GSPO_GROUP_WEIGHT_K7=0.35
+export GSPO_GROUP_WEIGHT_K8=0.0
+
+# Hard-group supervised fallback. The gold completion gets an auxiliary CE loss
+# whose weight acts like a local SFT learning-rate multiplier without changing
+# the optimizer LR for the rest of the batch.
+export GSPO_GOLD_INJECT=true
+export GSPO_GOLD_SFT_MAX_CORRECT=2
+export GSPO_GOLD_SFT_WEIGHT_K0=2.0
+export GSPO_GOLD_SFT_WEIGHT_K1=1.0
+export GSPO_GOLD_SFT_WEIGHT_K2=0.5
+export GSPO_GOLD_SFT_COEF=1.0
+
 # ===== Checkpoint / logging =====
 # One W&B train point per 32-completion generation batch; fixed eval every 40 steps via save.
 export GSPO_LOGGING_STEPS=8
 export GSPO_SAVE_STEPS=40
 export GSPO_EVAL_STEPS=40
 export GSPO_SAVE_TOTAL_LIMIT=30
-
-# ===== Gold injection =====
-export GSPO_GOLD_INJECT=true
-export GSPO_GOLD_REWARD=1.0
 
 # ===== Fixed RL eval set: 50 questions, 3 fixed seeds, mean Pass@k =====
 export GSPO_EVAL_DATA="$ROOT/data/benchmark/reasoning_calc_seen_50_clean.jsonl"
@@ -127,9 +137,9 @@ else
   export WANDB_MODE="${WANDB_MODE:-offline}"
   if [[ -n "$GSPO_INIT_MODEL" ]]; then
     INIT_TAG="$(basename "$GSPO_INIT_MODEL")"
-    RUN_ID="reasoning_pass8_gold_v8_fresh_${INIT_TAG}_$(date +%Y%m%d_%H%M%S)"
+    RUN_ID="direct_token_grpo_gold_${INIT_TAG}_$(date +%Y%m%d_%H%M%S)"
   else
-    RUN_ID="reasoning_pass8_gold_v8_4gpu_$(date +%Y%m%d_%H%M%S)"
+    RUN_ID="direct_token_grpo_gold_4gpu_$(date +%Y%m%d_%H%M%S)"
   fi
   export REASONING_RL_OUTPUT_DIR="$ROOT/output/gspo/$RUN_ID"
 fi
@@ -241,7 +251,9 @@ echo "GENERATION_BATCH=$GSPO_GENERATION_BATCH_SIZE  # must be 1*4*8=32"
 echo "NUM_ITERATIONS=$GSPO_NUM_ITERATIONS"
 echo "SAVE_EVAL_STEPS=$GSPO_SAVE_STEPS"
 echo "LOGGING_STEPS=$GSPO_LOGGING_STEPS"
-echo "REWARD_SHAPING=exact_numeric:+${GSPO_EXACT_NUMERIC_BONUS}, longest_correct<=${GSPO_REASONING_LONG_TOKENS}:+${GSPO_REASONING_LONGEST_CORRECT_BONUS}, shortest3_wrong:-${GSPO_REASONING_LENGTH_PENALTY}, shortest3_correct:-${GSPO_REASONING_CORRECT_SHORT_PENALTY}, reasoning>${GSPO_REASONING_LONG_TOKENS}:-${GSPO_REASONING_LENGTH_PENALTY}"
+echo "POLICY=direct_answer image_max_tokens=$IMAGE_MAX_TOKEN_NUM importance_sampling=token loss_type=grpo"
+echo "GROUP_WEIGHTS=k0:$GSPO_GROUP_WEIGHT_K0,k1:$GSPO_GROUP_WEIGHT_K1,k2:$GSPO_GROUP_WEIGHT_K2,k3:$GSPO_GROUP_WEIGHT_K3,k4:$GSPO_GROUP_WEIGHT_K4,k5:$GSPO_GROUP_WEIGHT_K5,k6:$GSPO_GROUP_WEIGHT_K6,k7:$GSPO_GROUP_WEIGHT_K7,k8:$GSPO_GROUP_WEIGHT_K8"
+echo "GOLD_SFT=max_correct:$GSPO_GOLD_SFT_MAX_CORRECT weights=k0:$GSPO_GOLD_SFT_WEIGHT_K0,k1:$GSPO_GOLD_SFT_WEIGHT_K1,k2:$GSPO_GOLD_SFT_WEIGHT_K2 coef:$GSPO_GOLD_SFT_COEF"
 echo "KL_REFERENCE=$GSPO_REF_MODEL beta=$GSPO_BETA"
 echo "EVAL_DATA=$GSPO_EVAL_DATA"
 echo "EVAL_SEEDS=$GSPO_EVAL_SEEDS"
