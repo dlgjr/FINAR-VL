@@ -315,6 +315,7 @@ def _postprocess_batch_with_curriculum(self, samples, batch_encoded_inputs):
             device=device,
         )
         grpo_batch.advantages = grpo_batch.advantages * rl_weights.unsqueeze(-1)
+        grpo_batch.gspo_rl_row_weights = rl_weights.to(dtype=torch.float32)
         grpo_batch.gspo_gold_sft_weights = torch.tensor(
             [
                 float(
@@ -352,12 +353,26 @@ _original_compute_loss = GSPOGRPOTrainer._compute_loss_and_metrics
 
 
 def _compute_loss_with_gold_ce(self, model, model_inputs, grpo_batch):
-    loss, metrics_data = _original_compute_loss(
-        self,
-        model,
-        model_inputs,
-        grpo_batch,
-    )
+    import torch
+
+    original_completion_mask = grpo_batch.completion_mask
+    rl_row_weights = getattr(grpo_batch, "gspo_rl_row_weights", None)
+    if rl_row_weights is not None:
+        # k=0 and k=8 are true RL skips: remove both policy and KL terms for
+        # those rows. Gold CE below still uses the original completion mask.
+        skip_rows = rl_row_weights.to(device=original_completion_mask.device) <= 0
+        if bool(skip_rows.any()):
+            grpo_batch.completion_mask = original_completion_mask & (~skip_rows.unsqueeze(-1))
+    try:
+        loss, metrics_data = _original_compute_loss(
+            self,
+            model,
+            model_inputs,
+            grpo_batch,
+        )
+    finally:
+        grpo_batch.completion_mask = original_completion_mask
+
     current_logps = self.__dict__.pop("_gspo_gold_policy_logps_tensor", None)
     gold_weights = getattr(grpo_batch, "gspo_gold_sft_weights", None)
     if current_logps is None or gold_weights is None:
@@ -370,7 +385,7 @@ def _compute_loss_with_gold_ce(self, model, model_inputs, grpo_batch):
     if not bool((gold_weights > 0).any()):
         return loss, metrics_data
 
-    completion_mask = metrics_data["completion_mask"].to(dtype=current_logps.dtype)
+    completion_mask = original_completion_mask.to(dtype=current_logps.dtype)
     weighted_mask = completion_mask * gold_weights.unsqueeze(-1)
     gold_token_mask = completion_mask * (gold_weights > 0).to(
         dtype=current_logps.dtype
