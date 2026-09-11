@@ -32,9 +32,8 @@ export REWARD_PLUGIN="${REWARD_PLUGIN:-$ROOT/scripts/dlc/gspo_plugins.py}"
 export TRAINER_PLUGIN="${TRAINER_PLUGIN:-$ROOT/scripts/dlc/gspo_plugins.py}"
 export GSPO_BENCHMARK_ALLOWLIST
 export GSPO_MODEL="${GSPO_MODEL:-${SFT_MODEL:-}}"
-# Full-parameter GRPO accepts an explicit reference model. Keep the default
-# identical to the policy init model, while allowing branch runs to initialize
-# policy weights from an RL checkpoint and still anchor KL to the original SFT.
+# Full-parameter GRPO accepts an explicit reference model. The default reference
+# is exactly the policy init checkpoint and remains fixed when sync_ref_model=false.
 export GSPO_REF_MODEL="${GSPO_REF_MODEL:-$GSPO_MODEL}"
 export ROOT_IMAGE_DIR="${ROOT_IMAGE_DIR:-${GSPO_SOURCE_DATA:+$(dirname "$GSPO_SOURCE_DATA")}}"
 export ROOT_IMAGE_DIR="${ROOT_IMAGE_DIR:-$ROOT/data/train_multi}"
@@ -145,20 +144,19 @@ if [[ "$NODE_RANK" == "0" ]]; then
   GSPO_UPDATES_PER_EPOCH=$(( (GSPO_EXPECTED_COUNT_VALUE * GSPO_NUM_GENERATIONS + GSPO_UPDATE_BATCH - 1) / GSPO_UPDATE_BATCH ))
   GSPO_GLOBAL_STEPS=$(( GSPO_UPDATES_PER_EPOCH * GSPO_NUM_TRAIN_EPOCHS * GSPO_NUM_ITERATIONS ))
   GSPO_CHECKPOINT_COUNT=$(( (GSPO_GLOBAL_STEPS + GSPO_SAVE_STEPS - 1) / GSPO_SAVE_STEPS + GSPO_NUM_TRAIN_EPOCHS + 1 ))
-  GSPO_BENCHMARK_GENERATIONS=$(( 94 * 9 * (GSPO_CHECKPOINT_COUNT + 2) ))
+  GSPO_BENCHMARK_GENERATIONS=$(( 50 * 8 * 3 * (GSPO_CHECKPOINT_COUNT + 2) ))
   echo "===== FULL GSPO DLC CONFIG ====="
   echo "nodes=$GSPO_NNODES train_ranks=$((GSPO_NNODES * GSPO_NPROC_PER_NODE)) train_gpus=$GSPO_TRAIN_GPUS judge_enabled=$GSPO_ENABLE_JUDGE judge_gpu=$GSPO_JUDGE_GPU"
   echo "model=$GSPO_MODEL ref_model=$GSPO_REF_MODEL judge_model=$GSPO_JUDGE_MODEL data=$GSPO_DATA"
   echo "resume_from_checkpoint=$GSPO_RESUME_FROM_CHECKPOINT train_output_dir=$TRAIN_OUTPUT_DIR"
   echo "wandb_mode=$WANDB_MODE wandb_project=$WANDB_PROJECT wandb_run_id=${WANDB_RUN_ID:-} wandb_resume=${WANDB_RESUME:-}"
-  echo "judge_serve_name=$GSPO_JUDGE_SERVE_NAME judge_max_tokens=$GSPO_JUDGE_MAX_TOKENS judge_tp=$GSPO_JUDGE_TENSOR_PARALLEL_SIZE judge_thinking=false"
   echo "epochs=$GSPO_NUM_TRAIN_EPOCHS generations=$GSPO_NUM_GENERATIONS iterations=$GSPO_NUM_ITERATIONS steps_per_generation=$GSPO_STEPS_PER_GENERATION generation_batch=$GSPO_GENERATION_BATCH_SIZE"
   echo "max_length=$GSPO_MAX_LENGTH max_completion_length=$GSPO_MAX_COMPLETION_LENGTH save_steps=$GSPO_SAVE_STEPS logging_steps=$GSPO_LOGGING_STEPS log_entropy=$GSPO_LOG_ENTROPY eval_steps=$GSPO_EVAL_STEPS"
-  echo "kl_beta=$GSPO_BETA entropy_coef=$GSPO_ENTROPY_COEF"
+  echo "loss_type=grpo importance_sampling_level=token kl_beta=$GSPO_BETA entropy_coef=$GSPO_ENTROPY_COEF"
   echo "sync_ref_model=${GSPO_SYNC_REF_MODEL:-false} ref_model_sync_steps=${GSPO_REF_MODEL_SYNC_STEPS:-512} ref_model_mixup_alpha=${GSPO_REF_MODEL_MIXUP_ALPHA:-0.6}"
   echo "top_reward_steps=$GSPO_TOP_REWARD_STEPS top_reward_k=$GSPO_TOP_REWARD_K"
   echo "vllm_mode=$GSPO_VLLM_MODE vllm_max_model_len=$GSPO_VLLM_MAX_MODEL_LEN vllm_max_num_seqs=$GSPO_VLLM_MAX_NUM_SEQS"
-  echo "benchmark_allowlist=$GSPO_BENCHMARK_ALLOWLIST allow_unverified_gold=$GSPO_ALLOW_UNVERIFIED_GOLD"
+  echo "benchmark_allowlist=$GSPO_BENCHMARK_ALLOWLIST allow_unverified_gold=$GSPO_ALLOW_UNVERIFIED_GOLD image_max_token_num=${IMAGE_MAX_TOKEN_NUM:-}"
   echo "expected_global_steps=$GSPO_GLOBAL_STEPS expected_checkpoints=$GSPO_CHECKPOINT_COUNT expected_reward_evaluations=$((GSPO_EXPECTED_COUNT_VALUE * GSPO_NUM_TRAIN_EPOCHS * GSPO_NUM_GENERATIONS)) benchmark_generation_count=$GSPO_BENCHMARK_GENERATIONS"
 fi
 
@@ -171,7 +169,8 @@ ARGS=(
   --split_dataset_ratio 0
   --external_plugins "$TRAINER_PLUGIN"
   --reward_funcs gspo_mixed
-  --importance_sampling_level sequence
+  --importance_sampling_level token
+  --loss_type grpo
   --tuner_type full
   --freeze_vit false
   --freeze_aligner false
@@ -220,7 +219,7 @@ ARGS=(
   --log_entropy "$GSPO_LOG_ENTROPY"
   --eval_strategy no
   --report_to wandb
-  --run_name "${WANDB_NAME:-${GSPO_RUN_ID:-GSPO}}"
+  --run_name "${WANDB_NAME:-${GSPO_RUN_ID:-GRPO}}"
   --callbacks gspo_eval
   --output_dir "$TRAIN_OUTPUT_DIR"
 )
