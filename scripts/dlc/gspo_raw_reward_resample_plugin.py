@@ -32,6 +32,7 @@ if not getattr(GSPOGRPOTrainer._dynamic_sampling, "_gspo_raw_reward_resampling",
 
         original_compute_std = self.compute_std
         original_max_resample_times = self.max_resample_times
+        raw_max_resample_times = int(os.environ.get("GSPO_RAW_MAX_RESAMPLE_TIMES", "4"))
 
         def _raw_reward_std(samples_for_std, rewards_for_std):
             raw_rewards = getattr(self, "_gspo_raw_rewards_per_func", None)
@@ -45,8 +46,17 @@ if not getattr(GSPOGRPOTrainer._dynamic_sampling, "_gspo_raw_reward_resampling",
                 return original_compute_std(samples_for_std, rewards_for_std)
             return original_compute_std(samples_for_std, raw_rewards)
 
+        if not getattr(self, "_gspo_raw_resample_announced", False):
+            if self.accelerator.is_main_process:
+                print(
+                    "[GSPO_RAW_RESAMPLE] criterion=raw_verifier_reward_std "
+                    f"max_resample_times={raw_max_resample_times}",
+                    flush=True,
+                )
+            self._gspo_raw_resample_announced = True
+
         self.compute_std = _raw_reward_std
-        self.max_resample_times = int(os.environ.get("GSPO_RAW_MAX_RESAMPLE_TIMES", "4"))
+        self.max_resample_times = raw_max_resample_times
         try:
             return _original_dynamic_sampling(self, samples, rewards_per_func)
         finally:
