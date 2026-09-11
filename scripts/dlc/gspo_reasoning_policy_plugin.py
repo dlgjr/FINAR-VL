@@ -1,14 +1,8 @@
-"""Reasoning-policy controls for the 4-GPU Pass@8 GSPO run.
+"""Direct-answer policy controls for the 4-GPU Pass@8 GRPO run.
 
-Side effects applied after ``gspo_wandb_plugin``:
-- put the generic calculation/reasoning policy in the system role for every rollout;
-- append only the two task-specific execution constraints to the user question;
-- assign total reward -0.1 to online responses shorter than 20 response tokens;
-- make in-training eval use the exact same reasoning prompt as online rollouts;
-- derive Pass@1 from the first sample of the same 8-way rollout used for Pass@8;
-- score reasoning eval with the same terminal-answer programmatic verifier as training;
-- run each in-training evaluation with three fixed seeds and return their mean;
-- preserve evaluation Pass@1/Pass@8 logging from ``gspo_wandb_plugin``.
+The filename is kept for compatibility with existing launch/import paths.
+Online rollouts and fixed-set evaluation both use the same minimal direct-answer
+prompt. No response-length or forced-reasoning reward shaping is applied here.
 """
 
 from __future__ import annotations
@@ -24,8 +18,8 @@ import scripts.sft.pass_at_8_eval as eval_module
 from scripts.dlc.gspo_trainer_plugin import GSPOGRPOTrainer
 
 
-# Historical user-side rollout prompts. Strip them before applying the new
-# system/user split so dynamic resampling cannot accumulate conflicting rules.
+# Historical prompts are stripped before applying the direct-answer suffix so
+# dynamic resampling cannot accumulate conflicting instructions.
 _OLD_PROMPT = (
     "\n请先独立分析问题，结合相关文本、表格和图像信息，完成必要的推理、计算和结果核对后再作答。不要直接猜测答案。"
     "\n请在回复最后一行按“答案：具体答案”的格式给出最终答案。"
@@ -38,8 +32,7 @@ _PREVIOUS_PROMPT = (
     "\n不要跳过读图直接猜答案，也不要只输出最终答案。"
     "\n请在回复最后一行按“答案：具体答案”的格式给出最终答案。"
 )
-
-_SYSTEM_PROMPT = """请仔细完成用户给出的计算题，并给出每一步的详细计算步骤，严禁直接输出答案。
+_LEGACY_SYSTEM_PROMPT = """请仔细完成用户给出的计算题，并给出每一步的详细计算步骤，严禁直接输出答案。
 
 1. 先理解题意，明确题目要求计算的目标是什么。
 
@@ -63,57 +56,66 @@ _SYSTEM_PROMPT = """请仔细完成用户给出的计算题，并给出每一步
 最后一行严格按照以下格式输出：
 
 最终答案：具体答案"""
-
-_USER_SUFFIX_SENTENCES = (
+_LEGACY_USER_SUFFIX_SENTENCES = (
     "严禁直接给出答案，必须给出计算的相关步骤。",
     "只使用完成用户所问计算直接需要的数据；即使图片中存在其他指标，也不要把它们加入计算过程。",
 )
-_USER_SUFFIX = "\n" + "\n".join(_USER_SUFFIX_SENTENCES)
+_DIRECT_SUFFIX = "请只输出最终答案本身，不要输出分析过程或额外解释。"
 
 
 def _clean_user_text(text: str) -> str:
     cleaned = text
     for legacy in (_OLD_PROMPT, _PREVIOUS_PROMPT):
         cleaned = cleaned.replace(legacy, "")
-    # Make the patch idempotent across repeated generation/resampling/eval calls.
-    for sentence in _USER_SUFFIX_SENTENCES:
+    for sentence in _LEGACY_USER_SUFFIX_SENTENCES:
         cleaned = cleaned.replace("\n" + sentence, "")
         cleaned = cleaned.replace(sentence, "")
+    cleaned = cleaned.replace("\n" + _DIRECT_SUFFIX, "")
+    cleaned = cleaned.replace(_DIRECT_SUFFIX, "")
     return cleaned.rstrip()
 
 
 def _patch_user_text(text: str) -> str:
-    return _clean_user_text(text) + _USER_SUFFIX
+    return _clean_user_text(text) + "\n" + _DIRECT_SUFFIX
 
 
-def _ensure_system_prompt(messages: list[Any]) -> None:
-    for message in messages:
+def _strip_legacy_system_prompt(messages: list[Any]) -> None:
+    """Remove only the legacy forced-reasoning system prompt we used to inject."""
+    remove_indices: list[int] = []
+    for index, message in enumerate(messages):
         if not isinstance(message, dict) or message.get("role") != "system":
             continue
         content = message.get("content", "")
         if isinstance(content, str):
-            if _SYSTEM_PROMPT not in content:
-                message["content"] = _SYSTEM_PROMPT + ("\n\n" + content if content.strip() else "")
-            return
-        if isinstance(content, list):
+            cleaned = content.replace(_LEGACY_SYSTEM_PROMPT, "").strip()
+            if cleaned:
+                message["content"] = cleaned
+            else:
+                remove_indices.append(index)
+        elif isinstance(content, list):
+            new_content = []
             for item in content:
                 if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
-                    if _SYSTEM_PROMPT not in item["text"]:
-                        item["text"] = _SYSTEM_PROMPT + ("\n\n" + item["text"] if item["text"].strip() else "")
-                    return
-            content.insert(0, {"type": "text", "text": _SYSTEM_PROMPT})
-            return
-        message["content"] = _SYSTEM_PROMPT
-        return
-
-    messages.insert(0, {"role": "system", "content": _SYSTEM_PROMPT})
+                    cleaned = item["text"].replace(_LEGACY_SYSTEM_PROMPT, "").strip()
+                    if cleaned:
+                        copied = dict(item)
+                        copied["text"] = cleaned
+                        new_content.append(copied)
+                else:
+                    new_content.append(item)
+            if new_content:
+                message["content"] = new_content
+            else:
+                remove_indices.append(index)
+    for index in reversed(remove_indices):
+        messages.pop(index)
 
 
 def _patch_messages(messages: list[Any], *, source: str) -> None:
     if not isinstance(messages, list):
         raise TypeError(f"{source} messages must be a list, got {type(messages)!r}")
 
-    _ensure_system_prompt(messages)
+    _strip_legacy_system_prompt(messages)
 
     for message in reversed(messages):
         if not isinstance(message, dict) or message.get("role") != "user":
@@ -127,7 +129,7 @@ def _patch_messages(messages: list[Any], *, source: str) -> None:
                     item["text"] = _patch_user_text(item["text"])
                     break
             else:
-                content.append({"type": "text", "text": _USER_SUFFIX.lstrip("\n")})
+                content.append({"type": "text", "text": _DIRECT_SUFFIX})
         else:
             raise TypeError(f"{source} user message content must be str/list, got {type(content)!r}")
         break
@@ -140,59 +142,22 @@ def _patch_sample_prompt(sample: Any) -> None:
     _patch_messages(messages, source="GSPO rollout")
 
 
-# Apply the system reasoning policy and user-side suffix to every online rollout,
-# including dynamic resamples.
-if not getattr(GSPOGRPOTrainer._generate_completions, "_gspo_system_reasoning_prompt", False):
+# Apply the direct-answer suffix to every online rollout, including dynamic resamples.
+if not getattr(GSPOGRPOTrainer._generate_completions, "_gspo_direct_answer_prompt", False):
     _original_generate_completions = GSPOGRPOTrainer._generate_completions
 
-    def _generate_completions_with_reasoning_prompt(self, samples):
+    def _generate_completions_with_direct_prompt(self, samples):
         for sample in samples:
             _patch_sample_prompt(sample)
         return _original_generate_completions(self, samples)
 
-    _generate_completions_with_reasoning_prompt._gspo_system_reasoning_prompt = True
-    GSPOGRPOTrainer._generate_completions = _generate_completions_with_reasoning_prompt
+    _generate_completions_with_direct_prompt._gspo_direct_answer_prompt = True
+    GSPOGRPOTrainer._generate_completions = _generate_completions_with_direct_prompt
 
 
-# Treat an online response shorter than the threshold as a failed reasoning sample.
-# This overrides its total reward to -0.1 even when the final answer happens to be correct.
-if not getattr(GSPOGRPOTrainer._compute_rewards_per_func, "_gspo_short_response_penalty", False):
-    _original_compute_rewards_per_func = GSPOGRPOTrainer._compute_rewards_per_func
-
-    def _compute_rewards_with_short_response_penalty(self, samples):
-        import torch
-
-        rewards = _original_compute_rewards_per_func(self, samples)
-        threshold = int(os.environ.get("GSPO_REASONING_SHORT_TOKENS", "20"))
-        penalty = float(os.environ.get("GSPO_REASONING_SHORT_REWARD", "-0.1"))
-
-        local_lengths = torch.tensor(
-            [len(getattr(sample, "response_token_ids", None) or []) for sample in samples],
-            dtype=torch.long,
-            device=self.accelerator.device,
-        )
-        global_lengths = self.accelerator.gather_for_metrics(local_lengths)
-        global_lengths = global_lengths.reshape(-1)
-        if rewards.shape[0] != global_lengths.numel():
-            raise RuntimeError(
-                "short-response reward alignment mismatch: "
-                f"rewards={rewards.shape[0]} response_lengths={global_lengths.numel()}"
-            )
-
-        short_mask = global_lengths < threshold
-        if bool(short_mask.any()):
-            rewards = rewards.clone()
-            rewards[short_mask, :] = penalty
-        return rewards
-
-    _compute_rewards_with_short_response_penalty._gspo_short_response_penalty = True
-    GSPOGRPOTrainer._compute_rewards_per_func = _compute_rewards_with_short_response_penalty
-
-
-# Make eval message construction use exactly the same system prompt and user
-# suffix transformation as online rollouts. The only eval-specific work here is
+# Make eval message construction use exactly the same direct-answer transformation as online rollouts. The only eval-specific work here is
 # converting benchmark image paths into the multimodal user content format.
-def _make_reasoning_eval_messages(row: dict[str, Any]) -> list[dict[str, Any]]:
+def _make_direct_eval_messages(row: dict[str, Any]) -> list[dict[str, Any]]:
     question = str(row["messages"][0]["content"]).replace("<image>", "")
     content: list[dict[str, Any]] = [
         {"type": "image", "image": str(path)}
@@ -204,7 +169,7 @@ def _make_reasoning_eval_messages(row: dict[str, Any]) -> list[dict[str, Any]]:
     return messages
 
 
-eval_module._make_messages = _make_reasoning_eval_messages
+eval_module._make_messages = _make_direct_eval_messages
 
 
 # _evaluate_row derives row seeds from the historical base 42. Shift that seed
@@ -231,7 +196,7 @@ def _reasoning_eval_temperature() -> float:
 
 def _judge_reasoning_generation(row: dict[str, Any], reference: str, candidate: str) -> dict[str, Any]:
     # Use the same terminal-answer verifier as GSPO training reward. This avoids
-    # false positives from a correct number appearing only inside the reasoning body.
+    # false positives from non-terminal numbers in malformed outputs.
     correct = eval_module._benchmark_programmatic_judge(row, reference, candidate)
     return {
         "text": candidate,
