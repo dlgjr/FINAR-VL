@@ -6,8 +6,8 @@ from scripts.dlc.gspo_trainer_plugin import GSPOEvalCallback
 # Side-effect patches: concise W&B metrics and raw-policy diagnostics.
 import scripts.dlc.gspo_wandb_plugin  # noqa: F401,E402
 
-# Snapshot verifier rewards before any reasoning/length shaping, and use only
-# that raw reward variance to decide dynamic resampling.
+# Snapshot verifier rewards before any reasoning/length shaping. Dynamic
+# resampling retries only Pass@8 groups whose raw verifier rewards are all zero.
 import scripts.dlc.gspo_raw_reward_resample_plugin  # noqa: F401,E402
 
 # Reasoning-policy controls are applied after W&B so they can replace the legacy
