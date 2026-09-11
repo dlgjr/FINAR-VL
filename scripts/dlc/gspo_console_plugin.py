@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import os
+
 from scripts.dlc.gspo_trainer_plugin import GSPOGRPOTrainer
 
 
-# Keep the existing rollout metric names, but count a completion as positive
-# only when its raw shaped reward is strictly greater than 0.5.
+# Keep the existing rollout metric names, but count a completion as successful
+# only when it receives a full verifier reward. Fractional Jaccard/partial
+# rewards are useful GRPO signal but are not a Pass@k success.
 _original_initial_rollout_metrics = GSPOGRPOTrainer._initial_rollout_metrics
 
 
-def _initial_rollout_metrics_success_gt_half(self, rewards_per_func):
+def _initial_rollout_metrics_success_full(self, rewards_per_func):
     import torch
 
     metrics = _original_initial_rollout_metrics(self, rewards_per_func)
@@ -21,13 +24,14 @@ def _initial_rollout_metrics_success_gt_half(self, rewards_per_func):
         metrics["rollout/positive_per_8"] = 0.0
         return metrics
 
-    positive_count = (grouped > 0.5).sum(dim=1).float()
+    threshold = float(os.environ.get("GSPO_SUCCESS_THRESHOLD", "0.999999999999"))
+    positive_count = (grouped > threshold).sum(dim=1).float()
     metrics["rollout/pass8"] = float((positive_count > 0).float().mean().item())
     metrics["rollout/positive_per_8"] = float(positive_count.mean().item())
     return metrics
 
 
-GSPOGRPOTrainer._initial_rollout_metrics = _initial_rollout_metrics_success_gt_half
+GSPOGRPOTrainer._initial_rollout_metrics = _initial_rollout_metrics_success_full
 
 
 # Filter only the stdout/logging.jsonl view. Trainer metrics and W&B still
