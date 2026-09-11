@@ -1,9 +1,14 @@
-"""Distributed-safety fix for the direct-answer gold auxiliary CE loss.
+"""Distributed-safety and pass/fail fixes for direct-answer GRPO curriculum.
 
 The core curriculum injects at most one gold row per hard global Pass@8 group.
 With per-device batch size 1, a given micro-step can therefore contain a gold
-row on only one rank.  Metric collectives must still be entered by every rank;
+row on only one rank. Metric collectives must still be entered by every rank;
 otherwise the first asymmetric gold micro-step deadlocks DDP.
+
+Pass@k counts must also reflect full verifier success, not merely a partial
+Jaccard reward. A reward of 1.0 is a pass; fractional rewards remain failures
+for k/8 routing while still contributing normally to GRPO where that group is
+kept.
 """
 
 from __future__ import annotations
@@ -14,13 +19,22 @@ import scripts.dlc.gspo_direct_curriculum_plugin as curriculum
 from scripts.dlc.gspo_trainer_plugin import GSPOGRPOTrainer
 
 
+# The curriculum uses `reward > _SUCCESS_THRESHOLD`.  Put the threshold just
+# below one so only a full verifier reward (1.0, up to floating-point noise)
+# counts toward k/8.  This matters for composite/choice rewards where partial
+# matches can be > 0.5 without being correct.
+curriculum._SUCCESS_THRESHOLD = float(
+    os.environ.get("GSPO_SUCCESS_THRESHOLD", "0.999999999999")
+)
+
+
 def _compute_loss_with_distributed_gold_ce(self, model, model_inputs, grpo_batch):
     import torch
 
     original_completion_mask = grpo_batch.completion_mask
     rl_row_weights = getattr(grpo_batch, "gspo_rl_row_weights", None)
     if rl_row_weights is not None:
-        # k=0 and k=8 are true RL skips.  Gold rows also have RL weight 0;
+        # k=0 and k=8 are true RL skips. Gold rows also have RL weight 0;
         # their supervised CE below still uses the original completion mask.
         skip_rows = rl_row_weights.to(device=original_completion_mask.device) <= 0
         if bool(skip_rows.any()):
@@ -51,7 +65,7 @@ def _compute_loss_with_distributed_gold_ce(self, model, model_inputs, grpo_batch
         dtype=current_logps.dtype
     ).unsqueeze(-1)
 
-    # Local loss: a rank without a gold row contributes exactly zero CE.  DDP
+    # Local loss: a rank without a gold row contributes exactly zero CE. DDP
     # then averages the active supervised gradient together with the other ranks.
     local_gold_tokens = gold_token_mask.sum()
     local_nll_sum = -(current_logps * weighted_mask).sum()
@@ -59,7 +73,7 @@ def _compute_loss_with_distributed_gold_ce(self, model, model_inputs, grpo_batch
     coef = float(os.environ.get("GSPO_GOLD_SFT_COEF", "1.0"))
     loss = loss + coef * local_gold_ce
 
-    # IMPORTANT: every rank enters this collective on every micro-step.  The
+    # IMPORTANT: every rank enters this collective on every micro-step. The
     # previous implementation returned early on non-gold ranks, which could
     # deadlock when only one rank owned the injected gold row.
     local_stats = torch.stack(
