@@ -25,7 +25,10 @@ def _initial_rollout_metrics_success_full(self, rewards_per_func):
         return metrics
 
     threshold = float(os.environ.get("GSPO_SUCCESS_THRESHOLD", "0.999999999999"))
-    positive_count = (grouped > threshold).sum(dim=1).float()
+    # Keep the near-1 threshold in float64. Comparing it directly against a
+    # float32 tensor rounds the scalar to 1.0, so an exact reward of 1.0 would
+    # incorrectly fail the strict-success test.
+    positive_count = (grouped.double() > threshold).sum(dim=1).float()
     metrics["rollout/pass8"] = float((positive_count > 0).float().mean().item())
     metrics["rollout/positive_per_8"] = float(positive_count.mean().item())
     return metrics
