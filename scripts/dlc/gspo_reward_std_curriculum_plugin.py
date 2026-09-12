@@ -9,6 +9,34 @@ import scripts.dlc.gspo_direct_curriculum_plugin as curriculum
 from scripts.dlc.gspo_trainer_plugin import GSPOGRPOTrainer
 
 
+def _strict_success_mask(rewards):
+    """Compare in float64 so a threshold just below 1.0 stays below 1.0."""
+    return rewards.double() > float(curriculum._SUCCESS_THRESHOLD)
+
+
+def _strict_group_correct_counts(self, rewards_per_func):
+    import torch
+
+    rewards = self._weighted_rewards(rewards_per_func).float()
+    generations = int(self.num_generations)
+    if generations != 8:
+        raise RuntimeError(f"direct curriculum requires num_generations=8, got {generations}")
+    if rewards.numel() % generations:
+        raise RuntimeError(
+            f"Pass@8 rewards must be divisible by {generations}, got {rewards.numel()}"
+        )
+    grouped = rewards.view(-1, generations)
+    finite = torch.isfinite(grouped).all(dim=1)
+    counts = _strict_success_mask(grouped).sum(dim=1).long()
+    return grouped, finite, counts
+
+
+# The strict threshold is set to 0.999999999999 by the distributed fix. A
+# float32 comparison rounds that scalar to 1.0 and makes `1.0 > threshold`
+# false. Replace the shared group counter with an identical float64 comparison.
+curriculum._group_correct_counts = _strict_group_correct_counts
+
+
 def _group_has_reward_signal(group_rewards) -> bool:
     return bool(group_rewards.float().std(unbiased=False).item() > 0.0)
 
@@ -91,7 +119,7 @@ def _annotate_and_inject_gold(self, all_samples, rewards_per_func):
 
         group_rewards = weighted[start:end]
         failed = torch.nonzero(
-            group_rewards <= curriculum._SUCCESS_THRESHOLD,
+            ~_strict_success_mask(group_rewards),
             as_tuple=False,
         ).flatten()
         target_rel = int(failed[0].item()) if failed.numel() else 0
