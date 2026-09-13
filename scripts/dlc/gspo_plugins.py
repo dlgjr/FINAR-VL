@@ -29,6 +29,8 @@ import scripts.dlc.gspo_reasoning_eval_fix_plugin  # noqa: F401,E402
 # W&B history-axis and compatibility patches.
 import scripts.dlc.gspo_wandb_timeseries_fix  # noqa: F401,E402
 import scripts.dlc.gspo_wandb_run_compat_plugin  # noqa: F401,E402
+# Publish Pass@1/Pass@8 for each of the three fixed eval seeds.
+import scripts.dlc.gspo_eval_seed_wandb_plugin  # noqa: F401,E402
 
 # Final rollout-success threshold and concise console output.
 import scripts.dlc.gspo_console_plugin as console_plugin  # noqa: F401,E402
