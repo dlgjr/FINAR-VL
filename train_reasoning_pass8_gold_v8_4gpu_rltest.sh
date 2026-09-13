@@ -47,7 +47,7 @@ export GSPO_BETA=0.01
 # Keep the selected KL reference fixed throughout each run.
 export GSPO_SYNC_REF_MODEL=false
 export GSPO_ENTROPY_COEF=0.001
-export GSPO_MAX_GRAD_NORM=1.0
+export GSPO_MAX_GRAD_NORM=7.0
 export GSPO_EPSILON=0.03
 export GSPO_EPSILON_HIGH=0.05
 
