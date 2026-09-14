@@ -1,907 +1,356 @@
 #!/usr/bin/env python3
-"""Build WebSailor-style synthetic financial reasoning data from data/raw.
-
-Pipeline:
-1. Extract source units from structured/text/image files under data/raw.
-2. Use a VLM/LLM to extract evidence-grounded financial facts.
-3. Build a relation graph and sample non-linear subgraphs with random walks.
-4. Generate obfuscated, multi-step numerical questions under hard constraints.
-5. Programmatically verify arithmetic and grounding, then reconstruct concise reasoning.
-6. Export FINAR-VL SFT and Reasoning-RL JSONL.
-"""
-
+"""Initial FINAR-VL financial data synthesis from data/raw using local model/qwen235."""
 from __future__ import annotations
 
-import argparse
-import ast
-import base64
-import csv
-import hashlib
-import io
-import json
-import os
-import random
-import re
+import argparse, ast, csv, hashlib, json, os, random, re
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Iterable
-
-from PIL import Image
-
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_RAW_ROOT = PROJECT_ROOT / "data" / "raw"
-DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "data" / "synthetic" / "finance_sailorfog"
-DEFAULT_BASE_URL = "https://api-inference.modelscope.cn/v1"
-DEFAULT_MODEL = "Qwen/Qwen3-VL-235B-A22B-Instruct"
+RAW_ROOT = PROJECT_ROOT / "data" / "raw"
+OUT_ROOT = PROJECT_ROOT / "data" / "synthetic" / "finance_world"
+MODEL = str(PROJECT_ROOT / "model" / "qwen235")
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
-SUPPORTED_SUFFIXES = {".jsonl", ".json", ".csv", ".parquet", ".txt", ".md"} | IMAGE_SUFFIXES
-SUPERVISION_KEYS = {
-    "answer",
-    "answers",
-    "assistant",
-    "gold",
-    "gold_answer",
-    "label",
-    "labels",
-    "response",
-    "solution",
-    "target",
-    "program",
-    "programs",
-    "cot",
-    "reasoning",
-    "rationale",
-    "explanation",
-    "question",
-    "questions",
-    "query",
-    "prompt",
-    "instruction",
-    "choices",
-    "options",
+SUPERVISION = {"question","questions","answer","answers","solution","cot","reasoning","rationale","label","labels","target","program","prompt","instruction","choices","options","messages","conversation","conversations"}
+IMAGE_KEYS = {"image","images","image_path","image_paths","media","media_paths"}
+CONTEXT = {"context","reference","references","passage","document","doc","text","pre_text","post_text","paragraphs","table","tables","table_ori","report","filing","article","ocr","ocr_text","source_text"}
+NUM_RE = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
+YEAR_RE = re.compile(r"(?<!\d)(20\d{2})(?:年|年度)?")
+TICKER_RE = re.compile(r"(?<!\d)([03689]\d{5})(?!\d)")
+COMPANY_RE = re.compile(r"([\u4e00-\u9fffA-Za-z0-9（）()·-]{2,50}(?:股份有限公司|集团有限公司|银行股份有限公司|证券股份有限公司|有限公司))")
+VALUE_RE = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?\s*(?:%|％|亿元|亿美元|百万元|百万美元|万元|千元|人民币元|美元|港元|元|万股|亿股|股|倍|bps|bp|基点)?", re.I)
+METRICS = {
+    "revenue": ("营业收入","营业总收入","营收","revenue","operating revenue"),
+    "gross_profit": ("毛利润","毛利","gross profit"),
+    "net_profit": ("净利润","net profit","net income"),
+    "attributable_net_profit": ("归属于母公司股东的净利润","归母净利润","net profit attributable"),
+    "operating_cash_flow": ("经营活动产生的现金流量净额","经营现金流","operating cash flow"),
+    "total_assets": ("资产总额","总资产","total assets"),
+    "current_assets": ("流动资产合计","流动资产","current assets"),
+    "total_liabilities": ("负债总额","总负债","total liabilities"),
+    "current_liabilities": ("流动负债合计","流动负债","current liabilities"),
+    "equity": ("所有者权益合计","股东权益合计","净资产","total equity","shareholders' equity"),
+    "inventory": ("存货","inventory"), "accounts_receivable": ("应收账款","accounts receivable"),
+    "eps": ("基本每股收益","每股收益","eps"), "roe": ("净资产收益率","roe","return on equity"),
+    "roa": ("总资产收益率","roa","return on assets"), "gross_margin": ("毛利率","gross margin"),
+    "net_margin": ("净利率","net margin"), "debt_ratio": ("资产负债率","debt ratio"),
+    "current_ratio": ("流动比率","current ratio"), "segment_revenue": ("分部收入","分业务收入","segment revenue"),
 }
-ALLOWED_CONSTANTS = {
-    Decimal("0"),
-    Decimal("1"),
-    Decimal("2"),
-    Decimal("4"),
-    Decimal("12"),
-    Decimal("100"),
-    Decimal("360"),
-    Decimal("365"),
-    Decimal("10000"),
-    Decimal("100000000"),
-}
-NUMBER_RE = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
+FORMULAS = {"gross_margin": ("gross_profit","revenue"), "net_margin": ("net_profit","revenue"), "current_ratio": ("current_assets","current_liabilities"), "debt_ratio": ("total_liabilities","total_assets"), "cash_conversion": ("operating_cash_flow","net_profit"), "roe": ("net_profit","equity"), "roa": ("net_profit","total_assets"), "segment_contribution": ("segment_revenue","revenue")}
+TASKS = (
+    "image_caption","financial_ocr","entity_extraction_classification","spatial_localization","single_table_qa","multi_table_reasoning","chart_data_extraction","relationship_equity_structure","basic_arithmetic_metrics","statistics_comparison_ranking","candlestick_time_series","multi_step_numerical_reasoning","cross_modal_multi_hop","long_document_cross_page","evidence_retrieval","multimodal_financial_knowledge","explanation_anomaly_causality","financial_audit_fundamentals","industry_trend_inference","risk_sentiment_policy","investment_advice_strategy","portfolio_allocation_risk_return","summary_announcement","compliance_safety_suitability","financial_reconciliation","multi_visual_numerical_reasoning","multi_chart_reasoning","multi_table_chart_reasoning","multi_visual_retrieval","cross_document_financial_reasoning","fact_consistency_check"
+)
+NUMERIC_TASKS = {"basic_arithmetic_metrics","multi_step_numerical_reasoning","financial_reconciliation","multi_visual_numerical_reasoning"}
+VISUAL_TASKS = {"image_caption","financial_ocr","spatial_localization","single_table_qa","multi_table_reasoning","chart_data_extraction","relationship_equity_structure","candlestick_time_series","cross_modal_multi_hop","multimodal_financial_knowledge","multi_visual_numerical_reasoning","multi_chart_reasoning","multi_table_chart_reasoning","multi_visual_retrieval"}
+
+ENTITY_PROMPT = '''识别金融文档实体。输出JSON：{"company_name":"","ticker":"","market":"","industry_group":"","doc_type":"annual_report|semiannual_report|quarterly_report|esg_report|research_report|prospectus|announcement|other","period":"","frequency":"annual|semiannual|quarterly|unknown"}。只使用输入材料，规则hints明确的内容不得无依据改写。'''
+FACT_PROMPT = '''你是金融事实标准化器。输入有document_entity、原文、rule_candidates和原始图片。输出{"facts":[{"candidate_id":"","metric":"","metric_canonical":"","value_text":"","numeric_value":"","unit":"","currency":"","period":"","scope":"","statement_type":"income_statement|balance_sheet|cash_flow|notes|chart|other","source_mode":"text|image","image_index":null,"visual_type":"table|chart|candlestick|relationship_diagram|terminal|document_page|other|none","visual_observation":"","evidence_quote":""}]}。文本数值fact必须引用rule_candidates.candidate_id且数字/metric_canonical保持一致；图片fact必须直接看图，精确数值看不清时只抽视觉关系；K线只描述历史可见信息；不得使用原QA答案。'''
+RECHECK_PROMPT = '''复核一个低置信度金融fact。输出{"accepted":true,"reason":""}。只有原文或原图能直接支持metric/value/period/scope时accepted=true。'''
+PLAN_PROMPT = '''基于真实金融facts规划可程序验证的数值题。输出{"status":"accepted|reject","evidence_ids":[],"steps":[{"id":"s1","operator":"ratio|difference|percentage_change|yoy_growth|gross_margin|net_margin|current_ratio|debt_ratio|cash_conversion|roe|roa|segment_contribution|component_sum","expression":"仅v0/v1/...、前序sN、+ - * /括号和常数1,2,4,12,100,360,365,10000,100000000","claimed_result":"数字","unit":"","evidence_ids":[]}],"answer_value":"","answer_unit":"","question":""}。至少使用2个真实facts；hard题至少3步并形成依赖链；主体/期间/scope/单位必须兼容；不得新增数字。'''
+QA_PROMPT = '''根据requested_task和真实金融facts/原图生成训练QA。输出{"status":"accepted|reject","task_type":"","question":"","answer":"","answer_type":"short_text|free_text|number|page_numbers|image_indices","evidence_ids":[],"visual_evidence_ids":[],"reasoning":""}。公司名、日期、指标名保持明确；难度来自多证据/多表/多图/跨页/口径对齐；视觉任务必须直接看图且图片不可被文字替代；多表/多图至少两张图参与；K线不预测未来；开放分析不超出材料。'''
+JUDGE_PROMPT = '''独立审核金融QA。输出{"supported":true,"answerable":true,"visual_required":true,"score":5,"reason":""}。答案必须被给定facts和原图支持；视觉任务必须真的需要图片；score<4代表应过滤。'''
 
 
-FACT_SYSTEM_PROMPT = """你是金融证据抽取器。只从输入原始材料和图片中抽取可以直接核验的事实，不做推测、不补常识、不使用原数据集的答案字段作为证据。
-严格输出单个 JSON 对象：
-{"facts":[{"entity":"主体","metric":"指标或属性","value_text":"原文值","numeric_value":"若为数值则给十进制数字字符串，否则为空字符串","unit":"单位及量级","period":"报告期/日期","scope":"合并/母公司/分部/产品等口径","fact_type":"numeric|categorical|temporal|text","evidence_quote":"尽量短的原文证据","page":null,"source_mode":"text|image","image_index":null}]}
-要求：
-1. 每条事实必须能在输入中逐字或从图表直接读出；禁止推导后的数值。
-2. numeric_value 保持 value_text 的原始量级，例如“12.3亿元”写 12.3，unit 写“亿元”；“8.2%”写 8.2，unit 写“%”。
-3. entity、metric、period、scope 能确定时必须写明；不能确定就留空字符串。
-4. source_mode=image 时 image_index 使用从 0 开始的图片序号；source_mode=text 时为 null。
-5. 优先抽取收入、利润、现金流、资产负债、增长率、比率、估值、风险指标、分部数据、行业/公司对比等可组合事实。
-只输出 JSON。"""
+def sid(prefix: str, *xs: Any) -> str:
+    return prefix + "_" + hashlib.sha256("\0".join(map(str,xs)).encode()).hexdigest()[:16]
 
-
-QUESTION_SYSTEM_PROMPT = """你是金融困难问题构造器。输入是一张从真实金融材料抽取的证据子图。你要模仿 WebSailor 的“复杂子图 + 信息模糊化”思想，生成一条可程序验证的金融数值推理题。
-严格输出单个 JSON 对象：
-{
-  "question":"中文问题",
-  "answer_value":"最终十进制数字字符串",
-  "answer_unit":"最终单位",
-  "answer":"最终答案文本，只含最终数值和单位",
-  "evidence_ids":["事实ID"],
-  "calculation_steps":[
-    {"expression":"只使用 v0/v1/... 与允许常数的算式","claimed_result":"十进制数字字符串","unit":"单位"},
-    {"expression":"必须引用上一结果 s1 的算式","claimed_result":"十进制数字字符串","unit":"单位"}
-  ],
-  "obfuscations":[{"type":"time_range|entity_description|metric_description|qualitative_anchor","original":"被隐藏的直接定位线索","rendered":"题目中的间接描述","evidence_ids":["事实ID"]}]
-}
-硬约束：
-1. evidence_ids 至少 3 个，且所有计算变量必须来自输入 facts；不得新增任何金融数字、比例、日期、主体、业务口径或外部事实。
-2. calculation_steps 至少 2 步；从第 2 步开始必须直接引用上一步 s1/s2/...，形成依赖链，禁止两次并列一步运算。
-3. 表达式只能使用输入给出的 v0/v1/...、前序 s1/s2/...、括号和 + - * /；字面常数只允许 0,1,2,4,12,100,360,365,10000,100000000。
-4. 最终答案必须由最后一步唯一得到，且不能直接等于某个输入事实值。
-5. 必须做至少 1 个信息模糊化：只模糊“定位线索”，例如精确期点改成前后期描述、主体名改成可唯一识别的业务描述、指标名改成财务定义描述。不得模糊计算所需的精确数值，不得造成多解。
-6. 题目应迫使模型进行跨证据定位、比较/组合和数值计算；避免直接问某个表格单元格。
-7. 金融口径必须一致：主体、报告期、合并/母公司/分部、币种、单位量级必须可核验。涉及单位换算时只能使用允许常数。
-8. 不得根据负现金流等单一信号断言造假、利润失真或经营失败；不得生成投资买卖建议。
-9. question 中出现的所有阿拉伯数字必须来自输入事实/报告期或允许常数；answer 不得泄露在 question 中。
-只输出 JSON。"""
-
-
-RECONSTRUCT_SYSTEM_PROMPT = """你是金融推导重建器。给定已经程序验证通过的问题、证据和计算骨架，写简短、教学式推导。只解释已验证步骤，不增加新事实、新数字或额外判断。输出 JSON：{"reasoning":"2到4句简洁推导"}。不要输出思维草稿或探索过程。"""
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="WebSailor-style financial data synthesis")
-    parser.add_argument("--stage", choices=("extract", "graph", "synthesize", "all"), default="all")
-    parser.add_argument("--raw-root", type=Path, default=DEFAULT_RAW_ROOT)
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
-    parser.add_argument("--base-url", default=os.environ.get("FINAR_SYNTH_BASE_URL", DEFAULT_BASE_URL))
-    parser.add_argument("--api-key", default=os.environ.get("FINAR_SYNTH_API_KEY") or os.environ.get("MODELSCOPE_SDK_TOKEN") or "EMPTY")
-    parser.add_argument("--model", default=os.environ.get("FINAR_SYNTH_MODEL", DEFAULT_MODEL))
-    parser.add_argument("--reconstruct-model", default=os.environ.get("FINAR_RECONSTRUCT_MODEL", ""))
-    parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--max-units", type=int, default=0)
-    parser.add_argument("--max-unit-chars", type=int, default=16000)
-    parser.add_argument("--target", type=int, default=2000)
-    parser.add_argument("--attempt-multiplier", type=int, default=20)
-    parser.add_argument("--min-nodes", type=int, default=5)
-    parser.add_argument("--min-edges", type=int, default=5)
-    parser.add_argument("--max-nodes", type=int, default=9)
-    parser.add_argument("--min-evidence-groups", type=int, default=2)
-    parser.add_argument("--require-image", action="store_true")
-    parser.add_argument("--seed", type=int, default=42)
-    return parser.parse_args()
-
-
-def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
+def write_jsonl(path: Path, rows: list[dict[str,Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows: f.write(json.dumps(row, ensure_ascii=False, separators=(",",":")) + "\n")
 
+def read_jsonl(path: Path) -> list[dict[str,Any]]:
+    return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
 
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    with path.open(encoding="utf-8") as handle:
-        return [json.loads(line) for line in handle if line.strip()]
+def clean_obj(x: Any) -> Any:
+    if isinstance(x, dict): return {k: clean_obj(v) for k,v in x.items() if str(k).casefold() not in SUPERVISION and str(k).casefold() not in IMAGE_KEYS}
+    if isinstance(x, list): return [clean_obj(v) for v in x]
+    return x
 
+def render(x: Any) -> str:
+    if isinstance(x, str): return x
+    if isinstance(x, (int,float)): return str(x)
+    if isinstance(x, list): return "\n".join(filter(None,(render(v) for v in x)))
+    if isinstance(x, dict): return "\n".join(f"{k}: {s}" for k,v in x.items() if (s:=render(v)))
+    return ""
 
-def stable_id(prefix: str, *parts: Any) -> str:
-    payload = "\0".join(str(part) for part in parts)
-    return f"{prefix}_{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
+def context_text(row: Any) -> str:
+    if not isinstance(row, dict): return render(row)
+    parts=[]
+    for k,v in row.items():
+        if str(k).casefold() in CONTEXT: parts.append(render(v))
+    text="\n".join(x for x in parts if x.strip())
+    return text if text else render(clean_obj(row))
 
-
-def strip_supervision(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {key: strip_supervision(item) for key, item in value.items() if str(key).casefold() not in SUPERVISION_KEYS}
-    if isinstance(value, list):
-        return [strip_supervision(item) for item in value]
-    return value
-
-
-def iter_file_records(path: Path) -> Iterable[tuple[int, Any]]:
-    suffix = path.suffix.lower()
-    if suffix == ".jsonl":
-        with path.open(encoding="utf-8-sig") as handle:
-            for index, line in enumerate(handle, 1):
-                if line.strip():
-                    yield index, json.loads(line)
-    elif suffix == ".json":
-        value = json.loads(path.read_text(encoding="utf-8-sig"))
-        if isinstance(value, list):
-            for index, row in enumerate(value, 1):
-                yield index, row
-        elif isinstance(value, dict):
-            sequence = next((value[key] for key in ("data", "items", "records", "examples", "questions") if isinstance(value.get(key), list)), None)
-            if sequence is None:
-                yield 1, value
-            else:
-                for index, row in enumerate(sequence, 1):
-                    yield index, row
-    elif suffix == ".csv":
-        with path.open(encoding="utf-8-sig", newline="") as handle:
-            for index, row in enumerate(csv.DictReader(handle), 1):
-                yield index, row
-    elif suffix == ".parquet":
+def iter_records(path: Path):
+    s=path.suffix.lower()
+    if s==".jsonl":
+        for i,line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(),1):
+            if line.strip(): yield i,json.loads(line)
+    elif s==".json":
+        x=json.loads(path.read_text(encoding="utf-8-sig")); seq=x if isinstance(x,list) else next((x[k] for k in ("data","items","records") if isinstance(x.get(k),list)),[x])
+        for i,row in enumerate(seq,1): yield i,row
+    elif s==".csv":
+        with path.open(encoding="utf-8-sig",newline="") as f:
+            for i,row in enumerate(csv.DictReader(f),1): yield i,row
+    elif s==".parquet":
         import pyarrow.parquet as pq
+        i=0
+        for b in pq.ParquetFile(path).iter_batches(batch_size=128):
+            for row in b.to_pylist(): i+=1; yield i,row
+    else: yield 1,{"text":path.read_text(encoding="utf-8",errors="replace")}
 
-        index = 0
-        for batch in pq.ParquetFile(path).iter_batches(batch_size=256):
-            for row in batch.to_pylist():
-                index += 1
-                yield index, row
-    elif suffix in {".txt", ".md"}:
-        yield 1, {"text": path.read_text(encoding="utf-8", errors="replace")}
-    elif suffix in IMAGE_SUFFIXES:
-        yield 1, {"image": path.as_posix()}
+def record_images(row: Any, source: Path, raw: Path, out: Path, key: str) -> list[str]:
+    images=[]
+    def visit(x):
+        if isinstance(x, dict):
+            data=x.get("bytes")
+            if isinstance(data,(bytes,bytearray,memoryview)):
+                target=out/"source_media"/(sid("img",source,key,len(images))+".png"); target.parent.mkdir(parents=True,exist_ok=True); target.write_bytes(bytes(data)); images.append(target.relative_to(PROJECT_ROOT).as_posix())
+            for k,v in x.items():
+                if str(k).casefold() in IMAGE_KEYS: visit(v)
+        elif isinstance(x,list):
+            for v in x: visit(v)
+        elif isinstance(x,str):
+            candidate=Path(x); opts=[candidate] if candidate.is_absolute() else [source.parent/candidate,raw/candidate,PROJECT_ROOT/candidate]
+            found=next((v for v in opts if v.is_file() and v.suffix.lower() in IMAGE_SUFFIXES),None)
+            if found:
+                rel=found.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+                if rel not in images: images.append(rel)
+    if isinstance(row,dict):
+        for k,v in row.items():
+            if str(k).casefold() in IMAGE_KEYS: visit(v)
+    return images[:5]
 
+def extract_units(raw: Path, out: Path, dpi: int) -> list[dict[str,Any]]:
+    units=[]
+    for path in sorted(raw.rglob("*")):
+        if not path.is_file(): continue
+        rel=path.relative_to(PROJECT_ROOT).as_posix(); dataset=path.relative_to(raw).parts[0]
+        if path.suffix.lower()==".pdf":
+            import fitz
+            doc=fitz.open(path); doc_id=sid("doc",rel)
+            for n,page in enumerate(doc,1):
+                d=out/"documents"/doc_id/"pages"/f"{n:04d}"; d.mkdir(parents=True,exist_ok=True)
+                img=d/"page.png"; page.get_pixmap(matrix=fitz.Matrix(dpi/72,dpi/72),alpha=False).save(img)
+                text=page.get_text("text").strip(); (d/"page.txt").write_text(text,encoding="utf-8")
+                units.append({"unit_id":sid("u",rel,n),"dataset":dataset,"document_id":doc_id,"source_ref":f"{rel}#page={n}","page":n,"text":text[:20000],"images":[img.relative_to(PROJECT_ROOT).as_posix()]})
+            doc.close(); continue
+        if path.suffix.lower() in IMAGE_SUFFIXES:
+            units.append({"unit_id":sid("u",rel),"dataset":dataset,"document_id":sid("doc",rel),"source_ref":rel,"page":None,"text":"","images":[rel]}); continue
+        if path.suffix.lower() not in {".jsonl",".json",".csv",".parquet",".txt",".md"}: continue
+        for i,row in iter_records(path):
+            text=context_text(row).strip()
+            if not text: continue
+            units.append({"unit_id":sid("u",rel,i),"dataset":dataset,"document_id":sid("doc",rel,(row.get("document_id") if isinstance(row,dict) else "") or i),"source_ref":f"{rel}#{i}","page":row.get("page") if isinstance(row,dict) else None,"text":text[:20000],"images":record_images(row,path,raw,out,str(i))})
+    write_jsonl(out/"evidence_units.jsonl",units); return units
 
-def resolve_image(value: str, source_file: Path, raw_root: Path) -> Path | None:
-    candidate = Path(value)
-    candidates = [candidate] if candidate.is_absolute() else [source_file.parent / candidate, raw_root / candidate, PROJECT_ROOT / candidate]
-    for path in candidates:
-        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES:
-            return path.resolve()
-    return None
+class Qwen:
+    def __init__(self, model: str, tp: int, max_len: int, max_images: int):
+        from transformers import AutoProcessor
+        from vllm import LLM, SamplingParams
+        self.processor=AutoProcessor.from_pretrained(model,trust_remote_code=True); self.SamplingParams=SamplingParams
+        self.llm=LLM(model=model,trust_remote_code=True,tensor_parallel_size=tp,max_model_len=max_len,limit_mm_per_prompt={"image":max_images})
+    def json(self, system: str, payload: Any, images: list[str]=[], temp: float=.1, max_tokens: int=2048) -> dict[str,Any]:
+        from qwen_vl_utils import process_vision_info
+        content=[{"type":"text","text":payload if isinstance(payload,str) else json.dumps(payload,ensure_ascii=False)}]
+        for image in images: content.append({"type":"image","image":(PROJECT_ROOT/image).resolve().as_uri()})
+        msgs=[{"role":"system","content":[{"type":"text","text":system}]},{"role":"user","content":content}]
+        prompt=self.processor.apply_chat_template(msgs,tokenize=False,add_generation_prompt=True); imgs,_=process_vision_info(msgs); req={"prompt":prompt}
+        if imgs: req["multi_modal_data"]={"image":imgs}
+        out=self.llm.generate([req],self.SamplingParams(temperature=temp,top_p=.9,max_tokens=max_tokens),use_tqdm=False)[0].outputs[0].text
+        a,b=out.find("{"),out.rfind("}")
+        if a<0 or b<a: raise ValueError("no JSON")
+        return json.loads(out[a:b+1])
 
+def entity_hint(text: str, ref: str) -> dict[str,str]:
+    t=TICKER_RE.search(ref+"\n"+text); years=YEAR_RE.findall(ref+"\n"+text); c=COMPANY_RE.search(text[:10000]); low=(ref+text).lower()
+    dtype="annual_report" if "年度报告" in low or "annual report" in low else "semiannual_report" if "半年度" in low else "quarterly_report" if "季度" in low else "research_report" if "研报" in low or "research report" in low else "other"
+    ticker=t.group(1) if t else ""; market="SSE" if ticker.startswith("6") else "SZSE" if ticker.startswith(("0","3")) else "BSE" if ticker.startswith(("4","8","9")) else "unknown"
+    return {"company_name":c.group(1) if c else "","ticker":ticker,"market":market,"period":max(years) if years else "","doc_type":dtype}
 
-def collect_images(value: Any, source_file: Path, raw_root: Path) -> list[str]:
-    found: list[Path] = []
+def build_entities(q: Qwen, units: list[dict[str,Any]], out: Path) -> list[dict[str,Any]]:
+    by=defaultdict(list)
+    for u in units: by[u["document_id"]].append(u)
+    rows=[]
+    for doc_id,us in by.items():
+        text="\n".join(u["text"] for u in us[:5])[:15000]; hint=entity_hint(text,us[0]["source_ref"]); images=us[0].get("images",[])[:1]
+        try: m=q.json(ENTITY_PROMPT,{"hints":hint,"text":text},images)
+        except Exception: m={}
+        e={"document_id":doc_id,"company_name":hint["company_name"] or m.get("company_name",""),"ticker":hint["ticker"] or m.get("ticker",""),"market":hint["market"] if hint["market"]!="unknown" else m.get("market","unknown"),"industry_group":m.get("industry_group",""),"doc_type":hint["doc_type"] if hint["doc_type"]!="other" else m.get("doc_type","other"),"period":hint["period"] or m.get("period",""),"frequency":m.get("frequency","unknown")}
+        e["entity_id"]=sid("company",e["ticker"] or e["company_name"] or doc_id); rows.append(e)
+    write_jsonl(out/"document_entities.jsonl",rows); companies={}
+    for e in rows: companies.setdefault(e["entity_id"],{k:e.get(k,"") for k in ("entity_id","company_name","ticker","market","industry_group")})
+    write_jsonl(out/"company_entities.jsonl",list(companies.values())); return rows
 
-    def visit(item: Any) -> None:
-        if isinstance(item, dict):
-            for nested in item.values():
-                visit(nested)
-        elif isinstance(item, list):
-            for nested in item:
-                visit(nested)
-        elif isinstance(item, str) and Path(item).suffix.lower() in IMAGE_SUFFIXES:
-            resolved = resolve_image(item, source_file, raw_root)
-            if resolved is not None and resolved not in found:
-                found.append(resolved)
+def metric_hits(text: str):
+    hits=[]
+    low=text.casefold()
+    for canon,aliases in METRICS.items():
+        for alias in sorted(aliases,key=len,reverse=True):
+            start=low.find(alias.casefold())
+            if start>=0: hits.append((start,start+len(alias),canon,text[start:start+len(alias)])); break
+    return sorted(hits)
 
-    visit(value)
-    if source_file.suffix.lower() in IMAGE_SUFFIXES and source_file.resolve() not in found:
-        found.insert(0, source_file.resolve())
-    paths = []
-    for path in found[:5]:
-        try:
-            paths.append(path.relative_to(PROJECT_ROOT.resolve()).as_posix())
-        except ValueError:
-            continue
-    return paths
+def candidates(unit: dict[str,Any], ent: dict[str,Any]) -> list[dict[str,Any]]:
+    rows=[]
+    for sent in re.split(r"(?<=[。！？!?;；])|\n+",unit["text"]):
+        ms=metric_hits(sent); vs=list(VALUE_RE.finditer(sent))
+        for start,end,canon,label in ms:
+            after=[v for v in vs if v.start()>=end]; v=min(after,key=lambda x:x.start()-end) if after else min(vs,key=lambda x:abs(x.start()-end),default=None)
+            if not v or abs(v.start()-end)>100: continue
+            raw=v.group(0).strip(); num=NUM_RE.search(raw)
+            if not num: continue
+            value=num.group(0).replace(",",""); unit_text=raw[num.end():].strip(); period=(YEAR_RE.search(sent).group(1) if YEAR_RE.search(sent) else ent.get("period",""))
+            rows.append({"candidate_id":sid("c",unit["unit_id"],canon,value,start),"unit_id":unit["unit_id"],"metric":label,"metric_canonical":canon,"numeric_value":value,"value_text":raw,"unit":unit_text,"period":period,"scope":"","evidence_quote":sent.strip()[:500],"alignment_distance":abs(v.start()-end)})
+    return rows
 
+def build_facts(q: Qwen, units: list[dict[str,Any]], entities: list[dict[str,Any]], out: Path, trusted=.9, recheck=.75):
+    em={e["document_id"]:e for e in entities}; allc=[]; facts=[]; quarantine=[]
+    for u in units:
+        ent=em[u["document_id"]]; cs=candidates(u,ent); allc.extend(cs); cmap={c["candidate_id"]:c for c in cs}
+        try: result=q.json(FACT_PROMPT,{"document_entity":ent,"text":u["text"],"rule_candidates":cs},u.get("images",[])[:5],max_tokens=4096)
+        except Exception: result={"facts":[]}
+        for raw in result.get("facts",[]):
+            cid=raw.get("candidate_id",""); mode=raw.get("source_mode","text")
+            if mode=="text" and raw.get("numeric_value") and cid not in cmap: continue
+            base=cmap.get(cid,{})
+            f={"fact_id":sid("f",u["unit_id"],cid or len(facts),raw.get("metric"),raw.get("evidence_quote")),"document_id":u["document_id"],"entity_id":ent["entity_id"],"company_name":ent.get("company_name",""),"industry_group":ent.get("industry_group",""),"source_ref":u["source_ref"],"page":u.get("page"),"metric":base.get("metric") or raw.get("metric",""),"metric_canonical":base.get("metric_canonical") or raw.get("metric_canonical",""),"value_text":base.get("value_text") or raw.get("value_text",""),"numeric_value":base.get("numeric_value") or raw.get("numeric_value",""),"unit":base.get("unit") or raw.get("unit",""),"currency":raw.get("currency",""),"period":base.get("period") or raw.get("period") or ent.get("period",""),"scope":raw.get("scope",""),"statement_type":raw.get("statement_type","other"),"source_mode":mode,"image_index":raw.get("image_index"),"visual_type":raw.get("visual_type","none"),"visual_observation":raw.get("visual_observation",""),"evidence_quote":base.get("evidence_quote") or raw.get("evidence_quote",""),"images":u.get("images",[])}
+            score=.35 if cid else .1; score+=.25 if f["numeric_value"] else .1; score+=.15 if f["period"] else 0; score+=.1 if f["metric_canonical"] else 0; score+=.1 if mode=="image" and f["images"] else 0; score+=.05 if f["scope"] else 0; f["confidence"]=round(min(score,1),3)
+            if f["confidence"]>=trusted: facts.append(f)
+            elif f["confidence"]>=recheck:
+                try: chk=q.json(RECHECK_PROMPT,{"fact":f,"text":u["text"],"rule_candidates":cs},u.get("images",[])[:5])
+                except Exception: chk={"accepted":False}
+                (facts if chk.get("accepted") else quarantine).append(f)
+            else: quarantine.append(f)
+    write_jsonl(out/"fact_candidates.jsonl",allc); write_jsonl(out/"graph_facts.jsonl",facts); write_jsonl(out/"fact_quarantine.jsonl",quarantine); return facts
 
-def record_source_id(record: Any, index: int) -> str:
-    if isinstance(record, dict):
-        for key in ("document_id", "doc_id", "report_id", "source_id", "sample_id", "id", "uid", "qid"):
-            if record.get(key) not in (None, ""):
-                return str(record[key])
-    return str(index)
+def build_graph(facts: list[dict[str,Any]], entities: list[dict[str,Any]], out: Path) -> list[dict[str,Any]]:
+    edges={}; groups=defaultdict(list)
+    for f in facts:
+        for typ,key in (("same_company_metric",f'{f["entity_id"]}|{f["metric_canonical"]}'),("same_company_period",f'{f["entity_id"]}|{f["period"]}'),("same_metric_period",f'{f["metric_canonical"]}|{f["period"]}'),("same_source",f["source_ref"])):
+            if key.strip("|"): groups[(typ,key)].append(f["fact_id"])
+    for (typ,_),ids in groups.items():
+        for a,b in zip(ids,ids[1:]): edges[(a,b,typ)]={"a":a,"b":b,"type":typ}
+    buckets=defaultdict(dict)
+    for f in facts:
+        buckets[(f["entity_id"],f["period"],f["scope"],f["unit"])][f["metric_canonical"]]=f
+    for _,by in buckets.items():
+        for formula,metrics in FORMULAS.items():
+            if all(m in by for m in metrics):
+                ids=[by[m]["fact_id"] for m in metrics]
+                for a,b in zip(ids,ids[1:]): edges[(a,b,"financial_formula:"+formula)]={"a":a,"b":b,"type":"financial_formula:"+formula}
+    rows=list(edges.values()); write_jsonl(out/"graph_edges.jsonl",rows)
+    ent_edges=[]
+    for i,a in enumerate(entities):
+        for b in entities[i+1:]:
+            typ="same_company_cross_period" if a["entity_id"]==b["entity_id"] and a.get("period")!=b.get("period") else "same_industry_peer" if a.get("industry_group") and a.get("industry_group")==b.get("industry_group") and a["entity_id"]!=b["entity_id"] else ""
+            if typ: ent_edges.append({"a":a["document_id"],"b":b["document_id"],"type":typ})
+    write_jsonl(out/"entity_edges.jsonl",ent_edges); return rows
 
+def adjacency(edges):
+    g=defaultdict(list)
+    for e in edges: g[e["a"]].append(e["b"]); g[e["b"]].append(e["a"])
+    return g
 
-def record_page(record: Any) -> int | None:
-    if isinstance(record, dict):
-        for key in ("page_number", "page_num", "page"):
-            value = record.get(key)
-            if isinstance(value, int):
-                return value
-            if isinstance(value, str) and value.isdigit():
-                return int(value)
-    return None
+def sample_facts(rng: random.Random, facts: list[dict[str,Any]], edges, task: str, n=10):
+    if not facts: return []
+    fmap={f["fact_id"]:f for f in facts}; g=adjacency(edges); seeds=[f for f in facts if (f["source_mode"]=="image")== (task in VISUAL_TASKS)] or facts
+    cur=rng.choice(seeds)["fact_id"]; ids=[cur]
+    while len(ids)<n:
+        opts=[x for x in g.get(cur,[]) if x not in ids]
+        if not opts: break
+        cur=rng.choice(opts); ids.append(cur)
+    return [fmap[x] for x in ids]
 
+def eval_expr(expr: str, vals: dict[str,Decimal]) -> Decimal:
+    tree=ast.parse(expr,mode="eval")
+    def ev(n):
+        if isinstance(n,ast.Expression): return ev(n.body)
+        if isinstance(n,ast.Name) and n.id in vals: return vals[n.id]
+        if isinstance(n,ast.Constant) and isinstance(n.value,(int,float)): return Decimal(str(n.value))
+        if isinstance(n,ast.BinOp) and isinstance(n.op,(ast.Add,ast.Sub,ast.Mult,ast.Div)):
+            a,b=ev(n.left),ev(n.right); return a+b if isinstance(n.op,ast.Add) else a-b if isinstance(n.op,ast.Sub) else a*b if isinstance(n.op,ast.Mult) else a/b
+        raise ValueError(expr)
+    return ev(tree)
 
-def extract_source_units(raw_root: Path, max_units: int, max_chars: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    units: list[dict[str, Any]] = []
-    failures: list[dict[str, Any]] = []
-    for path in sorted(raw_root.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in SUPPORTED_SUFFIXES:
-            continue
-        try:
-            for index, record in iter_file_records(path):
-                cleaned = strip_supervision(record)
-                text = json.dumps(cleaned, ensure_ascii=False, separators=(",", ":"))
-                if not text.strip() and path.suffix.lower() not in IMAGE_SUFFIXES:
-                    continue
-                relative = path.relative_to(PROJECT_ROOT).as_posix()
-                dataset = path.relative_to(raw_root).parts[0] if path != raw_root else "raw"
-                source_id = record_source_id(record, index)
-                units.append(
-                    {
-                        "unit_id": stable_id("u", relative, source_id, index),
-                        "dataset": dataset,
-                        "source_ref": f"{relative}#{index}",
-                        "source_id": source_id,
-                        "page": record_page(record),
-                        "text": text[:max_chars],
-                        "images": collect_images(record, path, raw_root),
-                    }
-                )
-                if max_units and len(units) >= max_units:
-                    return units, failures
-        except Exception as error:
-            failures.append({"stage": "extract", "source": str(path), "error": str(error)})
-    return units, failures
-
-
-def image_data_url(path: Path) -> str:
-    image = Image.open(path).convert("RGB")
-    image.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
-    buffer = io.BytesIO()
-    image.save(buffer, format="JPEG", quality=90)
-    return f"data:image/jpeg;base64,{base64.b64encode(buffer.getvalue()).decode('ascii')}"
-
-
-def extract_json_object(text: str) -> dict[str, Any]:
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
-        stripped = re.sub(r"\s*```$", "", stripped)
-    start = stripped.find("{")
-    end = stripped.rfind("}")
-    if start < 0 or end < start:
-        raise ValueError("model output contains no JSON object")
-    return json.loads(stripped[start : end + 1])
-
-
-def call_json(client: Any, model: str, system_prompt: str, prompt: str, images: list[str], temperature: float, max_tokens: int) -> dict[str, Any]:
-    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-    for image in images:
-        content.append({"type": "image_url", "image_url": {"url": image_data_url(PROJECT_ROOT / image)}})
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": content}],
-        temperature=temperature,
-        top_p=0.9,
-        max_tokens=max_tokens,
-    )
-    return extract_json_object(response.choices[0].message.content or "")
-
-
-def decimal_string(value: Any) -> str:
-    text = str(value or "").strip().replace(",", "")
-    if not text:
-        return ""
+def numeric_sample(q: Qwen, task: str, fs: list[dict[str,Any]], images: list[str]):
+    nums=[f for f in fs if f.get("numeric_value")]
+    if len(nums)<2: return None
+    aliases={f"v{i}":f for i,f in enumerate(nums)}; payload={"task":task,"facts":[{**f,"variable":v,"images":[]} for v,f in aliases.items()]}
+    try: p=q.json(PLAN_PROMPT,payload,images,temp=.3,max_tokens=3072)
+    except Exception: return None
+    if p.get("status")!="accepted" or not p.get("question") or not p.get("steps"): return None
+    vals={v:Decimal(f["numeric_value"].replace(",","")) for v,f in aliases.items()}; used=set()
     try:
-        return format(Decimal(text), "f")
-    except InvalidOperation:
-        return ""
+        for i,s in enumerate(p["steps"],1):
+            names={x.id for x in ast.walk(ast.parse(s["expression"],mode="eval")) if isinstance(x,ast.Name)}
+            if i>1 and not any(n.startswith("s") for n in names): return None
+            used|={n for n in names if n.startswith("v")}; vals[f"s{i}"]=eval_expr(s["expression"],vals)
+            if abs(vals[f"s{i}"]-Decimal(str(s["claimed_result"])))>Decimal("0.0001"): return None
+        ans=vals[f"s{len(p['steps'])}"]
+        if abs(ans-Decimal(str(p["answer_value"])))>Decimal("0.0001"): return None
+    except (ValueError,InvalidOperation,ZeroDivisionError): return None
+    usedfacts=[aliases[x] for x in used if x in aliases]; return p,usedfacts
 
-
-def close_decimal(left: Decimal, right: Decimal) -> bool:
-    tolerance = max(Decimal("0.000001"), abs(left) * Decimal("0.000001"))
-    return abs(left - right) <= tolerance
-
-
-def extract_unit_facts(client: Any, model: str, unit: dict[str, Any]) -> list[dict[str, Any]]:
-    prompt = f"source_ref={unit['source_ref']}\npage={unit.get('page')}\n原始材料：\n{unit['text']}"
-    result = call_json(client, model, FACT_SYSTEM_PROMPT, prompt, unit["images"], 0.1, 4096)
-    facts = []
-    for index, raw in enumerate(result.get("facts") or []):
-        if not isinstance(raw, dict):
-            continue
-        quote = str(raw.get("evidence_quote") or "").strip()
-        metric = str(raw.get("metric") or "").strip()
-        if not quote or not metric:
-            continue
-        numeric_value = decimal_string(raw.get("numeric_value"))
-        source_mode = "image" if raw.get("source_mode") == "image" else "text"
-        image_index = raw.get("image_index") if source_mode == "image" else None
-        image_path = ""
-        if isinstance(image_index, int) and 0 <= image_index < len(unit["images"]):
-            image_path = unit["images"][image_index]
-        if source_mode == "image" and not image_path:
-            continue
-        if source_mode == "text":
-            haystack = re.sub(r"\s+", "", unit["text"])
-            needle = re.sub(r"\s+", "", quote)
-            if not needle or needle not in haystack:
-                continue
-        if numeric_value:
-            observed_numbers = []
-            for text in (quote, str(raw.get("value_text") or "")):
-                for match in NUMBER_RE.findall(text):
-                    try:
-                        observed_numbers.append(Decimal(match.replace(",", "")))
-                    except InvalidOperation:
-                        pass
-            if not any(close_decimal(Decimal(numeric_value), observed) for observed in observed_numbers):
-                continue
-        facts.append(
-            {
-                "fact_id": stable_id("f", unit["unit_id"], index, quote, metric),
-                "unit_id": unit["unit_id"],
-                "dataset": unit["dataset"],
-                "source_ref": unit["source_ref"],
-                "source_id": unit["source_id"],
-                "page": raw.get("page") if isinstance(raw.get("page"), int) else unit.get("page"),
-                "entity": str(raw.get("entity") or "").strip(),
-                "metric": metric,
-                "value_text": str(raw.get("value_text") or "").strip(),
-                "numeric_value": numeric_value,
-                "unit": str(raw.get("unit") or "").strip(),
-                "period": str(raw.get("period") or "").strip(),
-                "scope": str(raw.get("scope") or "").strip(),
-                "fact_type": str(raw.get("fact_type") or ("numeric" if numeric_value else "text")),
-                "evidence_quote": quote[:600],
-                "source_mode": source_mode,
-                "image": image_path,
-            }
-        )
-    return facts
-
-
-def build_facts(client: Any, model: str, units: list[dict[str, Any]], workers: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    facts: list[dict[str, Any]] = []
-    failures: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(extract_unit_facts, client, model, unit): unit for unit in units}
-        for future in as_completed(futures):
-            unit = futures[future]
-            try:
-                facts.extend(future.result())
-            except Exception as error:
-                failures.append({"stage": "fact_extraction", "source": unit["source_ref"], "error": str(error)})
-    facts.sort(key=lambda fact: fact["fact_id"])
-    return facts, failures
-
-
-def norm(value: str) -> str:
-    return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", value).casefold()
-
-
-def fact_group(fact: dict[str, Any]) -> str:
-    page = fact.get("page")
-    return f"{fact['source_ref']}@{page}" if page is not None else fact["source_ref"]
-
-
-def build_edges(facts: list[dict[str, Any]]) -> list[dict[str, str]]:
-    groups: dict[tuple[str, str], list[str]] = defaultdict(list)
-    for fact in facts:
-        entity = norm(fact["entity"])
-        metric = norm(fact["metric"])
-        period = norm(fact["period"])
-        if entity and metric:
-            groups[("entity_metric", f"{entity}|{metric}")].append(fact["fact_id"])
-        if entity and period:
-            groups[("entity_period", f"{entity}|{period}")].append(fact["fact_id"])
-        if metric and period:
-            groups[("metric_period", f"{metric}|{period}")].append(fact["fact_id"])
-        groups[("evidence_group", fact_group(fact))].append(fact["fact_id"])
-
-    edges: dict[tuple[str, str, str], dict[str, str]] = {}
-    edge_type_map = {
-        "entity_metric": "same_metric_cross_period",
-        "entity_period": "same_entity_same_period",
-        "metric_period": "peer_comparison",
-        "evidence_group": "same_evidence_group",
-    }
-    for (group_type, _), ids in groups.items():
-        ids = sorted(set(ids))[:20]
-        for left, right in zip(ids, ids[1:]):
-            a, b = sorted((left, right))
-            edge_type = edge_type_map[group_type]
-            edges[(a, b, edge_type)] = {"a": a, "b": b, "type": edge_type}
-    return sorted(edges.values(), key=lambda edge: (edge["a"], edge["b"], edge["type"]))
-
-
-def graph_adjacency(edges: list[dict[str, str]]) -> dict[str, list[tuple[str, str]]]:
-    adjacency: dict[str, list[tuple[str, str]]] = defaultdict(list)
-    for edge in edges:
-        adjacency[edge["a"]].append((edge["b"], edge["type"]))
-        adjacency[edge["b"]].append((edge["a"], edge["type"]))
-    return adjacency
-
-
-def sample_subgraph(rng: random.Random, facts_by_id: dict[str, dict[str, Any]], adjacency: dict[str, list[tuple[str, str]]], min_nodes: int, min_edges: int, max_nodes: int) -> tuple[list[dict[str, Any]], list[dict[str, str]]] | None:
-    seeds = [fact_id for fact_id, fact in facts_by_id.items() if fact["numeric_value"] and adjacency.get(fact_id)]
-    if not seeds:
-        return None
-    seeds.sort(key=lambda fact_id: (len(adjacency[fact_id]), fact_id))
-    seed = rng.choice(seeds[: max(1, len(seeds) // 2)])
-    nodes = [seed]
-    node_set = {seed}
-    sampled_edges: dict[tuple[str, str, str], dict[str, str]] = {}
-    current = seed
-
-    for _ in range(max_nodes * 8):
-        base = rng.choice(nodes) if rng.random() < 0.45 else current
-        options = [(neighbor, edge_type) for neighbor, edge_type in adjacency.get(base, []) if neighbor not in node_set]
-        if not options:
-            expandable = [node for node in nodes if any(neighbor not in node_set for neighbor, _ in adjacency.get(node, []))]
-            if not expandable:
-                break
-            base = rng.choice(expandable)
-            options = [(neighbor, edge_type) for neighbor, edge_type in adjacency[base] if neighbor not in node_set]
-        neighbor, edge_type = rng.choice(options)
-        a, b = sorted((base, neighbor))
-        sampled_edges[(a, b, edge_type)] = {"a": a, "b": b, "type": edge_type}
-        nodes.append(neighbor)
-        node_set.add(neighbor)
-        current = neighbor
-        for linked, linked_type in adjacency.get(neighbor, []):
-            if linked in node_set:
-                x, y = sorted((neighbor, linked))
-                sampled_edges[(x, y, linked_type)] = {"a": x, "b": y, "type": linked_type}
-        if len(nodes) >= min_nodes and len(sampled_edges) >= min_edges:
-            break
-        if len(nodes) >= max_nodes:
-            break
-
-    if len(nodes) < min_nodes or len(sampled_edges) < min_edges:
-        return None
-    return [facts_by_id[fact_id] for fact_id in nodes], list(sampled_edges.values())
-
-
-def subgraph_hardness(facts: list[dict[str, Any]], edges: list[dict[str, str]], min_evidence_groups: int, require_image: bool) -> tuple[bool, str]:
-    numeric = [fact for fact in facts if fact["numeric_value"]]
-    groups = {fact_group(fact) for fact in facts}
-    relation_types = {edge["type"] for edge in edges}
-    degree = Counter()
-    for edge in edges:
-        degree[edge["a"]] += 1
-        degree[edge["b"]] += 1
-    if len(numeric) < 3:
-        return False, "subgraph_numeric_facts_lt_3"
-    if len(groups) < min_evidence_groups:
-        return False, "subgraph_evidence_groups_too_few"
-    if len(relation_types) < 2:
-        return False, "subgraph_relation_types_lt_2"
-    if max(degree.values(), default=0) < 2:
-        return False, "subgraph_has_no_branch"
-    if require_image and not any(fact.get("image") for fact in facts):
-        return False, "subgraph_has_no_image"
-    periods = {norm(fact["period"]) for fact in numeric if norm(fact["period"])}
-    metrics = {norm(fact["metric"]) for fact in numeric if norm(fact["metric"])}
-    if len(periods) < 2 and len(metrics) < 3:
-        return False, "subgraph_temporal_or_metric_diversity_too_low"
-    return True, "accepted"
-
-
-def candidate_prompt(facts: list[dict[str, Any]], edges: list[dict[str, str]]) -> tuple[str, dict[str, str]]:
-    aliases: dict[str, str] = {}
-    rendered = []
-    numeric_index = 0
-    for fact in facts:
-        item = dict(fact)
-        if fact["numeric_value"]:
-            alias = f"v{numeric_index}"
-            numeric_index += 1
-            aliases[alias] = fact["fact_id"]
-            item["variable"] = alias
+def synthesize(q: Qwen, facts, edges, out: Path, tasks: list[str], target: int, seed: int):
+    rng=random.Random(seed); sft=[]; rl=[]; rejected=[]; counts=Counter()
+    normal=[t for t in tasks if t!="fact_consistency_check"]
+    for attempt in range(target*30):
+        if len(sft)>=target: break
+        task=normal[attempt%len(normal)]; fs=sample_facts(rng,facts,edges,task); images=[]
+        for f in fs:
+            if f.get("source_mode")=="image":
+                idx=f.get("image_index"); arr=f.get("images",[]); im=arr[idx] if isinstance(idx,int) and idx<len(arr) else arr[0] if len(arr)==1 else None
+                if im and im not in images: images.append(im)
+        images=images[:5]
+        if task in NUMERIC_TASKS:
+            result=numeric_sample(q,task,fs,images if task=="multi_visual_numerical_reasoning" else [])
+            if not result: continue
+            p,used=result; question=p["question"]; answer=f'{p["answer_value"]}{p.get("answer_unit","")}'
         else:
-            item["variable"] = ""
-        rendered.append(item)
-    payload = {"facts": rendered, "edges": edges}
-    return "证据子图：\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")), aliases
+            payload={"requested_task":task,"facts":[{**f,"images":[]} for f in fs]}
+            try: c=q.json(QA_PROMPT,payload,images,temp=.5,max_tokens=3072)
+            except Exception: continue
+            if c.get("status")!="accepted" or c.get("task_type")!=task: continue
+            try: j=q.json(JUDGE_PROMPT,{"task":task,"question":c.get("question"),"answer":c.get("answer"),"facts":payload["facts"]},images,max_tokens=1024)
+            except Exception: continue
+            if not j.get("supported") or not j.get("answerable") or int(j.get("score",0))<4 or (task in VISUAL_TASKS and not j.get("visual_required")): continue
+            question,answer=c["question"],c["answer"]; used=[f for f in fs if f["fact_id"] in set(c.get("evidence_ids",[]))] or fs[:2]
+        prompt=("<image>"*len(images))+"参考材料：\n"+"\n".join(f'[{i+1}] {f["evidence_quote"]}' if f.get("source_mode")=="text" else f'[{i+1}] 请查看对应图片证据。' for i,f in enumerate(fs))+"\n\n问题："+question
+        row={"messages":[{"role":"user","content":prompt},{"role":"assistant","content":str(answer)}],"source":"finance_world_initial","split":"train","images":images,"task":task,"metadata":{"evidence_ids":[f["fact_id"] for f in used],"initial_synthesis":True}}
+        sft.append(row); counts[task]+=1
+        if task in NUMERIC_TASKS: rl.append({"sample_id":sid("syn",task,question),"messages":[{"role":"user","content":prompt}],"source":"finance_world_initial","split":"train","images":images,"task":task,"output_format":"number_or_free_text","solution":str(answer),"reward_type":"rule","reward_subtype":"numeric","verifier_type":"numeric","metadata":row["metadata"]})
+    write_jsonl(out/"train_sft.jsonl",sft); write_jsonl(out/"train_rl_reasoning.jsonl",rl); write_jsonl(out/"rejected.jsonl",rejected); (out/"audit.json").write_text(json.dumps({"accepted":len(sft),"rl":len(rl),"tasks":counts},ensure_ascii=False,indent=2),encoding="utf-8")
 
+def consistency_negatives(cands, limit):
+    by=defaultdict(list)
+    for c in cands: by[c["unit_id"]].append(c)
+    rows=[]
+    for group in by.values():
+        if len(group)<2: continue
+        a,b=group[0],group[1]
+        if a["numeric_value"]==b["numeric_value"]: continue
+        q=f'材料是否支持“{a["metric"]}为{b["value_text"]}”这一陈述？'; ans=f'不支持。材料中{a["metric"]}为{a["value_text"]}，{b["value_text"]}对应{b["metric"]}。'
+        rows.append({"messages":[{"role":"user","content":a["evidence_quote"]+"\n\n"+q},{"role":"assistant","content":ans}],"source":"finance_world_initial","split":"train","images":[],"task":"fact_consistency_check"})
+        if len(rows)>=limit: break
+    return rows
 
-def expression_names(expression: str) -> set[str]:
-    tree = ast.parse(expression, mode="eval")
-    return {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+def parse_args():
+    p=argparse.ArgumentParser(); p.add_argument("--stage",choices=("extract","entities","facts","graph","synthesize","all"),default="all"); p.add_argument("--raw-root",type=Path,default=RAW_ROOT); p.add_argument("--output-root",type=Path,default=OUT_ROOT); p.add_argument("--model",default=MODEL); p.add_argument("--tensor-parallel-size",type=int,default=8); p.add_argument("--max-model-len",type=int,default=32768); p.add_argument("--max-images",type=int,default=5); p.add_argument("--pdf-dpi",type=int,default=144); p.add_argument("--target",type=int,default=2000); p.add_argument("--tasks",nargs="+",choices=TASKS,default=list(TASKS)); p.add_argument("--seed",type=int,default=42); p.add_argument("--consistency-negative-ratio",type=float,default=.05); return p.parse_args()
 
+def main():
+    a=parse_args(); a.output_root.mkdir(parents=True,exist_ok=True); units_path=a.output_root/"evidence_units.jsonl"; ents_path=a.output_root/"document_entities.jsonl"; facts_path=a.output_root/"graph_facts.jsonl"; edges_path=a.output_root/"graph_edges.jsonl"
+    if a.stage in {"extract","all"}: units=extract_units(a.raw_root,a.output_root,a.pdf_dpi)
+    if a.stage in {"entities","facts","synthesize","all"}: q=Qwen(a.model,a.tensor_parallel_size,a.max_model_len,a.max_images)
+    if a.stage in {"entities","all"}: entities=build_entities(q,read_jsonl(units_path),a.output_root)
+    if a.stage in {"facts","all"}: build_facts(q,read_jsonl(units_path),read_jsonl(ents_path),a.output_root)
+    if a.stage in {"graph","all"}: build_graph(read_jsonl(facts_path),read_jsonl(ents_path),a.output_root)
+    if a.stage in {"synthesize","all"}:
+        synthesize(q,read_jsonl(facts_path),read_jsonl(edges_path),a.output_root,a.tasks,a.target,a.seed)
+        if "fact_consistency_check" in a.tasks:
+            rows=read_jsonl(a.output_root/"train_sft.jsonl"); neg=consistency_negatives(read_jsonl(a.output_root/"fact_candidates.jsonl"),max(1,int(a.target*a.consistency_negative_ratio))); write_jsonl(a.output_root/"train_sft.jsonl",rows+neg)
 
-def eval_expression(expression: str, values: dict[str, Decimal]) -> Decimal:
-    tree = ast.parse(expression, mode="eval")
-
-    def evaluate(node: ast.AST) -> Decimal:
-        if isinstance(node, ast.Expression):
-            return evaluate(node.body)
-        if isinstance(node, ast.Name) and node.id in values:
-            return values[node.id]
-        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-            value = Decimal(str(node.value))
-            if value not in ALLOWED_CONSTANTS:
-                raise ValueError(f"literal constant not allowed: {value}")
-            return value
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
-            value = evaluate(node.operand)
-            return value if isinstance(node.op, ast.UAdd) else -value
-        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
-            left = evaluate(node.left)
-            right = evaluate(node.right)
-            if isinstance(node.op, ast.Add):
-                return left + right
-            if isinstance(node.op, ast.Sub):
-                return left - right
-            if isinstance(node.op, ast.Mult):
-                return left * right
-            return left / right
-        raise ValueError("unsupported expression")
-
-    return evaluate(tree)
-
-
-def allowed_question_numbers(facts: list[dict[str, Any]]) -> list[Decimal]:
-    allowed = list(ALLOWED_CONSTANTS)
-    for fact in facts:
-        if fact["numeric_value"]:
-            allowed.append(Decimal(fact["numeric_value"]))
-        for text in (fact["period"], fact["value_text"]):
-            for match in NUMBER_RE.findall(text or ""):
-                try:
-                    allowed.append(Decimal(match.replace(",", "")))
-                except InvalidOperation:
-                    pass
-    return allowed
-
-
-def verify_candidate(candidate: dict[str, Any], facts: list[dict[str, Any]], aliases: dict[str, str], min_evidence_groups: int) -> tuple[bool, str, dict[str, Any]]:
-    fact_map = {fact["fact_id"]: fact for fact in facts}
-    evidence_ids = candidate.get("evidence_ids") or []
-    if len(set(evidence_ids)) < 3 or any(fact_id not in fact_map for fact_id in evidence_ids):
-        return False, "invalid_evidence_ids", {}
-    used_facts = [fact_map[fact_id] for fact_id in dict.fromkeys(evidence_ids)]
-    if len({fact_group(fact) for fact in used_facts}) < min_evidence_groups:
-        return False, "used_evidence_groups_too_few", {}
-
-    steps = candidate.get("calculation_steps") or []
-    if len(steps) < 2:
-        return False, "calculation_steps_lt_2", {}
-    values = {alias: Decimal(fact_map[fact_id]["numeric_value"]) for alias, fact_id in aliases.items() if fact_map[fact_id]["numeric_value"]}
-    used_aliases: set[str] = set()
-    step_results: list[Decimal] = []
-    for index, step in enumerate(steps, 1):
-        expression = str(step.get("expression") or "")
-        try:
-            names = expression_names(expression)
-            if any(name not in values for name in names):
-                return False, "expression_uses_unknown_variable", {}
-            if index > 1 and f"s{index - 1}" not in names:
-                return False, "calculation_chain_not_dependent", {}
-            used_aliases.update(name for name in names if name.startswith("v"))
-            result = eval_expression(expression, values)
-            claimed = Decimal(decimal_string(step.get("claimed_result")))
-        except Exception:
-            return False, "arithmetic_expression_invalid", {}
-        if not close_decimal(result, claimed):
-            return False, "claimed_step_result_mismatch", {}
-        values[f"s{index}"] = result
-        step_results.append(result)
-
-    calc_fact_ids = {aliases[alias] for alias in used_aliases if alias in aliases}
-    if len(calc_fact_ids) < 3 or not calc_fact_ids.issubset(set(evidence_ids)):
-        return False, "calculation_uses_lt_3_grounded_facts", {}
-
-    answer_value_text = decimal_string(candidate.get("answer_value"))
-    if not answer_value_text:
-        return False, "answer_value_invalid", {}
-    answer_value = Decimal(answer_value_text)
-    if not close_decimal(answer_value, step_results[-1]):
-        return False, "final_answer_mismatch", {}
-    if any(close_decimal(answer_value, Decimal(fact_map[fact_id]["numeric_value"])) for fact_id in calc_fact_ids):
-        return False, "answer_is_direct_fact", {}
-
-    question = str(candidate.get("question") or "").strip()
-    answer = str(candidate.get("answer") or "").strip()
-    if not question or not answer:
-        return False, "question_or_answer_empty", {}
-    answer_numbers = []
-    for match in NUMBER_RE.findall(answer):
-        try:
-            answer_numbers.append(Decimal(match.replace(",", "")))
-        except InvalidOperation:
-            pass
-    if len(answer_numbers) != 1 or not close_decimal(answer_numbers[0], answer_value):
-        return False, "answer_format_invalid", {}
-    for match in NUMBER_RE.findall(question):
-        try:
-            if close_decimal(Decimal(match.replace(",", "")), answer_value):
-                return False, "answer_leaked_in_question", {}
-        except InvalidOperation:
-            pass
-
-    allowed_numbers = allowed_question_numbers(used_facts)
-    for match in NUMBER_RE.findall(question):
-        value = Decimal(match.replace(",", ""))
-        if not any(close_decimal(value, allowed) for allowed in allowed_numbers):
-            return False, "question_contains_ungrounded_number", {}
-
-    obfuscations = candidate.get("obfuscations") or []
-    if not obfuscations:
-        return False, "missing_obfuscation", {}
-    valid_obfuscation = False
-    for item in obfuscations:
-        original = str(item.get("original") or "").strip()
-        rendered = str(item.get("rendered") or "").strip()
-        refs = set(item.get("evidence_ids") or [])
-        if not (original and rendered and rendered in question and original not in question and refs and refs.issubset(set(evidence_ids))):
-            continue
-        masks_required_value = False
-        for fact_id in refs:
-            fact = fact_map[fact_id]
-            numeric_texts = {str(fact.get("value_text") or "").strip(), str(fact.get("numeric_value") or "").strip()}
-            if original in numeric_texts and original:
-                masks_required_value = True
-                break
-        if not masks_required_value:
-            valid_obfuscation = True
-            break
-    if not valid_obfuscation:
-        return False, "obfuscation_not_safe_or_effective", {}
-
-    images = sorted({fact.get("image") for fact in used_facts if fact.get("image")})
-    if len(images) > 5:
-        return False, "too_many_images", {}
-    return True, "accepted", {"used_facts": used_facts, "calc_fact_ids": sorted(calc_fact_ids), "step_results": [format(value, "f") for value in step_results], "images": images}
-
-
-def deterministic_reasoning(candidate: dict[str, Any]) -> str:
-    lines = []
-    for index, step in enumerate(candidate["calculation_steps"], 1):
-        lines.append(f"第{index}步得到 {step['claimed_result']}{step.get('unit', '')}。")
-    return "".join(lines)
-
-
-def reconstruct_reasoning(client: Any, model: str, candidate: dict[str, Any], used_facts: list[dict[str, Any]]) -> str:
-    prompt = json.dumps({"question": candidate["question"], "evidence": used_facts, "calculation_steps": candidate["calculation_steps"], "answer": candidate["answer"]}, ensure_ascii=False, separators=(",", ":"))
-    try:
-        result = call_json(client, model, RECONSTRUCT_SYSTEM_PROMPT, prompt, [], 0.1, 1024)
-        reasoning = str(result.get("reasoning") or "").strip()
-        if reasoning:
-            return reasoning
-    except Exception:
-        pass
-    return deterministic_reasoning(candidate)
-
-
-def render_training_prompt(candidate: dict[str, Any], used_facts: list[dict[str, Any]], images: list[str]) -> str:
-    image_prefix = "<image>" * len(images)
-    text_evidence = []
-    for index, fact in enumerate(used_facts, 1):
-        if fact["source_mode"] == "text":
-            page = f"，第{fact['page']}页" if fact.get("page") is not None else ""
-            text_evidence.append(f"[E{index}] {fact['source_ref']}{page}：{fact['evidence_quote']}")
-    context = "\n".join(text_evidence)
-    material = f"参考材料：\n{context}\n\n" if context else ""
-    return f"{image_prefix}{material}问题：{candidate['question']}"
-
-
-def build_rows(sample_id: str, candidate: dict[str, Any], verified: dict[str, Any], reasoning: str, graph_stats: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    used_facts = verified["used_facts"]
-    images = verified["images"]
-    user_prompt = render_training_prompt(candidate, used_facts, images)
-    metadata = {
-        "synthetic_method": "finance_sailorfog_v1",
-        "source_refs": sorted({fact["source_ref"] for fact in used_facts}),
-        "evidence_ids": [fact["fact_id"] for fact in used_facts],
-        "calculation_fact_ids": verified["calc_fact_ids"],
-        "calculation_steps": candidate["calculation_steps"],
-        "obfuscations": candidate["obfuscations"],
-        "graph_stats": graph_stats,
-        "program_verification_checked": True,
-    }
-    sft = {
-        "messages": [{"role": "user", "content": user_prompt}, {"role": "assistant", "content": f"{reasoning}\n\n答案：{candidate['answer']}"}],
-        "source": "finance_sailorfog",
-        "split": "train",
-        "images": images,
-        "task": "multi_step_numerical_reasoning",
-        "metadata": metadata,
-    }
-    rl = {
-        "sample_id": sample_id,
-        "messages": [{"role": "user", "content": user_prompt}],
-        "source": "finance_sailorfog",
-        "split": "train",
-        "images": images,
-        "task": "multi_step_numerical_reasoning",
-        "output_format": "number_or_free_text",
-        "solution": candidate["answer"],
-        "metadata": metadata,
-        "reward_type": "rule",
-        "reward_subtype": "numeric",
-        "verifier_type": "numeric",
-        "_reward_routing": {"version": "finance_sailorfog_v1", "reason": "verified_multi_step_numeric_synthesis", "program_verification_checked": True},
-    }
-    return sft, rl
-
-
-def synthesize(client: Any, model: str, reconstruct_model: str, facts: list[dict[str, Any]], edges: list[dict[str, str]], args: argparse.Namespace) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
-    rng = random.Random(args.seed)
-    facts_by_id = {fact["fact_id"]: fact for fact in facts}
-    adjacency = graph_adjacency(edges)
-    sft_rows: list[dict[str, Any]] = []
-    rl_rows: list[dict[str, Any]] = []
-    candidates: list[dict[str, Any]] = []
-    rejected: list[dict[str, Any]] = []
-    reason_counts: Counter[str] = Counter()
-    seen_questions: set[str] = set()
-
-    for attempt in range(args.target * args.attempt_multiplier):
-        if len(sft_rows) >= args.target:
-            break
-        sampled = sample_subgraph(rng, facts_by_id, adjacency, args.min_nodes, args.min_edges, args.max_nodes)
-        if sampled is None:
-            reason_counts["no_valid_subgraph"] += 1
-            continue
-        subgraph_facts, subgraph_edges = sampled
-        hard_ok, hard_reason = subgraph_hardness(subgraph_facts, subgraph_edges, args.min_evidence_groups, args.require_image)
-        if not hard_ok:
-            reason_counts[hard_reason] += 1
-            continue
-        prompt, aliases = candidate_prompt(subgraph_facts, subgraph_edges)
-        try:
-            candidate = call_json(client, model, QUESTION_SYSTEM_PROMPT, prompt, [], 0.7, 4096)
-        except Exception as error:
-            reason_counts["question_generation_error"] += 1
-            rejected.append({"stage": "question_generation", "attempt": attempt, "error": str(error)})
-            continue
-        valid, reason, verified = verify_candidate(candidate, subgraph_facts, aliases, args.min_evidence_groups)
-        if not valid:
-            reason_counts[reason] += 1
-            rejected.append({"stage": "verification", "attempt": attempt, "reason": reason, "candidate": candidate})
-            continue
-        question_key = re.sub(r"\s+", "", candidate["question"])
-        if question_key in seen_questions:
-            reason_counts["duplicate_question"] += 1
-            continue
-        seen_questions.add(question_key)
-        graph_stats = {
-            "node_count": len(subgraph_facts),
-            "edge_count": len(subgraph_edges),
-            "relation_type_count": len({edge["type"] for edge in subgraph_edges}),
-            "evidence_group_count": len({fact_group(fact) for fact in verified["used_facts"]}),
-            "numeric_fact_count": sum(bool(fact["numeric_value"]) for fact in subgraph_facts),
-        }
-        sample_id = stable_id("sailorfog_fin", candidate["question"], candidate["answer"])
-        reasoning = reconstruct_reasoning(client, reconstruct_model or model, candidate, verified["used_facts"])
-        sft, rl = build_rows(sample_id, candidate, verified, reasoning, graph_stats)
-        candidate_record = {"sample_id": sample_id, "candidate": candidate, "used_facts": verified["used_facts"], "graph_edges": subgraph_edges, "graph_stats": graph_stats}
-        candidates.append(candidate_record)
-        sft_rows.append(sft)
-        rl_rows.append(rl)
-        reason_counts["accepted"] += 1
-    return sft_rows, rl_rows, candidates, rejected, dict(reason_counts)
-
-
-def main() -> None:
-    args = parse_args()
-    args.output_root.mkdir(parents=True, exist_ok=True)
-    failure_rows: list[dict[str, Any]] = []
-
-    if args.stage in {"extract", "all"}:
-        if not args.raw_root.is_dir():
-            print(json.dumps({"error": f"raw directory not found: {args.raw_root}"}, ensure_ascii=False))
-            return
-        units, failures = extract_source_units(args.raw_root.resolve(), args.max_units, args.max_unit_chars)
-        write_jsonl(args.output_root / "source_units.jsonl", units)
-        failure_rows.extend(failures)
-        print(json.dumps({"stage": "extract", "units": len(units), "failures": len(failures)}, ensure_ascii=False), flush=True)
-
-    if args.stage in {"graph", "synthesize", "all"}:
-        try:
-            from openai import OpenAI
-
-            client = OpenAI(api_key=args.api_key, base_url=args.base_url)
-        except Exception as error:
-            print(json.dumps({"error": f"cannot initialize OpenAI-compatible client: {error}"}, ensure_ascii=False))
-            return
-
-    if args.stage in {"graph", "all"}:
-        units_path = args.output_root / "source_units.jsonl"
-        if not units_path.is_file():
-            print(json.dumps({"error": f"missing {units_path}; run --stage extract first"}, ensure_ascii=False))
-            return
-        units = read_jsonl(units_path)
-        facts, failures = build_facts(client, args.model, units, args.workers)
-        edges = build_edges(facts)
-        write_jsonl(args.output_root / "graph_facts.jsonl", facts)
-        write_jsonl(args.output_root / "graph_edges.jsonl", edges)
-        failure_rows.extend(failures)
-        print(json.dumps({"stage": "graph", "facts": len(facts), "edges": len(edges), "failures": len(failures)}, ensure_ascii=False), flush=True)
-
-    if args.stage in {"synthesize", "all"}:
-        facts_path = args.output_root / "graph_facts.jsonl"
-        edges_path = args.output_root / "graph_edges.jsonl"
-        if not facts_path.is_file() or not edges_path.is_file():
-            print(json.dumps({"error": "missing graph_facts.jsonl or graph_edges.jsonl; run --stage graph first"}, ensure_ascii=False))
-            return
-        facts = read_jsonl(facts_path)
-        edges = read_jsonl(edges_path)
-        sft_rows, rl_rows, candidates, rejected, reasons = synthesize(client, args.model, args.reconstruct_model, facts, edges, args)
-        write_jsonl(args.output_root / "candidates.jsonl", candidates)
-        write_jsonl(args.output_root / "train_sft.jsonl", sft_rows)
-        write_jsonl(args.output_root / "train_rl_reasoning.jsonl", rl_rows)
-        failure_rows.extend(rejected)
-        audit = {
-            "method": "finance_sailorfog_v1",
-            "raw_root": str(args.raw_root),
-            "model": args.model,
-            "target": args.target,
-            "accepted": len(sft_rows),
-            "facts": len(facts),
-            "edges": len(edges),
-            "reasons": reasons,
-            "hard_constraints": {
-                "min_nodes": args.min_nodes,
-                "min_edges": args.min_edges,
-                "min_evidence_groups": args.min_evidence_groups,
-                "min_numeric_facts": 3,
-                "min_calculation_steps": 2,
-                "dependent_calculation_chain": True,
-                "min_relation_types": 2,
-                "graph_branch_required": True,
-                "safe_obfuscation_required": True,
-                "programmatic_arithmetic_verification": True,
-                "max_images": 5,
-            },
-        }
-        (args.output_root / "audit.json").write_text(json.dumps(audit, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        print(json.dumps(audit, ensure_ascii=False), flush=True)
-
-    if failure_rows:
-        write_jsonl(args.output_root / "rejected.jsonl", failure_rows)
-
-
-if __name__ == "__main__":
-    main()
+if __name__=="__main__": main()
