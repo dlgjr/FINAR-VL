@@ -29,25 +29,16 @@ FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Q
 
 ## 数据构造、Bad Case 飞轮与筛选清洗
 
-FINAR-VL 的训练数据不只做格式转换，而是使用“初期合成 → Bad Case 定向扩充 → 统一质量筛选”的数据闭环。Qwen3-VL-235B 负责金融语义、视觉理解和质量判断；Python 主要负责数据组织、格式检查、图结构检索和确定性流程控制。
+数据流程包括初步构造、SFT 训练、Bad Case 定向构造和筛选清洗。
 
 ```mermaid
-flowchart LR
-    A[data/raw] --> B[初期金融数据合成]
-    B --> C[Finance World<br/>Entity / Fact / Relation Graph]
-    C --> D[候选 SFT / RL]
-    E[data/error<br/>已确认 Bad Cases] --> F[Bad Case 分类]
-    C --> G[定向检索新证据]
-    F --> G
-    G --> H[Bad Case 定向合成]
-    H --> D
-    D --> I[格式清洗]
-    I --> J[Qwen235 十项 Rubric 评分<br/>+ task 标注]
-    J -->|score >= 4.0| K[Clean Training Pool]
-    J -->|score < 4.0| L[Rejected Pool]
-    K --> M[SFT / RL]
-    M --> N[Eval]
-    N --> E
+flowchart TD
+    A[data/raw] --> B[初步构造]
+    B --> C[筛选清洗]
+    C --> D[SFT 训练]
+    D --> E[Bad Case]
+    E --> F[定向构造]
+    F --> C
 ```
 
 ### 1. 初期数据构造与合成
@@ -71,7 +62,7 @@ python scripts/data/build_finance_sailorfog.py --stage all --model model/qwen235
 
 ### 2. Bad Case 数据飞轮
 
-入口脚本为 `scripts/data/build_badcase_flywheel.py`。输入为 `data/error` 中已经确认的 Bad Case；脚本不会再次判断这些样本是否“真的错”，而是把原题、标准答案、模型错误输出和原始图片交给 Qwen235 做错误类型标注。
+入口脚本为 `scripts/data/build_badcase_flywheel.py`。输入为 `data/error` 中的 Bad Case。Qwen235 根据原题、标准答案、模型输出和原始图片标注 `task_type`、`error_type` 和 `scenario_tags`，用于后续定向构造。
 
 每条 Bad Case 被标注为：
 
@@ -97,10 +88,10 @@ python scripts/data/build_badcase_flywheel.py --error-root data/error --model mo
 
 ### 3. 数据筛选、清洗与 task 标注
 
-入口脚本为 `scripts/data/clean_synthetic_data.py`。清洗阶段刻意避免在 Python 中重新实现复杂金融语义判断：
+入口脚本为 `scripts/data/clean_synthetic_data.py`。筛选分为格式检查和质量评分两步：
 
-1. Python 只删除 JSON、messages、监督答案、images 路径 / 图片文件等格式明显不合格的数据；
-2. 其余样本全部交给 Qwen235 进行统一质量审核；
+1. 检查 JSON、messages、监督答案、images 路径和图片文件等基础格式；
+2. 格式通过的样本由 Qwen235 统一评分；
 3. Qwen235 同时从 SFT 采样器的 task vocabulary 中选择一个 `task`，写回样本顶层 `task` 字段；原 task 保存在 `metadata.quality_filter.original_task`；
 4. task 列表直接取自主分支 `scripts/sft/sample_plan_base.py` 的 `TASK_TO_FAMILY`，并包含 `scripts/sft/sample_plan.py` 中追加的 task；
 5. 质量审核使用 10 条固定 rubric，每条只能为 `0` 或 `0.5`，满分 5 分；总分由 Python 重算，默认 `score >= 4.0` 才进入最终训练池。
@@ -118,7 +109,7 @@ python scripts/data/build_badcase_flywheel.py --error-root data/error --model mo
 | `training_value` | 是否具有明确、自然的训练价值 |
 | `clarity_and_integrity` | 数据是否清楚、完整、内部一致 |
 
-每条 rubric 独立给分，LLM 不负责计算总分。低于 4 分的数据写入 rejected pool，同时保留每个失败维度，便于分析合成数据的主要质量问题。
+每条 rubric 独立给分，总分由脚本计算。低于 4 分的数据写入 rejected pool，并保留各项评分结果。
 
 ```bash
 python scripts/data/clean_synthetic_data.py --input data/synthetic/finance_world/train_sft.jsonl --input data/synthetic/badcase_flywheel/train_sft_badcase.jsonl --model model/qwen235 --backend vllm --tensor-parallel-size 8 --threshold 4.0
