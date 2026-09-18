@@ -26,6 +26,115 @@ FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Q
 | 阶段权重 | 开源 SFT、Reasoning RL 和 Generation RL 的阶段模型权重 |
 | 最终权重 | MOPD 完成并验证后开源 `Final-VL` 模型权重 |
 
+
+## 数据构造、Bad Case 飞轮与筛选清洗
+
+FINAR-VL 的训练数据不只做格式转换，而是使用“初期合成 → Bad Case 定向扩充 → 统一质量筛选”的数据闭环。Qwen3-VL-235B 负责金融语义、视觉理解和质量判断；Python 主要负责数据组织、格式检查、图结构检索和确定性流程控制。
+
+```mermaid
+flowchart LR
+    A[data/raw] --> B[初期金融数据合成]
+    B --> C[Finance World<br/>Entity / Fact / Relation Graph]
+    C --> D[候选 SFT / RL]
+    E[data/error<br/>已确认 Bad Cases] --> F[Bad Case 分类]
+    C --> G[定向检索新证据]
+    F --> G
+    G --> H[Bad Case 定向合成]
+    H --> D
+    D --> I[格式清洗]
+    I --> J[Qwen235 十项 Rubric 评分<br/>+ task 标注]
+    J -->|score >= 4.0| K[Clean Training Pool]
+    J -->|score < 4.0| L[Rejected Pool]
+    K --> M[SFT / RL]
+    M --> N[Eval]
+    N --> E
+```
+
+### 1. 初期数据构造与合成
+
+入口脚本为 `scripts/data/build_finance_sailorfog.py`。该脚本从 `data/raw` 构建金融证据世界，并使用本地 `model/qwen235` 生成训练样本。
+
+主要步骤：
+
+1. 将结构化文件、文本、PDF 页面和图片标准化为 evidence units；
+2. 构建公司 / 文档实体，并抽取 period、market、document type 等信息；
+3. 使用规则优先方式抽取数值 fact，再由 Qwen235 做语义归一和视觉事实抽取；
+4. 基于 entity、fact、期间、财务关系、视觉关系等建立 relation graph；
+5. 按任务约束从图中采样证据邻域，生成文本、多表、多图、跨页和跨模态 SFT / RL 样本；
+6. 数值类样本保留可执行计算结构，并进行确定性计算校验；低可信 fact 进入 quarantine，不直接进入合成。
+
+默认输出目录为 `data/synthetic/finance_world/`，其中包括 `evidence_units.jsonl`、`document_entities.jsonl`、`graph_facts.jsonl`、`graph_edges.jsonl` 和训练候选数据。
+
+```bash
+python scripts/data/build_finance_sailorfog.py --stage all --model model/qwen235 --tensor-parallel-size 8 --target 2000
+```
+
+### 2. Bad Case 数据飞轮
+
+入口脚本为 `scripts/data/build_badcase_flywheel.py`。输入为 `data/error` 中已经确认的 Bad Case；脚本不会再次判断这些样本是否“真的错”，而是把原题、标准答案、模型错误输出和原始图片交给 Qwen235 做错误类型标注。
+
+每条 Bad Case 被标注为：
+
+- `task_type`：原问题主要考察的能力；
+- `error_type`：模型主要错误类型，覆盖 OCR、表格、图表、K 线、检索、实体/期间/口径对齐、数值推理、知识、摘要、风险、政策、合规等；
+- `scenario_tags`：年报、季报、公告、研报、利润表、现金流量表、多表、多图、跨页、跨模态等金融场景。
+
+分类结果只用于决定下一批数据“补什么”。新训练题不会直接改写原 Bad Case，而是重新从 Finance World 检索新的真实证据。证据和图片按以下层级优先检索：
+
+```text
+同一 document
+→ 同一 entity + 同一 period
+→ 同一 entity + 相邻 period
+→ 同一 entity + 其他 period
+→ 仅在同行比较/行业分析等明确任务中扩展到同行业其他公司
+```
+
+视觉约束由 `task_type + error_type + scenario_tags` 联合决定。多表、多图、K 线和跨模态任务必须真实使用对应图片；普通 QA 默认尽量构造成视觉样本，同时保留一部分 text-only 数据。
+
+```bash
+python scripts/data/build_badcase_flywheel.py --error-root data/error --model model/qwen235 --backend vllm --tensor-parallel-size 8 --variants-per-case 6 --prefer-visual-ratio 0.8
+```
+
+### 3. 数据筛选、清洗与 task 标注
+
+入口脚本为 `scripts/data/clean_synthetic_data.py`。清洗阶段刻意避免在 Python 中重新实现复杂金融语义判断：
+
+1. Python 只删除 JSON、messages、监督答案、images 路径 / 图片文件等格式明显不合格的数据；
+2. 其余样本全部交给 Qwen235 进行统一质量审核；
+3. Qwen235 同时从 SFT 采样器的 task vocabulary 中选择一个 `task`，写回样本顶层 `task` 字段；原 task 保存在 `metadata.quality_filter.original_task`；
+4. task 列表直接取自主分支 `scripts/sft/sample_plan_base.py` 的 `TASK_TO_FAMILY`，并包含 `scripts/sft/sample_plan.py` 中追加的 task；
+5. 质量审核使用 10 条固定 rubric，每条只能为 `0` 或 `0.5`，满分 5 分；总分由 Python 重算，默认 `score >= 4.0` 才进入最终训练池。
+
+| Rubric | 检查内容 |
+|---|---|
+| `answerability` | 材料是否足以唯一回答问题 |
+| `answer_correctness` | 标准答案是否正确 |
+| `evidence_grounding` | 关键结论是否均有证据支持 |
+| `financial_alignment` | entity、period、metric、scope、unit、currency 等金融口径是否一致 |
+| `reasoning_correctness` | 计算、比较、多跳、解释或因果逻辑是否成立 |
+| `instruction_following` | 是否按问题要求的内容、粒度和格式作答 |
+| `modality_grounding` | 图片 / 表格 / 图表是否真实参与任务，而非装饰 |
+| `no_leakage_or_shortcut` | 是否存在答案泄漏或绕过目标能力的捷径 |
+| `training_value` | 是否具有明确、自然的训练价值 |
+| `clarity_and_integrity` | 数据是否清楚、完整、内部一致 |
+
+每条 rubric 独立给分，LLM 不负责计算总分。低于 4 分的数据写入 rejected pool，同时保留每个失败维度，便于分析合成数据的主要质量问题。
+
+```bash
+python scripts/data/clean_synthetic_data.py --input data/synthetic/finance_world/train_sft.jsonl --input data/synthetic/badcase_flywheel/train_sft_badcase.jsonl --model model/qwen235 --backend vllm --tensor-parallel-size 8 --threshold 4.0
+```
+
+默认清洗输出：
+
+```text
+data/synthetic/cleaned/
+├── accepted.jsonl
+├── rejected_low_score.jsonl
+├── rejected_format.jsonl
+├── judge_failures.jsonl
+└── report.json
+```
+
 ## 技术路线
 
 ```mermaid
@@ -284,6 +393,8 @@ FINAR-VL/
 ├── README.en.md
 ├── data/
 │   ├── benchmark/                 # 训练期间评估数据
+│   ├── error/                     # 评测产生的已确认 Bad Cases
+│   ├── synthetic/                 # 初期合成、飞轮候选和清洗结果
 │   ├── train_multi/               # 多模态 SFT、RL 数据及图片
 │   └── train_text/                # 纯文本 SFT 数据
 ├── models/
