@@ -172,7 +172,6 @@ bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh
 
 The script uses top-128 GKD by default. Image paths follow the same resolution logic used during RL data preparation. Training saves a checkpoint and runs stage evaluation every 20 steps. Qwen3-VL student forward passes enable `use_logits_to_keep` by default so only logits required for the distillation loss are retained, avoiding excessive memory peaks at the LM head for long sequences.
 
-W&B logs, model checkpoints, evaluation results, reward audits, and per-rank status are stored under `output/`.
 
 ## 🚀 Training Stages
 
@@ -214,26 +213,8 @@ This stage uses hybrid rewards:
 
 ### 4. MOPD
 
-MOPD uses the SFT checkpoint to initialize the student model and uses the outputs of Reasoning RL and Generation RL as the reasoning and generation teachers. The training data keeps the reasoning and generation branches balanced, and each sample requests only the teacher selected by its route.
+MOPD initializes the student model from the SFT checkpoint, uses the outputs of Reasoning RL and Generation RL as the reasoning and generation teachers, and performs knowledge distillation with top-128 GKD.
 
-The current implementation uses top-128 GKD. Teacher services return the top-128 token probabilities at each target position, and the student computes the distillation loss from those distributions. The Reasoning teacher follows the answer format used during Reasoning RL training, while the Generation teacher follows the Generation RL answer format, avoiding policy-format mixing during distillation.
-
-The training script also reuses Pass@1 / Pass@8 evaluation from the SFT stage. Samples that can be scored programmatically use rule-based evaluation directly; only samples that truly require model judging are sent to the Generation teacher. A checkpoint is saved every 20 steps. The latest checkpoint keeps the complete training state, while older checkpoints retain model weights only.
-
-## 🎯 RL Data and Reward Design
-
-| Data branch | Main tasks | Reward method |
-|---|---|---|
-| Reasoning | Numerical calculation, table reasoning, evidence-page retrieval, structured question answering | Programmatic rule-based rewards |
-| Generation | Open-ended financial analysis, knowledge question answering, chart understanding, selection, and judgment tasks | Hybrid rule-based rewards and model judging |
-
-Before RL training, the data pipeline performs the following steps:
-
-1. Normalize the data schema and generate stable sample identifiers.
-2. Validate questions, images, answers, and reward routing.
-3. Estimate computation cost from image count and resolution, input length, generation length, and judge-call cost.
-4. Split data into fine-grained tasks and balance the workload.
-5. Record planned, completed, and remaining tasks, heartbeats, and errors during training.
 
 ## 📁 Repository Structure
 
