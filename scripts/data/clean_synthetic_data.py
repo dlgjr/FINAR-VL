@@ -43,7 +43,7 @@ def load_task_labels() -> tuple[str, ...]:
                             tasks.update(str(key) for key in value)
     if wrapper.exists():
         text = wrapper.read_text(encoding="utf-8")
-        tasks.update(re.findall(r'TASK_TO_FAMILY\\["([^"]+)"\\]\\s*=', text))
+        tasks.update(re.findall(r'TASK_TO_FAMILY\["([^"]+)"\]\s*=', text))
     if not tasks:
         raise RuntimeError("failed to load SFT task vocabulary from scripts/sft/sample_plan*.py")
     return tuple(sorted(tasks))
