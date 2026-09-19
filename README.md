@@ -2,9 +2,7 @@
 
 [中文](README.md) | [English](README.en.md)
 
-FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Qwen3-VL-4B-Instruct 训练 `Final-VL`。项目重点处理多表、多图、跨页金融材料中的信息提取、证据定位与数值计算问题。
-
-当前已完成 SFT（监督微调）和两个独立的 RL（强化学习）训练链路；MOPD（Multi-teacher On-Policy Distillation，多教师在策略蒸馏）仍在开发中。
+FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Qwen3-VL-4B-Instruct 训练 `FINAR-VL`。项目重点处理多表、多图、跨页金融材料中的信息提取、证据定位与数值计算问题。
 
 ## 核心任务
 
@@ -14,7 +12,7 @@ FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Q
 | 多图与跨页推理 | 结合多个图表、财报页面或附件完成证据检索和问答 |
 | 金融数值计算 | 比率、增减幅、累计值、占比和多步算术计算 |
 | 图表理解 | 图表数据提取、趋势判断、指标比较和图表计算 |
-| 文档理解 | 金融 OCR（光学字符识别）、实体抽取、事实抽取和证据页定位 |
+| 文档理解 | 金融 OCR、实体抽取、事实抽取和证据页定位 |
 | 金融生成 | 基于财报、市场材料和专业知识生成分析性回答 |
 
 ## 开源内容
@@ -24,123 +22,17 @@ FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Q
 | 训练代码 | 开源 SFT、两个独立 RL 和 MOPD 的训练实现与启动脚本 |
 | 训练数据 | 开源规范化后的文本、多模态、Reasoning RL 和 Generation RL 数据 |
 | 阶段权重 | 开源 SFT、Reasoning RL 和 Generation RL 的阶段模型权重 |
-| 最终权重 | MOPD 完成并验证后开源 `Final-VL` 模型权重 |
-
-
-## 数据构造
-
-<p align="center">
-  <img src="docs/assets/data_construction_flow.svg" alt="FINAR-VL Data Construction Pipeline" width="100%">
-</p>
-
-SFT、Reasoning RL 和 Generation RL 共用 Finance World 作为证据底座，但三条数据构造流程彼此独立。SFT 保留 Bad Case 飞轮用于定向补数；RL 不设置 Bad Case 专门构造阶段，避免围绕单一失败模式成组造题而削弱组内差异。
-
-### 1. 初期数据构造与合成
-
-入口脚本为 `scripts/data/build_finance_sailorfog.py`。`Qwen3-VL-32B-Instruct` 负责从原始文本和图片中抽取实体、数值、期间、口径和视觉事实，形成共享的 Finance World；`Qwen3-VL-235B-A22B-Instruct` 基于 Finance World 构造 SFT 样本。
-
-主要步骤：
-
-1. 将结构化文件、文本、PDF 页面和图片标准化为 evidence units；
-2. 构建公司 / 文档实体，并抽取 period、market、document type 等信息；
-3. 使用规则候选配合 Qwen3-VL-32B-Instruct 抽取并规范化金融 fact，包括文本事实和视觉事实；
-4. 基于 entity、fact、期间、财务关系、视觉关系等建立 relation graph；
-5. Qwen3-VL-235B-A22B-Instruct 从图中采样 required evidence 与 distractor，构造 easy / medium / hard 的文本、多表、多图、跨页和跨模态 SFT 样本；
-6. 数值类样本保留可执行计算结构和证据 ID；构造元数据记录 `construction_type`、难度、required evidence 与 distractor。
-
-默认输出目录为 `data/synthetic/finance_world/`，其中包括 `evidence_units.jsonl`、`document_entities.jsonl`、`graph_facts.jsonl`、`graph_edges.jsonl` 和训练候选数据。
-
-```bash
-python scripts/data/build_finance_sailorfog.py --stage extract
-python scripts/data/build_finance_sailorfog.py --stage evidence --extract-model model/qwen32 --tensor-parallel-size 8
-python scripts/data/build_finance_sailorfog.py --stage graph
-python scripts/data/build_finance_sailorfog.py --stage synthesize --construct-model model/qwen235 --tensor-parallel-size 8 --target 2000
-```
-
-`--stage all` 会按上述四个阶段分别启动子进程，避免 32B 与 235B 在同一 vLLM 进程中同时占用显存。Finance World 同时供 SFT、Reasoning RL 和 Generation RL 的独立数据构造脚本使用；本脚本只输出 SFT 候选数据。
-
-### 2. Bad Case 数据飞轮
-
-入口脚本为 `scripts/data/build_badcase_flywheel.py`。输入为 `data/error` 中的 Bad Case。Qwen3-VL-235B-A22B-Instruct 根据原题、标准答案、模型输出和原始图片标注 `task_type`、`error_type` 和 `scenario_tags`，用于后续定向构造。
-
-每条 Bad Case 被标注为：
-
-- `task_type`：原问题主要考察的能力；
-- `error_type`：模型主要错误类型，覆盖 OCR、表格、图表、K 线、检索、实体/期间/口径对齐、数值推理、知识、摘要、风险、政策、合规等；
-- `scenario_tags`：年报、季报、公告、研报、利润表、现金流量表、多表、多图、跨页、跨模态等金融场景。
-
-分类结果用于生成 graph sampling constraints。新训练题重新从 Finance World 检索 required evidence 和相似 distractor，并记录构造难度；原 Bad Case 不作为新题内容来源。证据和图片按以下层级优先检索：
-
-```text
-同一 document
-→ 同一 entity + 同一 period
-→ 同一 entity + 相邻 period
-→ 同一 entity + 其他 period
-→ 仅在同行比较/行业分析等明确任务中扩展到同行业其他公司
-```
-
-视觉约束由 `task_type + error_type + scenario_tags` 联合决定。多表、多图、K 线和跨模态任务必须真实使用对应图片；普通 QA 默认尽量构造成视觉样本，同时保留一部分 text-only 数据。
-
-```bash
-python scripts/data/build_badcase_flywheel.py --error-root data/error --model model/qwen235 --backend vllm --tensor-parallel-size 8 --variants-per-case 6 --prefer-visual-ratio 0.8
-```
-
-### 3. 数据筛选、清洗与 task 标注
-
-入口脚本为 `scripts/data/clean_synthetic_data.py`。筛选分为格式检查和质量评分两步：
-
-1. 检查 JSON、messages、监督答案、images 路径和图片文件等基础格式；
-2. 格式通过的样本由 Qwen3-VL-235B-A22B-Instruct 统一评分；
-3. Qwen3-VL-235B-A22B-Instruct 同时从 SFT 采样器的 task vocabulary 中选择一个 `task`，写回样本顶层 `task` 字段；原 task 保存在 `metadata.quality_filter.original_task`；
-4. task 列表运行时直接从 `scripts/sft/sample_plan_base.py` 的 `TASK_TO_FAMILY` 和 `scripts/sft/sample_plan.py` 中读取，避免数据清洗与训练采样器的 task 名称漂移；
-5. 质量审核使用 10 条固定 rubric，每条只能为 `0` 或 `0.5`，满分 5 分；总分由 Python 重算，默认 `score >= 4.0` 才进入最终训练池。
-
-| Rubric | 检查内容 |
-|---|---|
-| `answerability` | 材料是否足以唯一回答问题 |
-| `answer_correctness` | 标准答案是否正确 |
-| `evidence_grounding` | 关键结论是否均有证据支持 |
-| `financial_alignment` | entity、period、metric、scope、unit、currency 等金融口径是否一致 |
-| `reasoning_correctness` | 计算、比较、多跳、解释或因果逻辑是否成立 |
-| `instruction_following` | 是否按问题要求的内容、粒度和格式作答 |
-| `modality_grounding` | 图片 / 表格 / 图表是否真实参与任务，而非装饰 |
-| `no_leakage_or_shortcut` | 是否存在答案泄漏或绕过目标能力的捷径 |
-| `training_value` | 是否具有明确、自然的训练价值 |
-| `clarity_and_integrity` | 数据是否清楚、完整、内部一致 |
-
-每条 rubric 独立给分，总分由脚本计算。低于 4 分的数据写入 rejected pool，并保留各项评分结果。
-
-```bash
-python scripts/data/clean_synthetic_data.py --input data/synthetic/finance_world/train_sft.jsonl --input data/synthetic/badcase_flywheel/train_sft_badcase.jsonl --model model/qwen235 --backend vllm --tensor-parallel-size 8 --threshold 4.0
-```
-
-默认清洗输出：
-
-```text
-data/synthetic/cleaned/
-├── accepted.jsonl
-├── rejected_low_score.jsonl
-├── rejected_format.jsonl
-├── judge_failures.jsonl
-└── report.json
-```
+| 最终权重 | MOPD 完成并验证后开源 `FINAR-VL` 模型权重 |
 
 ## 技术路线
 
-```mermaid
-flowchart LR
-    A[Qwen3-VL-4B-Instruct] --> B[SFT]
-    B --> C[Reasoning RL]
-    B --> D[Generation RL]
-    B -. 学生模型初始化 .-> E[MOPD]
-    C -. 推理教师 .-> E
-    D -. 生成教师 .-> E
-    E --> F[Final-VL]
-```
+<p align="center">
+  <img src="assets/finar_vl_training_pipeline.svg" alt="FINAR-VL Training Pipeline" width="100%">
+</p>
 
 Reasoning RL 和 Generation RL 是两个独立训练阶段，均从同一个 SFT 检查点启动。Reasoning RL 强化可程序验证的金融推理能力；Generation RL 强化开放式金融问答和分析生成能力。两路 RL 之间不传递模型权重。
 
-MOPD 以 SFT 检查点初始化学生模型，同时加载 Reasoning RL 和 Generation RL 的产出作为两个教师模型，根据 reasoning 和 generation 数据分别提供 token（词元）级教师信号。MOPD 的产出模型命名为 `Final-VL`。目前该阶段尚未完成。
+MOPD 以 SFT 检查点初始化学生模型，同时加载 Reasoning RL 和 Generation RL 的产出作为两个教师模型，根据 reasoning 和 generation 数据分别提供 token级教师信号。当前训练脚本使用 top-128 GKD：每个样本只路由到对应教师，由教师返回 top-128 token 分布进行蒸馏。MOPD 的产出模型命名为 `FINAR-VL`。
 
 ## 快速开始
 
@@ -153,7 +45,7 @@ cd FINAR-VL
 
 ### 2. 安装依赖
 
-建议使用 Python 3.12 和支持 BF16（脑浮点格式）的 NVIDIA GPU。当前正式训练脚本默认使用 8 张 GPU。
+建议使用 Python 3.12 和支持 BF16的 NVIDIA GPU。当前正式训练脚本默认使用 8 张 GPU。
 
 ```bash
 python -m venv .venv
@@ -231,23 +123,57 @@ GENERATION_RL_OUTPUT_DIR=$QWEN3VL_ROOT/output/gspo_generation \
 bash scripts/dlc/start_gspo_generation.sh
 ```
 
-训练过程中生成的 W&B 日志、模型权重、评估结果、奖励审计和各 rank（训练进程）状态均保存在 `output/`。
+### 7. 运行 MOPD
+
+当前 MOPD 启动脚本按单机 4 卡设计。默认使用 GPU 0、1 训练学生模型，GPU 2 运行 Reasoning teacher，GPU 3 运行 Generation teacher；需要模型裁判的评估样本也复用 Generation teacher。
+
+```bash
+MOPD_STUDENT_MODEL=/path/to/sft_checkpoint \
+MOPD_REASONING_TEACHER=/path/to/reasoning_rl_checkpoint \
+MOPD_GENERATION_TEACHER=/path/to/generation_rl_checkpoint \
+MOPD_REASONING_DATA=/path/to/reasoning_train_gspo.jsonl \
+MOPD_GENERATION_DATA=/path/to/generation_train_gspo.jsonl \
+bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh
+```
+
+脚本默认使用 top-128 GKD，图片路径沿用 RL 数据准备阶段的解析逻辑。训练每 20 step 保存一次 checkpoint 并执行阶段评估；最新 checkpoint 保留完整 optimizer、scheduler、RNG 和 Trainer state，可以直接续训。Qwen3-VL 的学生前向默认开启 `use_logits_to_keep`，只保留需要计算蒸馏损失的 logits，避免长序列在 LM head 处产生过大的显存峰值。
+
+常用参数可以通过环境变量覆盖：
+
+```bash
+export MOPD_GKD_TOPK=128
+export MOPD_IMAGE_MAX_TOKEN_NUM=10240
+export MOPD_PER_DEVICE_BATCH=2
+export MOPD_GRAD_ACC=4
+export MOPD_INTERVAL_STEPS=20
+```
+
+从 checkpoint 续训时，需要同时提供原 W&B run ID：
+
+```bash
+export WANDB_RUN_ID=<run_id>
+
+bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh \
+  --resume_from_checkpoint /path/to/checkpoint-60
+```
+
+训练过程中生成的 W&B 日志、模型权重、评估结果、奖励审计和各 rank状态均保存在 `output/`。
 
 ## 训练阶段
 
-### 1. SFT（监督微调）
+### 1. SFT
 
 SFT 阶段联合使用金融文本和多模态数据，建立金融文档理解、表格计算、图表推理和答案生成能力。
 
 训练链路包含：
 
-- 按任务类型、模态和实际 token（词元）长度生成确定性采样计划；
+- 按任务类型、模态和实际 token长度生成确定性采样计划；
 - 对 OCR、图表、跨模态推理等任务设置最低采样配额；
 - 对生成类样本使用基础模型在线蒸馏，降低通用生成能力退化；
 - 在训练过程中执行 Pass@1 和 Pass@8 评估；
-- 记录 W&B（实验跟踪）日志、模型权重和评估结果。
+- 记录 W&B日志、模型权重和评估结果。
 
-### 2. Reasoning RL（推理强化学习）
+### 2. Reasoning RL
 
 Reasoning RL 路线面向具有明确标准答案的金融推理任务，使用程序化可验证奖励训练模型。
 
@@ -259,9 +185,9 @@ Reasoning RL 路线面向具有明确标准答案的金融推理任务，使用�
 - 图表数值推理；
 - 单选、多选和判断任务。
 
-该阶段采用 GSPO（组序列策略优化），奖励由数值、单位、选项、页码及结构化答案校验器计算，默认不依赖模型裁判。
+该阶段采用 GSPO，奖励由数值、单位、选项、页码及结构化答案校验器计算，默认不依赖模型裁判。
 
-### 3. Generation RL（生成强化学习）
+### 3. Generation RL
 
 Generation RL 路线面向开放式金融问答和分析生成任务，与 Reasoning RL 分别从同一个 SFT 检查点启动。
 
@@ -269,11 +195,15 @@ Generation RL 路线面向开放式金融问答和分析生成任务，与 Reaso
 
 - 对选择题、判断题等结构化任务使用规则奖励；
 - 对开放式金融分析和生成任务使用多模态模型裁判；
-- 对奖励结果、异常输出和各 rank（训练进程）的完成状态进行持续记录。
+- 对奖励结果、异常输出和各 rank的完成状态进行持续记录。
 
-### 4. MOPD（开发中）
+### 4. MOPD
 
-MOPD 阶段以 SFT 检查点作为学生模型，同时使用 Reasoning RL 和 Generation RL 的产出作为推理教师与生成教师。训练时根据样本所属数据集选择对应教师，通过 token 级 KL（相对熵）信号进行在策略蒸馏，最终产出 `Final-VL`。当前只有启动脚本原型，训练实现和实验结论尚未完成，因此暂不提供快速开始命令。
+MOPD 阶段以 SFT 检查点作为学生模型，同时使用 Reasoning RL 和 Generation RL 的产出作为推理教师与生成教师。训练数据保持 reasoning 和 generation 两路等量，样本根据路由只请求对应教师。
+
+当前实现使用 top-128 GKD。教师服务返回每个目标位置的 top-128 token 概率，学生模型据此计算蒸馏损失。Reasoning teacher 使用 Reasoning RL 训练时的回答格式，Generation teacher 使用 Generation RL 的回答格式，避免在蒸馏阶段混用两套策略提示词。
+
+训练脚本同时复用 SFT 阶段的 Pass@1 / Pass@8 评估。能够程序判分的样本直接使用规则判分，确实需要模型裁判的样本交给 Generation teacher。checkpoint 每 20 step 保存一次，最新 checkpoint 保留完整训练状态，旧 checkpoint 只保留模型权重。
 
 ## RL 数据与奖励设计
 
@@ -290,91 +220,6 @@ RL 数据进入训练前依次执行：
 4. 将数据拆分为细粒度任务并进行负载均衡；
 5. 训练期间记录计划任务数、完成数、剩余数、心跳和错误状态。
 
-## 数据格式
-
-训练数据使用 JSONL 格式，每行保存一条独立样本。
-
-### SFT 数据
-
-多模态和纯文本 SFT 数据使用同一结构。纯文本样本的 `images` 为空数组；多模态样本在用户消息中使用 `<image>` 标记，并在 `images` 中按出现顺序保存对应图片路径。
-
-```json
-{
-  "messages": [
-    {
-      "role": "user",
-      "content": "<image><image>请结合两页财报完成计算。"
-    },
-    {
-      "role": "assistant",
-      "content": "计算过程与最终答案"
-    }
-  ],
-  "source": "数据来源",
-  "split": "train",
-  "images": [
-    "assets/example/page_1.png",
-    "assets/example/page_2.png"
-  ],
-  "task": "multi_step_numerical_reasoning"
-}
-```
-
-字段说明：
-
-| 字段 | 含义 |
-|---|---|
-| `messages` | 用户输入和监督答案 |
-| `source` | 原始数据集或文档来源 |
-| `split` | 数据划分，训练数据使用 `train` |
-| `images` | 图片相对路径，顺序与 `<image>` 标记一致 |
-| `task` | 任务类型，用于采样和能力统计 |
-
-### RL 数据
-
-Reasoning RL 和 Generation RL 使用统一结构。训练输入只保留用户消息，标准答案和奖励配置存放在顶层字段中。
-
-```json
-{
-  "messages": [
-    {
-      "role": "user",
-      "content": "<image>根据图表计算营业收入同比增幅。"
-    }
-  ],
-  "question": "<image>根据图表计算营业收入同比增幅。",
-  "solution": "12.5%",
-  "reward_type": "rule",
-  "reward_subtype": "numeric",
-  "source": "数据来源",
-  "task": "multi_step_numerical_reasoning",
-  "output_format": "number_or_free_text",
-  "gold_option_text": "",
-  "options_shuffled": false,
-  "images": ["assets_rl/example/chart.png"],
-  "verifier_type": "numeric",
-  "_reward_routing": {
-    "version": "finance_rl_route_v2",
-    "reason": "declared_number_or_free_text",
-    "source_line": 1
-  }
-}
-```
-
-字段说明：
-
-| 字段 | 含义 |
-|---|---|
-| `question` | 进入模型的完整问题 |
-| `solution` | 规则奖励使用的标准答案；模型裁判路线可为空 |
-| `reward_type` | `rule` 表示规则奖励，`judge` 表示模型裁判 |
-| `reward_subtype` | 数值、单选、多选、判断、页码或自由文本等奖励子类型 |
-| `output_format` | 期望输出格式 |
-| `verifier_type` | 实际执行的答案校验器 |
-| `gold_option_text` | 选择题正确选项的文本内容 |
-| `options_shuffled` | 选项是否经过重排 |
-| `_reward_routing` | 奖励路由版本、原因和原始行号 |
-
 ## 目录结构
 
 ```text
@@ -383,8 +228,6 @@ FINAR-VL/
 ├── README.en.md
 ├── data/
 │   ├── benchmark/                 # 训练期间评估数据
-│   ├── error/                     # 评测产生的已确认 Bad Cases
-│   ├── synthetic/                 # 初期合成、飞轮候选和清洗结果
 │   ├── train_multi/               # 多模态 SFT、RL 数据及图片
 │   └── train_text/                # 纯文本 SFT 数据
 ├── models/
@@ -418,5 +261,5 @@ FINAR-VL/
 | `scripts/rl/prepare_gspo_data.py` | RL 数据转换和计算成本估计 |
 | `scripts/rl/schedule_gspo_data.py` | 多卡、多节点负载均衡 |
 | `scripts/rl/validate_gspo_data.py` | RL 数据和奖励路由校验 |
-| `scripts/mopd/run_mopd.sh` | MOPD 训练原型，尚未完成 |
+| `scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh` | 单机 4 卡双教师 MOPD 训练入口，使用 top-128 GKD，并支持完整断点续训 |
 
