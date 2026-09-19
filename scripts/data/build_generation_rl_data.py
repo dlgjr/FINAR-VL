@@ -61,7 +61,6 @@ FINANCE_WORLD_ROOT = PROJECT_ROOT / "data" / "synthetic" / "finance_world"
 DEFAULT_EVIDENCE_UNITS = FINANCE_WORLD_ROOT / "evidence_units.jsonl"
 DEFAULT_DOCUMENT_ENTITIES = FINANCE_WORLD_ROOT / "document_entities.jsonl"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "data" / "synthetic" / "generation_rl"
-DEFAULT_BADCASE = PROJECT_ROOT / "data" / "synthetic" / "badcase_flywheel" / "classification.jsonl"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 NUMBER_RE = re.compile(r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
 YEAR_RE = re.compile(r"(?<!\d)(20\d{2})(?!\d)")
@@ -74,6 +73,8 @@ def _first_existing(candidates: Sequence[Path]) -> Path:
 def default_evidence_model() -> Path:
     return _first_existing(
         [
+            PROJECT_ROOT / "model" / "Qwen3-VL-32B-Instruct",
+            PROJECT_ROOT / "models" / "Qwen3-VL-32B-Instruct",
             PROJECT_ROOT / "model" / "qwen32",
             PROJECT_ROOT / "models" / "qwen32",
             PROJECT_ROOT / "model" / "qwen32b",
@@ -87,6 +88,8 @@ def default_evidence_model() -> Path:
 def default_construct_model() -> Path:
     return _first_existing(
         [
+            PROJECT_ROOT / "model" / "Qwen3-VL-235B-A22B-Instruct",
+            PROJECT_ROOT / "models" / "Qwen3-VL-235B-A22B-Instruct",
             PROJECT_ROOT / "model" / "qwen235",
             PROJECT_ROOT / "models" / "qwen235",
         ]
@@ -123,46 +126,6 @@ GENERATION_TASK_PREFERENCES = (
     "esg_investment_reasoning",
     "sustainable_finance",
 )
-
-OPEN_ENDED_ERROR_HINTS = {
-    "explanation_error",
-    "causal_attribution_error",
-    "anomaly_interpretation_error",
-    "fundamental_analysis_error",
-    "audit_reasoning_error",
-    "industry_trend_error",
-    "company_comparison_error",
-    "risk_identification_error",
-    "risk_severity_error",
-    "sentiment_error",
-    "policy_interpretation_error",
-    "policy_impact_error",
-    "regulatory_interpretation_error",
-    "compliance_judgment_error",
-    "suitability_error",
-    "strategy_evaluation_error",
-    "portfolio_allocation_error",
-    "portfolio_risk_return_error",
-    "summary_keypoint_omission_error",
-    "summary_fact_distortion_error",
-    "announcement_interpretation_error",
-    "unsupported_inference_error",
-    "insufficient_evidence_handling_error",
-    "answer_granularity_error",
-}
-
-VISUAL_SCENARIO_TAGS = {
-    "single_table",
-    "multi_table",
-    "single_chart",
-    "multi_chart",
-    "table_chart_mixed",
-    "text_table_mixed",
-    "text_chart_mixed",
-    "cross_modal",
-    "relationship_diagram",
-    "candlestick_chart",
-}
 
 FACT_TYPES = {
     "numeric_metric",
@@ -219,7 +182,7 @@ EVIDENCE_SYSTEM = """你是 FINAR-VL 的金融证据事实抽取器。你的模�
 只输出 JSON。"""
 
 
-PLANNER_SYSTEM = """你是 FINAR-VL Generation RL 数据构造规划器。你收到的是已经抽取好的新金融证据事实、图上的关系路径、候选干扰事实和可选 Bad Case 能力画像。
+PLANNER_SYSTEM = """你是 FINAR-VL Generation RL 数据构造规划器。你收到的是已经抽取好的新金融证据事实、图上的关系路径和候选干扰事实。
 
 你的任务是先构造一个开放式 Generation RL 任务骨架，不直接写最终答案。
 
@@ -232,7 +195,6 @@ PLANNER_SYSTEM = """你是 FINAR-VL Generation RL 数据构造规划器。你收
 6. 不得要求股票价格预测、无法验证的未来预测或材料之外的外部知识。
 7. 图像事实存在时，可以设计真实依赖图片的任务；不要把图片事实的完整值直接写进问题意图。
 8. 若 evidence bundle 不足以形成自然、有训练价值的开放式任务，返回 reject。
-9. 如果提供 badcase_profile，只借用其能力缺口作为构造约束；不得复述或改写原 Bad Case。
 
 严格输出：
 {
@@ -344,7 +306,6 @@ class Bundle:
     distractors: list[EvidenceFact]
     path_edges: list[dict[str, str]]
     difficulty: dict[str, Any]
-    badcase_profile: dict[str, Any] | None = None
 
 
 @dataclass
@@ -371,7 +332,6 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Existing evidence fact JSONL. Defaults to <output-root>/generation_evidence_facts.jsonl.",
     )
-    parser.add_argument("--badcase-classification", type=Path, default=DEFAULT_BADCASE)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
 
     parser.add_argument("--evidence-model", type=Path, default=default_evidence_model())
@@ -399,7 +359,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-units", type=int, default=0)
     parser.add_argument("--target", type=int, default=10000)
     parser.add_argument("--hard-ratio", type=float, default=0.70)
-    parser.add_argument("--badcase-ratio", type=float, default=0.35)
     parser.add_argument("--min-required-facts", type=int, default=3)
     parser.add_argument("--max-required-facts", type=int, default=8)
     parser.add_argument("--max-distractors", type=int, default=5)
@@ -1050,23 +1009,11 @@ class BundleSampler:
             max_count = min(max(min_count, 5), self.args.max_required_facts)
         return min_count, max_count
 
-    def _seed_candidates(self, profile: Mapping[str, Any] | None) -> list[EvidenceFact]:
-        facts = self.graph.facts
-        if not profile:
-            return facts
-        tags = {str(x) for x in profile.get("scenario_tags", [])}
-        error = str(profile.get("error_type") or "")
-        visual_needed = bool(tags & VISUAL_SCENARIO_TAGS) or any(
-            token in error for token in ("visual", "chart", "table", "ocr")
-        )
-        if visual_needed:
-            visual = [fact for fact in facts if fact.source_mode == "image"]
-            if visual:
-                return visual
-        return facts
+    def _seed_candidates(self) -> list[EvidenceFact]:
+        return self.graph.facts
 
-    def _walk(self, target_count: int, profile: Mapping[str, Any] | None) -> tuple[list[EvidenceFact], list[dict[str, str]]]:
-        seeds = self._seed_candidates(profile)
+    def _walk(self, target_count: int) -> tuple[list[EvidenceFact], list[dict[str, str]]]:
+        seeds = self._seed_candidates()
         if not seeds:
             return [], []
         seed = self.rng.choice(seeds)
@@ -1107,7 +1054,7 @@ class BundleSampler:
         return required, edges
 
     @staticmethod
-    def _similarity(anchor: EvidenceFact, candidate: EvidenceFact, profile: Mapping[str, Any] | None) -> float:
+    def _similarity(anchor: EvidenceFact, candidate: EvidenceFact) -> float:
         if anchor.fact_id == candidate.fact_id:
             return -1.0
         score = 0.0
@@ -1126,25 +1073,15 @@ class BundleSampler:
         if anchor.source_mode == candidate.source_mode:
             score += 0.2
 
-        if profile:
-            error = str(profile.get("error_type") or "")
-            if "period_confusion" in error and anchor.metric == candidate.metric and anchor.period != candidate.period:
-                score += 3.0
-            if "metric_confusion" in error and anchor.period == candidate.period and anchor.metric != candidate.metric:
-                score += 3.0
-            if "scope_confusion" in error and anchor.metric == candidate.metric and anchor.scope != candidate.scope:
-                score += 3.0
-            if "entity_confusion" in error and anchor.metric == candidate.metric and anchor.entity != candidate.entity:
-                score += 3.0
         return score
 
-    def _distractors(self, required: Sequence[EvidenceFact], profile: Mapping[str, Any] | None) -> list[EvidenceFact]:
+    def _distractors(self, required: Sequence[EvidenceFact]) -> list[EvidenceFact]:
         required_ids = {fact.fact_id for fact in required}
         scored: list[tuple[float, EvidenceFact]] = []
         for candidate in self.graph.facts:
             if candidate.fact_id in required_ids:
                 continue
-            best = max(self._similarity(anchor, candidate, profile) for anchor in required)
+            best = max(self._similarity(anchor, candidate) for anchor in required)
             if best >= 1.5:
                 scored.append((best + self.rng.random() * 0.2, candidate))
         scored.sort(key=lambda item: item[0], reverse=True)
@@ -1195,13 +1132,13 @@ class BundleSampler:
             "relation_types": sorted(relation_types),
         }
 
-    def sample(self, *, hard: bool, profile: Mapping[str, Any] | None = None) -> Bundle | None:
+    def sample(self, *, hard: bool) -> Bundle | None:
         min_count, max_count = self._difficulty_target(hard)
         target_count = self.rng.randint(min_count, max_count)
-        required, edges = self._walk(target_count, profile)
+        required, edges = self._walk(target_count)
         if len(required) < min_count:
             return None
-        distractors = self._distractors(required, profile)
+        distractors = self._distractors(required)
         difficulty = self._difficulty(required, distractors, edges)
         if hard and difficulty.get("label") != "hard":
             return None
@@ -1210,7 +1147,6 @@ class BundleSampler:
             distractors=distractors,
             path_edges=edges,
             difficulty=difficulty,
-            badcase_profile=dict(profile) if profile else None,
         )
 
 
@@ -1287,7 +1223,6 @@ def planner_request(bundle: Bundle, max_images: int) -> LLMRequest:
         },
         "required_candidates": [fact_hidden_payload(fact) for fact in bundle.required],
         "distractor_candidates": [fact_hidden_payload(fact) for fact in bundle.distractors],
-        "badcase_profile": bundle.badcase_profile,
     }
     return LLMRequest(
         system=PLANNER_SYSTEM,
@@ -1295,23 +1230,6 @@ def planner_request(bundle: Bundle, max_images: int) -> LLMRequest:
         images=bundle_images(bundle, max_images),
         meta={"bundle": bundle},
     )
-
-
-def profile_visual_requirements(profile: Mapping[str, Any] | None) -> tuple[int, bool]:
-    if not profile:
-        return 0, False
-    tags = {str(x) for x in profile.get("scenario_tags", [])}
-    error = str(profile.get("error_type") or "")
-    min_visual = 0
-    require_text = False
-    if tags & {"multi_table", "multi_chart", "table_chart_mixed", "multi_visual", "multi_visual_retrieval"}:
-        min_visual = 2
-    elif tags & VISUAL_SCENARIO_TAGS or any(token in error for token in ("visual", "chart", "table", "ocr", "candlestick", "relationship")):
-        min_visual = 1
-    if tags & {"cross_modal", "text_table_mixed", "text_chart_mixed"}:
-        min_visual = max(min_visual, 1)
-        require_text = True
-    return min_visual, require_text
 
 
 def selected_difficulty(bundle: Bundle, required: Sequence[EvidenceFact], distractors: Sequence[EvidenceFact]) -> dict[str, Any]:
@@ -1386,14 +1304,6 @@ def validate_plan(
     if bundle.difficulty.get("label") == "hard" and diff.get("label") != "hard":
         return False, "hard_plan_collapsed_below_hard_difficulty"
 
-    min_visual, require_text = profile_visual_requirements(bundle.badcase_profile)
-    selected_visual = sum(1 for fact in selected_required if fact.source_mode == "image")
-    selected_text = sum(1 for fact in selected_required if fact.source_mode != "image")
-    if selected_visual < min_visual:
-        return False, "badcase_visual_requirement_not_met"
-    if require_text and selected_text < 1:
-        return False, "badcase_cross_modal_text_requirement_not_met"
-
     capacity_ok, capacity_reason = required_surface_capacity(selected_required, max_images, max_text_chars)
     if not capacity_ok:
         return False, capacity_reason
@@ -1413,7 +1323,7 @@ def render_request(bundle: Bundle, plan: Mapping[str, Any], max_images: int) -> 
     return LLMRequest(
         system=RENDER_SYSTEM,
         user=json.dumps(payload, ensure_ascii=False, indent=2),
-        images=bundle_images(Bundle(required, distractors, bundle.path_edges, bundle.difficulty, bundle.badcase_profile), max_images),
+        images=bundle_images(Bundle(required, distractors, bundle.path_edges, bundle.difficulty), max_images),
         meta={"bundle": bundle, "plan": dict(plan)},
     )
 
@@ -1458,41 +1368,9 @@ def verification_request(
     return LLMRequest(
         system=VERIFY_SYSTEM,
         user=json.dumps(payload, ensure_ascii=False, indent=2),
-        images=bundle_images(Bundle(required, distractors, bundle.path_edges, bundle.difficulty, bundle.badcase_profile), max_images),
+        images=bundle_images(Bundle(required, distractors, bundle.path_edges, bundle.difficulty), max_images),
         meta={},
     )
-
-
-def load_badcase_profiles(path: Path) -> list[dict[str, Any]]:
-    output: list[dict[str, Any]] = []
-    if not path.is_file():
-        return output
-    for row in read_jsonl(path):
-        obj = row.get("classification") if isinstance(row.get("classification"), Mapping) else row
-        error = str(obj.get("error_type") or obj.get("primary_error_type") or "")
-        task = str(obj.get("task_type") or obj.get("task") or "")
-        tags = obj.get("scenario_tags") or []
-        if isinstance(tags, str):
-            tags = [tags]
-        if not isinstance(tags, list):
-            tags = []
-        # Generation builder only consumes open-ended/analysis-like failures.
-        if error in OPEN_ENDED_ERROR_HINTS or any(
-            token in task
-            for token in (
-                "analysis",
-                "summary",
-                "policy",
-                "risk",
-                "audit",
-                "strategy",
-                "compliance",
-                "interpretation",
-                "explanation",
-            )
-        ):
-            output.append({"task_type": task, "error_type": error, "scenario_tags": [str(x) for x in tags]})
-    return output
 
 
 def final_prompt_and_images(
@@ -1601,7 +1479,6 @@ def generation_row(
                 ],
             },
             "difficulty": actual_difficulty,
-            "badcase_profile": bundle.badcase_profile,
             "construction": {
                 "evidence_model_role": "32B evidence extraction only",
                 "construct_model_role": "235B task planning, question/reference construction, verification",
@@ -1617,7 +1494,6 @@ def construct_generation(args: argparse.Namespace, facts: Sequence[EvidenceFact]
     graph = EvidenceGraph(facts)
     rng = random.Random(args.seed)
     sampler = BundleSampler(graph, rng, args)
-    profiles = load_badcase_profiles(args.badcase_classification)
 
     runner = QwenRunner(
         backend=args.construct_backend,
@@ -1641,8 +1517,7 @@ def construct_generation(args: argparse.Namespace, facts: Sequence[EvidenceFact]
         while len(batch_bundles) < args.construct_batch_size and attempts < max_attempts:
             attempts += 1
             hard = rng.random() < args.hard_ratio
-            profile = rng.choice(profiles) if profiles and rng.random() < args.badcase_ratio else None
-            bundle = sampler.sample(hard=hard, profile=profile)
+            bundle = sampler.sample(hard=hard)
             if bundle is not None:
                 batch_bundles.append(bundle)
         if not batch_bundles:
@@ -1752,7 +1627,6 @@ def audit_report(
     source_modes = Counter(fact.source_mode for fact in facts)
     tasks = Counter(str(row.get("task") or "") for row in rows)
     difficulty = Counter(str((row.get("metadata") or {}).get("difficulty", {}).get("label") or "") for row in rows)
-    badcase = sum(1 for row in rows if (row.get("metadata") or {}).get("badcase_profile"))
     visual = sum(1 for row in rows if row.get("images"))
     return {
         "version": "financial_graph_generation_rl_v1",
@@ -1771,7 +1645,6 @@ def audit_report(
         "tasks": dict(tasks),
         "difficulty": dict(difficulty),
         "visual_samples": visual,
-        "badcase_conditioned_samples": badcase,
     }
 
 
