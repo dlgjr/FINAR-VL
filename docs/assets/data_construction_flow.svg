@@ -1,54 +1,131 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="920" viewBox="0 0 1600 920">
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
 <defs>
-<linearGradient id="a" x1="0" x2="1"><stop stop-color="#f8fbff"/><stop offset="1" stop-color="#edf7ff"/></linearGradient>
-<linearGradient id="b" x1="0" x2="1"><stop stop-color="#eff7ff"/><stop offset="1" stop-color="#fbfdff"/></linearGradient>
-<linearGradient id="c" x1="0" x2="1"><stop stop-color="#effbf4"/><stop offset="1" stop-color="#fbfffc"/></linearGradient>
-<linearGradient id="d" x1="0" x2="1"><stop stop-color="#eefcfd"/><stop offset="1" stop-color="#fbffff"/></linearGradient>
-<filter id="s"><feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#173a60" flood-opacity=".10"/></filter>
-<marker id="ab" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5 0 10z" fill="#2787d8"/></marker>
-<marker id="ag" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5 0 10z" fill="#20a36b"/></marker>
-<marker id="ac" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5 0 10z" fill="#11a6b5"/></marker>
-<style>
-.t{font:700 46px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:#123d73}
-.h{font:700 28px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:#143b69}
-.m{font:700 20px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:#173d6a}
-.p{font:400 16px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:#60758a}
-.x{font:400 14px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:#708498}
-</style></defs>
-<rect width="1600" height="920" fill="#fff"/>
-<text x="800" y="58" text-anchor="middle" class="t">FINAR-VL Data Construction Pipeline</text>
-<rect x="745" y="74" width="110" height="5" rx="3" fill="#2ba2df"/>
-<g filter="url(#s)"><rect x="500" y="100" width="600" height="86" rx="16" fill="url(#a)" stroke="#338edb" stroke-width="2"/><text x="800" y="137" text-anchor="middle" class="m">data/raw → standardized evidence units</text><text x="800" y="163" text-anchor="middle" class="p">announcements · research reports · financial reports · document parsing and normalization</text></g>
-<line x1="800" y1="187" x2="800" y2="213" stroke="#2787d8" stroke-width="3" marker-end="url(#ab)"/>
-<g filter="url(#s)"><rect x="500" y="218" width="600" height="82" rx="16" fill="url(#a)" stroke="#338edb" stroke-width="2"/><text x="800" y="253" text-anchor="middle" class="m">Qwen3-VL-32B-Instruct</text><text x="800" y="279" text-anchor="middle" class="p">multimodal evidence extraction and structuring</text></g>
-<line x1="800" y1="301" x2="800" y2="327" stroke="#2787d8" stroke-width="3" marker-end="url(#ab)"/>
-<g filter="url(#s)"><rect x="500" y="332" width="600" height="82" rx="16" fill="#f3fcff" stroke="#13a8c4" stroke-width="2"/><text x="800" y="367" text-anchor="middle" class="m">Finance World</text><text x="800" y="393" text-anchor="middle" class="p">shared financial knowledge graph and fact store</text></g>
-<text x="800" y="445" text-anchor="middle" class="p">Shared evidence foundation; SFT, Reasoning RL, and Generation RL are constructed independently.</text>
-<path d="M800 414V472H270V504" fill="none" stroke="#2787d8" stroke-width="3" marker-end="url(#ab)"/>
-<path d="M800 414V504" fill="none" stroke="#20a36b" stroke-width="3" marker-end="url(#ag)"/>
-<path d="M800 414V472H1330V504" fill="none" stroke="#11a6b5" stroke-width="3" marker-end="url(#ac)"/>
+  <linearGradient id="shared" x1="0" x2="1"><stop stop-color="#F6FAFF"/><stop offset="1" stop-color="#EEF7FF"/></linearGradient>
+  <linearGradient id="rrl" x1="0" x2="1"><stop stop-color="#EFF6FF"/><stop offset="1" stop-color="#FAFCFF"/></linearGradient>
+  <linearGradient id="sft" x1="0" x2="1"><stop stop-color="#F0FBF5"/><stop offset="1" stop-color="#FCFFFD"/></linearGradient>
+  <linearGradient id="grl" x1="0" x2="1"><stop stop-color="#EFFBFC"/><stop offset="1" stop-color="#FCFFFF"/></linearGradient>
+  <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+    <feDropShadow dx="0" dy="4" stdDeviation="7" flood-color="#173A60" flood-opacity=".10"/>
+  </filter>
+  <marker id="blueArrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5 0 10z" fill="#2D86D5"/></marker>
+  <marker id="greenArrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5 0 10z" fill="#24A36C"/></marker>
+  <marker id="cyanArrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5 0 10z" fill="#12A6B7"/></marker>
+  <style>
+    .title{font:700 44px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:#123E73}
+    .section{font:700 27px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:#173E69}
+    .step{font:700 19px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:#173E69}
+    .body{font:400 15px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:#657A8E}
+    .note{font:500 16px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:#6C8094}
+    .mini{font:400 14px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:#708599}
+  </style>
+</defs>
 
-<g filter="url(#s)"><rect x="65" y="510" width="410" height="330" rx="22" fill="url(#b)" stroke="#66a9e6" stroke-width="2"/><text x="270" y="555" text-anchor="middle" class="h">Reasoning RL</text><text x="270" y="580" text-anchor="middle" class="p">verifiable reasoning data construction</text>
-<rect x="95" y="615" width="350" height="60" rx="13" fill="#fff" stroke="#79b4e8"/><text x="270" y="640" text-anchor="middle" class="m">Financial Graph sampling</text><text x="270" y="662" text-anchor="middle" class="x">multi-table · multi-chart · period/scope alignment</text>
-<line x1="270" y1="676" x2="270" y2="700" stroke="#2787d8" stroke-width="2.5" marker-end="url(#ab)"/>
-<rect x="95" y="704" width="350" height="60" rx="13" fill="#fff" stroke="#79b4e8"/><text x="270" y="729" text-anchor="middle" class="m">Reasoning path / task skeleton</text><text x="270" y="751" text-anchor="middle" class="x">multi-hop path · operators · required facts · distractors</text>
-<line x1="270" y1="765" x2="270" y2="789" stroke="#2787d8" stroke-width="2.5" marker-end="url(#ab)"/>
-<rect x="95" y="793" width="350" height="60" rx="13" fill="#fff" stroke="#79b4e8"/><text x="270" y="818" text-anchor="middle" class="m">Executable gold + hard candidates</text><text x="270" y="840" text-anchor="middle" class="x">compute gold first, then render the training prompt</text></g>
+<rect width="1600" height="900" fill="#FFFFFF"/>
+<text x="800" y="54" text-anchor="middle" class="title">FINAR-VL Data Construction Pipeline</text>
+<rect x="748" y="70" width="104" height="5" rx="3" fill="#2A9CDC"/>
 
-<g filter="url(#s)"><rect x="595" y="510" width="410" height="330" rx="22" fill="url(#c)" stroke="#62c994" stroke-width="2"/><text x="800" y="555" text-anchor="middle" class="h">SFT</text><text x="800" y="580" text-anchor="middle" class="p">instruction-tuning data construction</text>
-<rect x="625" y="615" width="350" height="60" rx="13" fill="#fff" stroke="#79cea1"/><text x="800" y="640" text-anchor="middle" class="m">SFT sample construction</text><text x="800" y="662" text-anchor="middle" class="x">multi-task · multi-difficulty · multimodal</text>
-<line x1="800" y1="676" x2="800" y2="700" stroke="#20a36b" stroke-width="2.5" marker-end="url(#ag)"/>
-<rect x="625" y="704" width="350" height="60" rx="13" fill="#fff" stroke="#79cea1"/><text x="800" y="729" text-anchor="middle" class="m">Filtering + SFT training</text><text x="800" y="751" text-anchor="middle" class="x">quality control · task correction · high-quality training pool</text>
-<line x1="800" y1="765" x2="800" y2="789" stroke="#20a36b" stroke-width="2.5" marker-end="url(#ag)"/>
-<rect x="625" y="793" width="350" height="60" rx="13" fill="#fff" stroke="#79cea1"/><text x="800" y="818" text-anchor="middle" class="m">Bad cases → targeted SFT augmentation</text><text x="800" y="840" text-anchor="middle" class="x">failure patterns are used only to replenish SFT data</text>
-<path d="M975 823H994V734H978" fill="none" stroke="#20a36b" stroke-width="2.5" marker-end="url(#ag)"/></g>
+<!-- Shared foundation -->
+<g filter="url(#shadow)">
+  <rect x="430" y="98" width="740" height="96" rx="18" fill="url(#shared)" stroke="#438FD4" stroke-width="2"/>
+  <text x="800" y="132" text-anchor="middle" class="section">Raw Data + Evidence Standardization</text>
+  <text x="800" y="158" text-anchor="middle" class="body">announcements · research reports · financial reports → document parsing, layout normalization, evidence units</text>
+  <text x="800" y="181" text-anchor="middle" class="mini">data/raw → standardized evidence units</text>
+</g>
 
-<g filter="url(#s)"><rect x="1125" y="510" width="410" height="330" rx="22" fill="url(#d)" stroke="#58c3cd" stroke-width="2"/><text x="1330" y="555" text-anchor="middle" class="h">Generation RL</text><text x="1330" y="580" text-anchor="middle" class="p">open-ended generation data construction</text>
-<rect x="1155" y="615" width="350" height="60" rx="13" fill="#fff" stroke="#72cad2"/><text x="1330" y="640" text-anchor="middle" class="m">Evidence bundle</text><text x="1330" y="662" text-anchor="middle" class="x">required evidence + optional distractors</text>
-<line x1="1330" y1="676" x2="1330" y2="700" stroke="#11a6b5" stroke-width="2.5" marker-end="url(#ac)"/>
-<rect x="1155" y="704" width="350" height="60" rx="13" fill="#fff" stroke="#72cad2"/><text x="1330" y="729" text-anchor="middle" class="m">Generation task skeleton</text><text x="1330" y="751" text-anchor="middle" class="x">analysis dimensions · constraints · difficulty structure</text>
-<line x1="1330" y1="765" x2="1330" y2="789" stroke="#11a6b5" stroke-width="2.5" marker-end="url(#ac)"/>
-<rect x="1155" y="793" width="350" height="60" rx="13" fill="#fff" stroke="#72cad2"/><text x="1330" y="818" text-anchor="middle" class="m">Question + reference answer</text><text x="1330" y="840" text-anchor="middle" class="x">Qwen3-VL-235B-A22B-Instruct renders and verifies candidates</text></g>
-<rect x="65" y="866" width="1470" height="38" rx="12" fill="#f3f6f9"/>
-<text x="800" y="891" text-anchor="middle" class="p">Model responsibility: Qwen3-VL-32B-Instruct for evidence extraction; Qwen3-VL-235B-A22B-Instruct for sample construction and answer generation.</text>
+<line x1="800" y1="195" x2="800" y2="222" stroke="#2D86D5" stroke-width="3" marker-end="url(#blueArrow)"/>
+
+<g filter="url(#shadow)">
+  <rect x="500" y="228" width="600" height="78" rx="16" fill="url(#shared)" stroke="#438FD4" stroke-width="2"/>
+  <text x="800" y="258" text-anchor="middle" class="step">Qwen3-VL-32B-Instruct</text>
+  <text x="800" y="283" text-anchor="middle" class="body">multimodal evidence extraction and structuring</text>
+</g>
+
+<line x1="800" y1="307" x2="800" y2="334" stroke="#2D86D5" stroke-width="3" marker-end="url(#blueArrow)"/>
+
+<g filter="url(#shadow)">
+  <rect x="500" y="340" width="600" height="78" rx="16" fill="#F2FCFF" stroke="#18A7C1" stroke-width="2"/>
+  <text x="800" y="370" text-anchor="middle" class="step">Finance World</text>
+  <text x="800" y="395" text-anchor="middle" class="body">shared financial knowledge graph and fact store</text>
+</g>
+
+<text x="800" y="450" text-anchor="middle" class="note">One shared evidence foundation; three independent data-construction routes.</text>
+
+<!-- Independent branch lines -->
+<path d="M800 419V478H275V506" fill="none" stroke="#2D86D5" stroke-width="3" marker-end="url(#blueArrow)"/>
+<path d="M800 419V506" fill="none" stroke="#24A36C" stroke-width="3" marker-end="url(#greenArrow)"/>
+<path d="M800 419V478H1325V506" fill="none" stroke="#12A6B7" stroke-width="3" marker-end="url(#cyanArrow)"/>
+
+<!-- Reasoning RL -->
+<g filter="url(#shadow)">
+  <rect x="70" y="512" width="410" height="306" rx="22" fill="url(#rrl)" stroke="#65A9E6" stroke-width="2"/>
+  <text x="275" y="552" text-anchor="middle" class="section">Reasoning RL</text>
+  <text x="275" y="578" text-anchor="middle" class="body">verifiable reasoning data</text>
+
+  <rect x="102" y="610" width="346" height="58" rx="12" fill="#FFFFFF" stroke="#82B9EA"/>
+  <text x="275" y="636" text-anchor="middle" class="step">Financial Graph Sampling</text>
+  <text x="275" y="658" text-anchor="middle" class="mini">multi-table · multi-chart · period/scope alignment</text>
+
+  <line x1="275" y1="669" x2="275" y2="692" stroke="#2D86D5" stroke-width="2.5" marker-end="url(#blueArrow)"/>
+
+  <rect x="102" y="696" width="346" height="58" rx="12" fill="#FFFFFF" stroke="#82B9EA"/>
+  <text x="275" y="722" text-anchor="middle" class="step">Reasoning Path + Task Skeleton</text>
+  <text x="275" y="744" text-anchor="middle" class="mini">operators · required evidence · distractors</text>
+
+  <line x1="275" y1="755" x2="275" y2="778" stroke="#2D86D5" stroke-width="2.5" marker-end="url(#blueArrow)"/>
+
+  <rect x="102" y="782" width="346" height="58" rx="12" fill="#FFFFFF" stroke="#82B9EA"/>
+  <text x="275" y="808" text-anchor="middle" class="step">Executable Gold + Hard Candidates</text>
+  <text x="275" y="830" text-anchor="middle" class="mini">compute gold first, then render the prompt</text>
+</g>
+
+<!-- SFT centered and simplified -->
+<g filter="url(#shadow)">
+  <rect x="595" y="512" width="410" height="306" rx="22" fill="url(#sft)" stroke="#64C793" stroke-width="2"/>
+  <text x="800" y="552" text-anchor="middle" class="section">SFT</text>
+  <text x="800" y="578" text-anchor="middle" class="body">instruction-tuning data</text>
+
+  <rect x="627" y="610" width="346" height="58" rx="12" fill="#FFFFFF" stroke="#7FCDA3"/>
+  <text x="800" y="636" text-anchor="middle" class="step">Sample Construction</text>
+  <text x="800" y="658" text-anchor="middle" class="mini">multi-task · multi-difficulty · multimodal</text>
+
+  <line x1="800" y1="669" x2="800" y2="692" stroke="#24A36C" stroke-width="2.5" marker-end="url(#greenArrow)"/>
+
+  <rect x="627" y="696" width="346" height="58" rx="12" fill="#FFFFFF" stroke="#7FCDA3"/>
+  <text x="800" y="722" text-anchor="middle" class="step">Filter + Train</text>
+  <text x="800" y="744" text-anchor="middle" class="mini">quality filtering · task correction · SFT training</text>
+
+  <line x1="800" y1="755" x2="800" y2="778" stroke="#24A36C" stroke-width="2.5" marker-end="url(#greenArrow)"/>
+
+  <rect x="627" y="782" width="346" height="58" rx="12" fill="#FFFFFF" stroke="#7FCDA3"/>
+  <text x="800" y="808" text-anchor="middle" class="step">Bad-Case Augmentation</text>
+  <text x="800" y="830" text-anchor="middle" class="mini">failure analysis → targeted SFT replenishment</text>
+
+  <path d="M973 810H990V725H976" fill="none" stroke="#24A36C" stroke-width="2.3" marker-end="url(#greenArrow)"/>
+</g>
+
+<!-- Generation RL -->
+<g filter="url(#shadow)">
+  <rect x="1120" y="512" width="410" height="306" rx="22" fill="url(#grl)" stroke="#5BC3CD" stroke-width="2"/>
+  <text x="1325" y="552" text-anchor="middle" class="section">Generation RL</text>
+  <text x="1325" y="578" text-anchor="middle" class="body">open-ended generation data</text>
+
+  <rect x="1152" y="610" width="346" height="58" rx="12" fill="#FFFFFF" stroke="#74CAD2"/>
+  <text x="1325" y="636" text-anchor="middle" class="step">Evidence Bundle</text>
+  <text x="1325" y="658" text-anchor="middle" class="mini">required evidence + optional distractors</text>
+
+  <line x1="1325" y1="669" x2="1325" y2="692" stroke="#12A6B7" stroke-width="2.5" marker-end="url(#cyanArrow)"/>
+
+  <rect x="1152" y="696" width="346" height="58" rx="12" fill="#FFFFFF" stroke="#74CAD2"/>
+  <text x="1325" y="722" text-anchor="middle" class="step">Generation Task Skeleton</text>
+  <text x="1325" y="744" text-anchor="middle" class="mini">analysis dimensions · constraints · difficulty</text>
+
+  <line x1="1325" y1="755" x2="1325" y2="778" stroke="#12A6B7" stroke-width="2.5" marker-end="url(#cyanArrow)"/>
+
+  <rect x="1152" y="782" width="346" height="58" rx="12" fill="#FFFFFF" stroke="#74CAD2"/>
+  <text x="1325" y="808" text-anchor="middle" class="step">Question + Reference Answer</text>
+  <text x="1325" y="830" text-anchor="middle" class="mini">Qwen3-VL-235B-A22B-Instruct renders candidates</text>
+</g>
+
+<rect x="70" y="852" width="1460" height="34" rx="10" fill="#F3F6F9"/>
+<text x="800" y="874" text-anchor="middle" class="body">Bad cases are used only in the SFT flywheel; RL samples are constructed independently to preserve within-group diversity.</text>
 </svg>
