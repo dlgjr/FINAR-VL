@@ -175,7 +175,6 @@ bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh
 脚本默认使用 top-128 GKD，图片路径沿用 RL 数据准备阶段的解析逻辑。训练每 20 step 保存一次 checkpoint 并执行阶段评估。Qwen3-VL 的学生前向默认开启 `use_logits_to_keep`，只保留需要计算蒸馏损失的 logits，避免长序列在 LM head 处产生过大的显存峰值。
 
 
-训练过程中生成的 W&B 日志、模型权重、评估结果、奖励审计和各 rank状态均保存在 `output/`。
 
 ## 🚀 训练阶段
 
@@ -217,26 +216,8 @@ Generation RL 路线面向开放式金融问答和分析生成任务，与 Reaso
 
 ### 4. MOPD
 
-MOPD 阶段以 SFT 检查点作为学生模型，同时使用 Reasoning RL 和 Generation RL 的产出作为推理教师与生成教师。训练数据保持 reasoning 和 generation 两路等量，样本根据路由只请求对应教师。
+MOPD 阶段以 SFT 检查点初始化学生模型，同时使用 Reasoning RL 和 Generation RL 的产出作为推理教师与生成教师，并采用 top-128 GKD 进行知识蒸馏。
 
-当前实现使用 top-128 GKD。教师服务返回每个目标位置的 top-128 token 概率，学生模型据此计算蒸馏损失。Reasoning teacher 使用 Reasoning RL 训练时的回答格式，Generation teacher 使用 Generation RL 的回答格式，避免在蒸馏阶段混用两套策略提示词。
-
-训练脚本同时复用 SFT 阶段的 Pass@1 / Pass@8 评估。能够程序判分的样本直接使用规则判分，确实需要模型裁判的样本交给 Generation teacher。checkpoint 每 20 step 保存一次，最新 checkpoint 保留完整训练状态，旧 checkpoint 只保留模型权重。
-
-## 🎯 RL 数据与奖励设计
-
-| 数据路线 | 主要任务 | 奖励方式 |
-|---|---|---|
-| Reasoning | 数值计算、表格推理、证据页检索、结构化问答 | 程序化规则奖励 |
-| Generation | 开放式金融分析、知识问答、图表理解、选择和判断任务 | 规则奖励与模型裁判混合 |
-
-RL 数据进入训练前依次执行：
-
-1. 统一数据结构并生成稳定样本标识；
-2. 校验问题、图片、答案和奖励路由；
-3. 根据图片数量与分辨率、输入长度、生成长度和裁判调用成本估计计算量；
-4. 将数据拆分为细粒度任务并进行负载均衡；
-5. 训练期间记录计划任务数、完成数、剩余数、心跳和错误状态。
 
 ## 📁 目录结构
 
