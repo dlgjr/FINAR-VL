@@ -4,17 +4,6 @@
 
 FINAR-VL is a multimodal large-model training project for the financial domain, built by training `FINAR-VL` on top of Qwen3-VL-4B-Instruct. The project focuses on information extraction, evidence localization, and numerical reasoning over financial materials containing multiple tables, charts, and pages.
 
-## Core Tasks
-
-| Capability | Example tasks |
-|---|---|
-| Multi-table reasoning | Locate fields across multiple tables, establish relationships between fields, and perform joint calculations |
-| Multi-image and cross-page reasoning | Retrieve evidence and answer questions using multiple charts, financial-report pages, or attachments |
-| Financial numerical reasoning | Ratios, growth rates, cumulative values, proportions, and multi-step arithmetic |
-| Chart understanding | Chart-data extraction, trend analysis, metric comparison, and chart-based calculation |
-| Document understanding | Financial OCR, entity extraction, fact extraction, and evidence-page localization |
-| Financial generation | Generate analytical answers from financial reports, market materials, and domain knowledge |
-
 ## Open-source Content
 
 | Item | Description |
@@ -23,6 +12,35 @@ FINAR-VL is a multimodal large-model training project for the financial domain, 
 | Training data | Normalized text, multimodal, Reasoning RL, and Generation RL data |
 | Stage checkpoints | SFT, Reasoning RL, and Generation RL checkpoints |
 | Final checkpoint | The `FINAR-VL` model checkpoint will be released after MOPD is completed and validated |
+
+
+## 📊 Performance
+
+<div align="center">
+  <img src="assets/finar_vl_logo.svg" width="82" alt="FINAR-VL Logo">
+  <br>
+  <strong>FINAR-VL-4B</strong>
+</div>
+
+<br>
+
+<div align="center">
+  <img src="assets/finar_vl_performance.svg" width="100%" alt="FINAR-VL Performance Comparison">
+  <br>
+  <em><strong>Figure 1:</strong> Comparison of FINAR-VL-4B with general-purpose and finance-specialized multimodal models across 12 financial benchmarks.</em>
+</div>
+
+### ✨ Highlights
+
+🏆 **Cross-benchmark performance**: The comparison covers 12 financial multimodal benchmarks: FAMMA, FinChart-Bench, FinMME, FinMMR, FinMTM, MME-Finance, VisFinEval, XFinBench, CFMME, FinMMDocR, FinDocMRE, and FinEval-MM.
+
+⚡ **Parameter efficiency**: FINAR-VL is specialized for finance at the 4B scale, covering chart understanding, financial reports, cross-page documents, and numerical reasoning with a compact model.
+
+📈 **Domain specialization**: The comparison includes the Qwen3-VL-4B-Instruct baseline, the stronger general-purpose Qwen3-VL-32B model, and representative InternVL, MiniCPM, Fin-R1, and FinLMM-R1 models.
+
+🧠 **Complex financial reasoning**: The evaluation emphasizes chart understanding, multimodal numerical calculation, cross-page evidence localization, long-document understanding, and financial analytical reasoning.
+
+> The FINAR-VL scores in the current figure are provisional values for layout and target visualization; they will be replaced by complete measured results for the formal release.
 
 ## Data Construction
 
@@ -149,7 +167,7 @@ MOPD_GENERATION_DATA=/path/to/generation_train_gspo.jsonl \
 bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh
 ```
 
-The script uses top-128 GKD by default. Image paths follow the same resolution logic used during RL data preparation. Training saves a checkpoint and runs stage evaluation every 20 steps. The latest checkpoint keeps the complete optimizer, scheduler, RNG, and Trainer state and can be resumed directly. Qwen3-VL student forward passes enable `use_logits_to_keep` by default so only logits required for the distillation loss are retained, avoiding excessive memory peaks at the LM head for long sequences.
+The script uses top-128 GKD by default. Image paths follow the same resolution logic used during RL data preparation. Training saves a checkpoint and runs stage evaluation every 20 steps. Qwen3-VL student forward passes enable `use_logits_to_keep` by default so only logits required for the distillation loss are retained, avoiding excessive memory peaks at the LM head for long sequences.
 
 Common parameters can be overridden through environment variables:
 
@@ -258,21 +276,3 @@ FINAR-VL/
 └── output/                        # Training logs, checkpoints, and evaluation results
 ```
 
-## Production Training Scripts
-
-| Script | Purpose |
-|---|---|
-| `scripts/dlc/start_sft_stage1.sh` | Production SFT entry point |
-| `scripts/dlc/start_sft_reasoning_v2.sh` | SFT entry point configured for reasoning-capability retention |
-| `scripts/dlc/start_sft.sh` | Main SFT pipeline for data preparation, sampling, training, evaluation, and saving |
-| `scripts/dlc/start_gspo_reasoning.sh` | Reasoning RL launcher |
-| `scripts/dlc/start_gspo_generation.sh` | Generation RL launcher |
-| `scripts/dlc/start_gspo.sh` | Shared main pipeline for the two independent GSPO branches |
-| `scripts/dlc/start_gspo_judge.sh` | Multimodal judge service for Generation RL |
-| `scripts/dlc/gspo_env.sh` | GSPO distributed topology and training parameters |
-| `scripts/dlc/gspo_reward_plugin.py` | Integration for rule-based and model-judge rewards |
-| `scripts/dlc/gspo_trainer_plugin.py` | Training monitoring, reward auditing, and stage evaluation |
-| `scripts/rl/prepare_gspo_data.py` | RL data conversion and computation-cost estimation |
-| `scripts/rl/schedule_gspo_data.py` | Multi-GPU and multi-node workload balancing |
-| `scripts/rl/validate_gspo_data.py` | RL data and reward-routing validation |
-| `scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh` | Single-node four-GPU dual-teacher MOPD entry point with top-128 GKD and full checkpoint resume support |
