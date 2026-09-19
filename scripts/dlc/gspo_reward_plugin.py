@@ -169,7 +169,19 @@ class GSPOReward(ORM):
             }
             with open(os.path.join(status_dir, f"rank_{rank}.json"), "w", encoding="utf-8") as handle:
                 json.dump(status, handle, ensure_ascii=False, indent=2)
-        print("[GSPO_REWARD]", json.dumps(summary, ensure_ascii=False), flush=True)
+        live_summary = {
+            key: summary[key]
+            for key in (
+                "gspo/reward_mean",
+                "gspo/reward_std",
+                "gspo/reward_nonzero_ratio",
+                "gspo/reward_partial_ratio",
+                "gspo/group_all_zero_ratio",
+                "gspo/group_mixed_ratio",
+                "gspo/group_positive_count_mean",
+            )
+        }
+        print("[GSPO_REWARD]", json.dumps(live_summary, ensure_ascii=False), flush=True)
         if os.environ.get("WANDB_MODE") not in {"disabled", "offline-disabled"}:
             try:
                 import wandb
