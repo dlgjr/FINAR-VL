@@ -274,6 +274,7 @@ class Fact:
     period: str
     scope: str
     unit: str
+    currency: str
     value: Decimal | None
     raw_value: str
     doc_key: str
@@ -328,7 +329,8 @@ def norm_fact(row: Mapping[str, Any], i: int) -> Fact:
         mk = mn
     period = str(npick(row, ("period", "fiscal_period", "report_period", "year", "date", "fiscal_year"), ""))
     scope = str(npick(row, ("scope", "reporting_scope", "statement_scope", "consolidation_scope", "segment"), ""))
-    unit = str(npick(row, ("unit", "currency_unit", "scale_unit", "value_unit"), ""))
+    unit = str(npick(row, ("unit", "scale_unit", "value_unit"), ""))
+    currency = str(npick(row, ("currency", "currency_code", "currency_unit"), ""))
     rv = npick(row, ("numeric_value", "normalized_value", "value", "value_text", "amount", "number", "fact_value"), "")
     dk = str(npick(row, ("document_entity_id", "document_id", "doc_id", "report_id", "source_ref"), ""))
     dn = str(npick(row, ("document_name", "doc_name", "report_name", "source_name", "title"), dk))
@@ -336,7 +338,12 @@ def norm_fact(row: Mapping[str, Any], i: int) -> Fact:
     image = image_field(row)
     visual = vtype(str(npick(row, ("visual_type", "media_type", "figure_type", "content_type"), "")))
     text = str(npick(row, ("evidence_quote", "evidence_text", "source_text", "ocr_text", "text", "content", "quote"), "")).strip()
-    return Fact(fid, ek, en, mk, mn, period, scope, unit, to_decimal(rv), str(rv).strip(), dk, dn, page, image, visual, text, dict(row))
+    return Fact(
+        id=fid, entity_key=ek, entity=en, metric_key=mk, metric=mn,
+        period=period, scope=scope, unit=unit, currency=currency,
+        value=to_decimal(rv), raw_value=str(rv).strip(), doc_key=dk, doc=dn,
+        page=page, image=image, visual=visual, text=text, raw=dict(row),
+    )
 
 
 def load_facts(path: Path) -> list[Fact]:
@@ -366,22 +373,22 @@ class Index:
     def __init__(self, facts: Sequence[Fact], edges: Sequence[Mapping[str, Any]] = ()) -> None:
         self.facts = list(facts)
         self.by_id = {f.id: f for f in facts}
-        self.by_series: dict[tuple[str, str, str, str], list[Fact]] = defaultdict(list)
+        self.by_series: dict[tuple[str, str, str, str, str], list[Fact]] = defaultdict(list)
         self.by_entity_period: dict[tuple[str, str], list[Fact]] = defaultdict(list)
-        self.by_metric_period: dict[tuple[str, str, str], list[Fact]] = defaultdict(list)
+        self.by_metric_period: dict[tuple[str, str, str, str, str], list[Fact]] = defaultdict(list)
         self.by_doc: dict[str, list[Fact]] = defaultdict(list)
         self.by_entity: dict[str, list[Fact]] = defaultdict(list)
-        self.by_entity_scope_unit: dict[tuple[str, str, str], list[Fact]] = defaultdict(list)
-        self.by_metric_scope_unit: dict[tuple[str, str, str], list[Fact]] = defaultdict(list)
+        self.by_entity_scope_unit: dict[tuple[str, str, str, str], list[Fact]] = defaultdict(list)
+        self.by_metric_scope_unit: dict[tuple[str, str, str, str], list[Fact]] = defaultdict(list)
         self.explicit_adj: dict[str, list[tuple[str, str]]] = defaultdict(list)
         self.explicit_type: dict[tuple[str, str], str] = {}
 
         for f in facts:
-            self.by_series[(f.entity_key, f.metric_key, f.scope, f.unit)].append(f)
+            self.by_series[(f.entity_key, f.metric_key, f.scope, f.unit, f.currency)].append(f)
             self.by_entity_period[(f.entity_key, f.period)].append(f)
-            self.by_metric_period[(f.metric_key, f.period, f.unit)].append(f)
-            self.by_entity_scope_unit[(f.entity_key, f.scope, f.unit)].append(f)
-            self.by_metric_scope_unit[(f.metric_key, f.scope, f.unit)].append(f)
+            self.by_metric_period[(f.metric_key, f.period, f.scope, f.unit, f.currency)].append(f)
+            self.by_entity_scope_unit[(f.entity_key, f.scope, f.unit, f.currency)].append(f)
+            self.by_metric_scope_unit[(f.metric_key, f.scope, f.unit, f.currency)].append(f)
             if f.doc_key:
                 self.by_doc[f.doc_key].append(f)
             if f.entity_key:
@@ -410,21 +417,21 @@ class Index:
         if (
             a.entity_key and a.entity_key == b.entity_key
             and a.metric_key and a.metric_key == b.metric_key
-            and a.scope == b.scope and a.unit == b.unit
+            and a.scope == b.scope and a.unit == b.unit and a.currency == b.currency
             and a.period != b.period
         ):
             return "same_metric_across_period"
         if (
             a.entity_key and a.entity_key == b.entity_key
             and a.period and a.period == b.period
-            and a.scope == b.scope and a.unit == b.unit
+            and a.scope == b.scope and a.unit == b.unit and a.currency == b.currency
             and a.metric_key != b.metric_key
         ):
             return "same_period_related_metric"
         if (
             a.metric_key and a.metric_key == b.metric_key
             and a.period and a.period == b.period
-            and a.unit == b.unit
+            and a.scope == b.scope and a.unit == b.unit and a.currency == b.currency
             and a.entity_key != b.entity_key
         ):
             return "same_metric_peer"
@@ -432,7 +439,7 @@ class Index:
             a.entity_key and a.entity_key == b.entity_key
             and a.metric_key and a.metric_key == b.metric_key
             and a.period and a.period == b.period
-            and a.unit == b.unit and a.scope != b.scope
+            and a.unit == b.unit and a.currency == b.currency and a.scope != b.scope
         ):
             return "scope_variant"
         if a.doc_key and a.doc_key == b.doc_key:
@@ -486,20 +493,33 @@ def fvalue(f: Fact) -> str:
 
 
 def images_for(facts: Sequence[Fact], max_images: int) -> tuple[list[str], list[str]]:
-    out, ids, seen = [], [], set()
+    """Return unique image paths and every fact id covered by those images.
+
+    Multiple facts may come from the same page image. Coverage is therefore
+    tracked by resolved image path rather than by the first fact that selected
+    the image; otherwise a second fact on the same page can be mistaken for an
+    omitted image and its hidden value can leak into text.
+    """
+    out: list[str] = []
+    selected_paths: set[str] = set()
     for f in facts:
         p = resolve_image(f.image)
         if p is None:
             continue
         q = portable(p)
-        if q in seen:
+        if q in selected_paths:
             continue
-        seen.add(q)
-        out.append(q)
-        ids.append(f.id)
         if len(out) >= max_images:
-            break
-    return out, ids
+            continue
+        selected_paths.add(q)
+        out.append(q)
+
+    covered_ids: list[str] = []
+    for f in facts:
+        p = resolve_image(f.image)
+        if p is not None and portable(p) in selected_paths:
+            covered_ids.append(f.id)
+    return out, covered_ids
 
 
 def fact_line(f: Fact, hide_visual: bool) -> str:
@@ -543,6 +563,7 @@ def meta(builder: str, facts: Sequence[Fact], visual_ids: Sequence[str], extra: 
         "document_keys": sorted({f.doc_key for f in facts if f.doc_key}),
         "scopes": sorted({f.scope for f in facts if f.scope}),
         "units": sorted({f.unit for f in facts if f.unit}),
+        "currencies": sorted({f.currency for f in facts if f.currency}),
     }
     if extra:
         x.update(dict(extra))
@@ -565,11 +586,13 @@ def task_for_pair(a: Fact, b: Fact, op: str) -> str:
     return "multi_step_numerical_reasoning"
 
 
-def numeric_row(question: str, facts: Sequence[Fact], result: Decimal, unit: str, program: str, task: str, builder: str, args: argparse.Namespace, source: str, extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def numeric_row(question: str, facts: Sequence[Fact], result: Decimal, unit: str, program: str, task: str, builder: str, args: argparse.Namespace, source: str, extra: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
     imgs, vids = images_for(facts, args.max_images)
+    covered = set(vids)
+    required_visual = {f.id for f in facts if resolve_image(f.image) is not None}
+    if not required_visual.issubset(covered):
+        return None
     ctx = context(facts, args.max_context_chars, hide_visual=True)
-    if any(f.image and f.id not in set(vids) for f in facts):
-        ctx += "\n" + context([f for f in facts if f.image and f.id not in set(vids)], args.max_context_chars, hide_visual=False)
     answer = dtext(result) + unit
     return {
         "messages": messages(question, imgs, ctx.strip()),
@@ -629,7 +652,10 @@ def ranking_row(group: Sequence[Fact], rng: random.Random, args: argparse.Namesp
     letter = next(k for k, v in opts if v == winner.entity)
     q = f"根据材料，比较各公司{facts[0].period}的{metric(facts[0])}，数值最高的是哪一家？\n" + "\n".join(f"{k}. {v}" for k, v in opts)
     imgs, vids = images_for(facts, args.max_images)
-    ctx = context(facts, args.max_context_chars, hide_visual=(len(imgs) == len(facts)))
+    required_visual = {f.id for f in facts if resolve_image(f.image) is not None}
+    if not required_visual.issubset(set(vids)):
+        return None
+    ctx = context(facts, args.max_context_chars, hide_visual=True)
     return {
         "messages": messages(q, imgs, ctx), "question": q, "solution": letter,
         "task": "statistics_comparison_ranking", "source": source, "split": "train", "images": imgs,
@@ -680,7 +706,7 @@ def distractors_for(
                 add(f, 7.5)
 
         # Wrong period, same entity/metric/scope/unit.
-        for f in index.by_series.get((r.entity_key, r.metric_key, r.scope, r.unit), []):
+        for f in index.by_series.get((r.entity_key, r.metric_key, r.scope, r.unit, r.currency), []):
             if f.period != r.period:
                 add(f, 10.0 if "period" in ptext or "temporal" in ptext else 7.0)
 
@@ -698,7 +724,7 @@ def distractors_for(
                 add(f, 10.0 if "scope" in ptext or "segment" in ptext else 8.0)
 
         # Peer company, same metric/period/unit.
-        for f in index.by_metric_period.get((r.metric_key, r.period, r.unit), []):
+        for f in index.by_metric_period.get((r.metric_key, r.period, r.scope, r.unit, r.currency), []):
             if f.entity_key != r.entity_key:
                 add(f, 10.0 if "entity" in ptext or "company" in ptext else 5.5)
 
@@ -766,21 +792,19 @@ def graph_numeric_row(
     source: str,
     rng: random.Random,
     profile: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     prompt_facts = list(required) + list(distractors)
     # Required facts are inserted before distractors when collecting images so
     # a max-images cap cannot accidentally remove required visual evidence.
     imgs, visual_ids = images_for(prompt_facts, args.max_images)
-    rng.shuffle(prompt_facts)
-    ctx = context(prompt_facts, args.max_context_chars, hide_visual=True)
     included_visual = set(visual_ids)
     missing_required_visual = [
         f for f in required if resolve_image(f.image) is not None and f.id not in included_visual
     ]
     if missing_required_visual:
-        # Keep the sample answerable if max-images is set below the number of
-        # required visual facts. This fallback is recorded in metadata.
-        ctx += "\n" + context(missing_required_visual, args.max_context_chars, hide_visual=False)
+        return None
+    rng.shuffle(prompt_facts)
+    ctx = context(prompt_facts, args.max_context_chars, hide_visual=True)
 
     answer = dtext(result) + unit
     diff = difficulty_vector(required, distractors, path_edges, program.count("("))
@@ -792,7 +816,7 @@ def graph_numeric_row(
             "edges": [dict(x) for x in path_edges],
         },
         "difficulty": diff,
-        "image_fallback_required_ids": [f.id for f in missing_required_visual],
+        "image_fallback_required_ids": [],
     }
     if profile:
         extra["badcase_profile"] = dict(profile)
@@ -927,8 +951,11 @@ class GraphReasoningSampler:
         groups = [g for g in self.index.by_series.values() if len([f for f in g if f.value is not None and f.period]) >= 3]
         if not groups:
             return None
-        facts = [f for f in self.rng.choice(groups) if f.value is not None and f.period]
-        facts.sort(key=lambda f: (year(f.period) or 0, f.period))
+        raw_facts = [f for f in self.rng.choice(groups) if f.value is not None and f.period]
+        by_period: dict[str, Fact] = {}
+        for f in raw_facts:
+            by_period.setdefault(f.period, f)
+        facts = sorted(by_period.values(), key=lambda f: (year(f.period) or 0, f.period))
         if len(facts) < 3:
             return None
         start = self.rng.randrange(0, len(facts) - 2)
@@ -997,7 +1024,8 @@ class GraphReasoningSampler:
             f"subtract({dtext(a_new.value,12)},{dtext(a_old.value,12)}),"
             f"divide(#0,{dtext(a_old.value,12)}),multiply(#1,100),"
             f"subtract({dtext(b_new.value,12)},{dtext(b_old.value,12)}),"
-            f"divide(#3,{dtext(b_old.value,12)}),multiply(#4,100),subtract(#2,#5)"        )
+            f"divide(#3,{dtext(b_old.value,12)}),multiply(#4,100),subtract(#2,#5)"
+        )
         edges = [
             self.index.graph_edge(a_old, a_new),
             self.index.graph_edge(b_old, b_new),
@@ -1050,36 +1078,46 @@ def simple_reasoning_pool(index: Index, rng: random.Random, target: int, args: a
             old, new = (a, b) if ya is None or yb is None or ya <= yb else (b, a)
             diff = new.value - old.value
             q = f"根据给定材料，计算{entity(new)}{metric(new)}从{old.period}到{new.period}的变化额。"
-            rows.append(numeric_row(q, [old, new], diff, new.unit, f"subtract({dtext(new.value,12)},{dtext(old.value,12)})", task_for_pair(old, new, "difference"), "period_difference", args, source, extra))
+            row = numeric_row(q, [old, new], diff, new.unit, f"subtract({dtext(new.value,12)},{dtext(old.value,12)})", task_for_pair(old, new, "difference"), "period_difference", args, source, extra)
+            if row:
+                rows.append(row)
             if old.value != 0:
                 pct = (new.value - old.value) / old.value * Decimal(100)
                 q = f"根据给定材料，计算{entity(new)}{metric(new)}由{old.period}到{new.period}的变动百分比。"
                 prog = f"subtract({dtext(new.value,12)},{dtext(old.value,12)}),divide(#0,{dtext(old.value,12)}),multiply(#1,100)"
-                rows.append(numeric_row(q, [old, new], pct, "%", prog, task_for_pair(old, new, "ratio"), "period_percentage_change", args, source, extra))
+                row = numeric_row(q, [old, new], pct, "%", prog, task_for_pair(old, new, "ratio"), "period_percentage_change", args, source, extra)
+                if row:
+                    rows.append(row)
             if len(rows) >= target * 2:
                 break
         if len(rows) >= target * 2:
             break
 
-    # Same-period metric ratios.
+    # Same-period financial ratios: only use known financial formula pairs.
     ep = list(index.by_entity_period.values())
     rng.shuffle(ep)
     for g in ep:
-        by_unit: dict[str, list[Fact]] = defaultdict(list)
+        by_key: dict[tuple[str, str, str, str], dict[str, Fact]] = defaultdict(dict)
         for f in g:
-            if f.value is not None and f.unit and f.metric_key:
-                by_unit[f.unit].append(f)
-        for ug in by_unit.values():
-            if len(ug) < 2:
-                continue
-            rng.shuffle(ug)
-            a, b = ug[0], ug[1]
-            if a.metric_key == b.metric_key or b.value == 0:
-                continue
-            pct = a.value / b.value * Decimal(100)
-            q = f"根据给定材料，计算{entity(a)}{a.period}{metric(a)}相对于{metric(b)}的比例（%）。"
-            prog = f"divide({dtext(a.value,12)},{dtext(b.value,12)}),multiply(#0,100)"
-            rows.append(numeric_row(q, [a, b], pct, "%", prog, task_for_pair(a, b, "ratio"), "same_period_metric_ratio", args, source, extra))
+            if f.value is not None and f.metric_key:
+                by_key[(f.scope, f.unit, f.currency, f.period)][f.metric_key] = f
+        for by_metric in by_key.values():
+            formula_options = [
+                (name, num, den)
+                for name, (num, den) in FINANCIAL_FORMULA_PAIRS.items()
+                if num in by_metric and den in by_metric and by_metric[den].value not in (None, Decimal(0))
+            ]
+            rng.shuffle(formula_options)
+            for formula_name, num_metric, den_metric in formula_options[:2]:
+                a, b = by_metric[num_metric], by_metric[den_metric]
+                pct = a.value / b.value * Decimal(100)
+                q = f"根据给定材料，计算{entity(a)}{a.period}{metric(a)}相对于{metric(b)}的比例（%）。"
+                prog = f"divide({dtext(a.value,12)},{dtext(b.value,12)}),multiply(#0,100)"
+                row = numeric_row(q, [a, b], pct, "%", prog, task_for_pair(a, b, "ratio"), f"same_period_formula_ratio:{formula_name}", args, source, extra)
+                if row:
+                    rows.append(row)
+                if len(rows) >= target * 3:
+                    break
             if len(rows) >= target * 3:
                 break
         if len(rows) >= target * 3:
@@ -1306,10 +1344,13 @@ def valid_gen(x: Mapping[str, Any], ids: set[str]) -> tuple[bool, str]:
     return True, ""
 
 
-def gen_row(x: Mapping[str, Any], bundle: Sequence[Fact], profile: Mapping[str, Any] | None, args: argparse.Namespace) -> dict[str, Any]:
+def gen_row(x: Mapping[str, Any], bundle: Sequence[Fact], profile: Mapping[str, Any] | None, args: argparse.Namespace) -> dict[str, Any] | None:
     lookup = {f.id: f for f in bundle}
     used = [lookup[str(i)] for i in x["used_fact_ids"] if str(i) in lookup]
     imgs, vids = images_for(used, args.max_images)
+    required_visual = {f.id for f in used if resolve_image(f.image) is not None}
+    if not required_visual.issubset(set(vids)):
+        return None
     ctx = context(used, args.max_context_chars, hide_visual=True)
     q, ans = str(x["question"]).strip(), str(x["reference_answer"]).strip()
     extra = {"badcase_profile": dict(profile)} if profile else None
@@ -1338,8 +1379,14 @@ def generation_pool(index: Index, runner: Runner, rng: random.Random, target: in
             if isinstance(x, Exception):
                 rejected.append({"stage":"generation","reason":f"llm_error:{x}","fact_ids":[f.id for f in bundle],"profile":profile}); continue
             ok, reason = valid_gen(x, {f.id for f in bundle})
-            if ok: accepted.append(gen_row(x, bundle, profile, args))
-            else: rejected.append({"stage":"generation","reason":reason,"output":x,"fact_ids":[f.id for f in bundle],"profile":profile})
+            if ok:
+                row = gen_row(x, bundle, profile, args)
+                if row is None:
+                    rejected.append({"stage":"generation","reason":"required_visual_evidence_exceeds_image_cap","output":x,"fact_ids":[f.id for f in bundle],"profile":profile})
+                else:
+                    accepted.append(row)
+            else:
+                rejected.append({"stage":"generation","reason":reason,"output":x,"fact_ids":[f.id for f in bundle],"profile":profile})
             if len(accepted) >= target: break
         pending = []
     return dedup(accepted)[:target], rejected
