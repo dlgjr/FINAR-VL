@@ -46,6 +46,8 @@ import math
 import os
 import random
 import re
+import subprocess
+import sys
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -185,7 +187,7 @@ EVIDENCE_SYSTEM = """你是 FINAR-VL 的金融证据事实抽取器。你的模�
 1. 只抽取输入文本和图片中能够直接确认的事实，不使用外部知识，不推断公司动机，不补全缺失原因。
 2. 数值事实需要尽量保留主体、期间、指标、scope、单位、币种和原始值。
 3. 非数值事实可包括风险披露、原因说明、管理层指引、政策规则、监管要求、审计事项、事件、关系、会计政策等。
-4. 如果事实来自图片，source_mode="image"，必须给 image_index；不要把看不清的内容猜出来。
+4. 如果事实来自图片，source_mode="image"，必须给 image_index；image_index 是 supplied_images 中从 0 开始的下标，不是原文件列表下标；不要把看不清的内容猜出来。
 5. 如果事实来自文本，source_mode="text"，evidence_quote 应是材料中的短证据片段。
 6. 同一事实不要重复输出。
 7. confidence 只能是 high / medium / low；low 不会进入后续构造。
@@ -694,13 +696,22 @@ class QwenRunner:
 
 def evidence_request(unit: EvidenceUnit, entity: Mapping[str, Any], max_images: int) -> LLMRequest:
     images: list[Path] = []
-    for value in unit.images[:max_images]:
+    source_indices: list[int] = []
+    for source_index, value in enumerate(unit.images):
         path = resolve_image(value)
-        if path is not None:
-            images.append(path)
+        if path is None:
+            continue
+        images.append(path)
+        source_indices.append(source_index)
+        if len(images) >= max_images:
+            break
     payload = {
         "fact_types": sorted(FACT_TYPES),
         "document_entity": dict(entity),
+        "supplied_images": [
+            {"image_index": model_index, "source_image_index": source_index}
+            for model_index, source_index in enumerate(source_indices)
+        ],
         "unit": {
             "unit_id": unit.unit_id,
             "document_id": unit.document_id,
@@ -716,11 +727,21 @@ def evidence_request(unit: EvidenceUnit, entity: Mapping[str, Any], max_images: 
         system=EVIDENCE_SYSTEM,
         user=json.dumps(payload, ensure_ascii=False, indent=2),
         images=images,
-        meta={"unit_id": unit.unit_id},
+        meta={
+            "unit_id": unit.unit_id,
+            "source_image_indices": source_indices,
+            "document_entity": dict(entity),
+        },
     )
 
 
-def normalize_fact_from_model(unit: EvidenceUnit, item: Mapping[str, Any], ordinal: int) -> EvidenceFact | None:
+def normalize_fact_from_model(
+    unit: EvidenceUnit,
+    item: Mapping[str, Any],
+    ordinal: int,
+    source_image_indices: Sequence[int],
+    document_entity: Mapping[str, Any],
+) -> EvidenceFact | None:
     fact_type = str(item.get("fact_type") or "other")
     if fact_type not in FACT_TYPES:
         fact_type = "other"
@@ -736,10 +757,13 @@ def normalize_fact_from_model(unit: EvidenceUnit, item: Mapping[str, Any], ordin
     image_index = item.get("image_index")
     if source_mode == "image":
         try:
-            image_index = int(image_index)
+            model_image_index = int(image_index)
         except (TypeError, ValueError):
-            image_index = 0 if unit.images else None
-        if image_index is not None and not (0 <= image_index < len(unit.images)):
+            model_image_index = 0 if source_image_indices else None
+        if model_image_index is None or not (0 <= model_image_index < len(source_image_indices)):
+            return None
+        image_index = int(source_image_indices[model_image_index])
+        if not (0 <= image_index < len(unit.images)):
             return None
     else:
         image_index = None
@@ -773,8 +797,8 @@ def normalize_fact_from_model(unit: EvidenceUnit, item: Mapping[str, Any], ordin
         dataset=unit.dataset,
         source_ref=unit.source_ref,
         page=unit.page,
-        entity=normalize_text(item.get("entity")),
-        period=normalize_text(item.get("period")),
+        entity=normalize_text(item.get("entity")) or normalize_text(document_entity.get("company_name") or document_entity.get("entity_name")),
+        period=normalize_text(item.get("period")) or normalize_text(document_entity.get("period")),
         fact_type=fact_type,
         metric=metric,
         scope=normalize_text(item.get("scope")),
@@ -879,7 +903,7 @@ def extract_evidence_facts(args: argparse.Namespace) -> tuple[list[EvidenceFact]
             for unit in batch_units
         ]
         outputs = runner.batch(requests, temperature=0.0, max_tokens=args.extract_max_tokens)
-        for unit, output in zip(batch_units, outputs):
+        for unit, request, output in zip(batch_units, requests, outputs):
             if isinstance(output, Exception):
                 failures.append({"stage": "extract", "unit_id": unit.unit_id, "error": str(output)})
                 continue
@@ -890,7 +914,13 @@ def extract_evidence_facts(args: argparse.Namespace) -> tuple[list[EvidenceFact]
             for ordinal, item in enumerate(items, 1):
                 if not isinstance(item, Mapping):
                     continue
-                fact = normalize_fact_from_model(unit, item, ordinal)
+                fact = normalize_fact_from_model(
+                    unit,
+                    item,
+                    ordinal,
+                    request.meta.get("source_image_indices") or [],
+                    request.meta.get("document_entity") or {},
+                )
                 if fact is not None:
                     facts.append(fact)
         print(json.dumps({"stage": "extract", "processed": min(start + len(batch_units), len(units)), "facts": len(facts)}, ensure_ascii=False), flush=True)
@@ -935,10 +965,21 @@ class EvidenceGraph:
         self.adj[b.fact_id].append((a.fact_id, edge_type, weight))
 
     @staticmethod
-    def _bounded_pairs(group: Sequence[EvidenceFact], max_group: int = 60) -> Iterator[tuple[EvidenceFact, EvidenceFact]]:
-        items = list(group)[:max_group]
+    def _bounded_pairs(
+        group: Sequence[EvidenceFact],
+        max_group: int = 60,
+        max_neighbors: int = 6,
+    ) -> Iterator[tuple[EvidenceFact, EvidenceFact]]:
+        """Connect the full group with bounded local neighborhoods.
+
+        The previous implementation truncated groups to the first `max_group`
+        facts, which silently isolated later pages in long financial documents.
+        Here `max_group` is kept for call compatibility but no facts are dropped.
+        """
+        del max_group
+        items = list(group)
         for i, a in enumerate(items):
-            for b in items[i + 1 :]:
+            for b in items[i + 1 : i + 1 + max_neighbors]:
                 yield a, b
 
     def _build(self) -> None:
@@ -997,7 +1038,8 @@ class EvidenceGraph:
 class BundleSampler:
     def __init__(self, graph: EvidenceGraph, rng: random.Random, args: argparse.Namespace) -> None:
         self.graph = graph
-        self.rng = rng        self.args = args
+        self.rng = rng
+        self.args = args
 
     def _difficulty_target(self, hard: bool) -> tuple[int, int]:
         if hard:
@@ -1036,14 +1078,19 @@ class BundleSampler:
         for _ in range(target_count * 5):
             if len(required) >= target_count:
                 break
-            options = [item for item in self.graph.neighbors(current.fact_id) if item[0].fact_id not in used]
+            options: list[tuple[EvidenceFact, str, float, str]] = [
+                (fact, edge_type, weight, current.fact_id)
+                for fact, edge_type, weight in self.graph.neighbors(current.fact_id)
+                if fact.fact_id not in used
+            ]
             if not options:
                 # Continue from any already selected node before giving up.
-                candidates = []
+                candidates: list[tuple[EvidenceFact, str, float, str]] = []
                 for selected in required:
                     candidates.extend(
-                        item for item in self.graph.neighbors(selected.fact_id)
-                        if item[0].fact_id not in used
+                        (fact, edge_type, weight, selected.fact_id)
+                        for fact, edge_type, weight in self.graph.neighbors(selected.fact_id)
+                        if fact.fact_id not in used
                     )
                 options = candidates
             if not options:
@@ -1052,10 +1099,10 @@ class BundleSampler:
             # Bias toward stronger graph relations while retaining diversity.
             weights = [max(0.1, item[2]) for item in options]
             choice = self.rng.choices(options, weights=weights, k=1)[0]
-            nxt, edge_type, _ = choice
+            nxt, edge_type, _, source_id = choice
             required.append(nxt)
             used.add(nxt.fact_id)
-            edges.append({"source": current.fact_id, "target": nxt.fact_id, "type": edge_type})
+            edges.append({"source": source_id, "target": nxt.fact_id, "type": edge_type})
             current = nxt
         return required, edges
 
@@ -1156,6 +1203,8 @@ class BundleSampler:
             return None
         distractors = self._distractors(required, profile)
         difficulty = self._difficulty(required, distractors, edges)
+        if hard and difficulty.get("label") != "hard":
+            return None
         return Bundle(
             required=required,
             distractors=distractors,
@@ -1248,7 +1297,59 @@ def planner_request(bundle: Bundle, max_images: int) -> LLMRequest:
     )
 
 
-def validate_plan(plan: Mapping[str, Any], bundle: Bundle) -> tuple[bool, str]:
+def profile_visual_requirements(profile: Mapping[str, Any] | None) -> tuple[int, bool]:
+    if not profile:
+        return 0, False
+    tags = {str(x) for x in profile.get("scenario_tags", [])}
+    error = str(profile.get("error_type") or "")
+    min_visual = 0
+    require_text = False
+    if tags & {"multi_table", "multi_chart", "table_chart_mixed", "multi_visual", "multi_visual_retrieval"}:
+        min_visual = 2
+    elif tags & VISUAL_SCENARIO_TAGS or any(token in error for token in ("visual", "chart", "table", "ocr", "candlestick", "relationship")):
+        min_visual = 1
+    if tags & {"cross_modal", "text_table_mixed", "text_chart_mixed"}:
+        min_visual = max(min_visual, 1)
+        require_text = True
+    return min_visual, require_text
+
+
+def selected_difficulty(bundle: Bundle, required: Sequence[EvidenceFact], distractors: Sequence[EvidenceFact]) -> dict[str, Any]:
+    ids = {fact.fact_id for fact in required}
+    edges = [
+        edge for edge in bundle.path_edges
+        if str(edge.get("source") or "") in ids and str(edge.get("target") or "") in ids
+    ]
+    return BundleSampler._difficulty(required, distractors, edges)
+
+
+def required_surface_capacity(
+    required: Sequence[EvidenceFact],
+    max_images: int,
+    max_text_chars: int,
+) -> tuple[bool, str]:
+    image_paths = {portable_path(path) for fact in required if (path := fact_image_path(fact)) is not None}
+    required_image_facts = [fact for fact in required if fact.source_mode == "image"]
+    if any(fact_image_path(fact) is None for fact in required_image_facts):
+        return False, "required_image_missing"
+    if len(image_paths) > max_images:
+        return False, "required_images_exceed_max_images"
+    text_chars = sum(
+        len(fact_prompt_text(fact))
+        for fact in required
+        if fact.source_mode != "image"
+    )
+    if text_chars > max_text_chars:
+        return False, "required_text_exceeds_context_budget"
+    return True, ""
+
+
+def validate_plan(
+    plan: Mapping[str, Any],
+    bundle: Bundle,
+    max_images: int,
+    max_text_chars: int,
+) -> tuple[bool, str]:
     if str(plan.get("status") or "") != "accepted":
         return False, str(plan.get("reason") or "planner_rejected")
     task = str(plan.get("task") or "")
@@ -1257,18 +1358,45 @@ def validate_plan(plan: Mapping[str, Any], bundle: Bundle) -> tuple[bool, str]:
     required_ids = plan.get("required_fact_ids")
     if not isinstance(required_ids, list) or len(required_ids) < 2:
         return False, "invalid_required_fact_ids"
+    required_ids = [str(fid) for fid in required_ids]
+    if len(set(required_ids)) != len(required_ids):
+        return False, "duplicate_required_fact_ids"
     allowed_required = {fact.fact_id for fact in bundle.required}
     if any(str(fid) not in allowed_required for fid in required_ids):
         return False, "required_fact_outside_bundle"
     distractors = plan.get("distractor_ids") or []
     if not isinstance(distractors, list):
         return False, "invalid_distractor_ids"
+    distractors = [str(fid) for fid in distractors]
+    if len(set(distractors)) != len(distractors):
+        return False, "duplicate_distractor_ids"
     allowed_distractors = {fact.fact_id for fact in bundle.distractors}
     if any(str(fid) not in allowed_distractors for fid in distractors):
         return False, "distractor_outside_bundle"
     dimensions = plan.get("analysis_dimensions")
     if not isinstance(dimensions, list) or not dimensions:
         return False, "missing_analysis_dimensions"
+
+    by_id = {fact.fact_id: fact for fact in [*bundle.required, *bundle.distractors]}
+    selected_required = [by_id[fid] for fid in required_ids if fid in by_id]
+    selected_distractors = [by_id[fid] for fid in distractors if fid in by_id]
+    if bundle.difficulty.get("label") == "hard" and len(selected_required) < 4:
+        return False, "hard_plan_uses_too_few_required_facts"
+    diff = selected_difficulty(bundle, selected_required, selected_distractors)
+    if bundle.difficulty.get("label") == "hard" and diff.get("label") != "hard":
+        return False, "hard_plan_collapsed_below_hard_difficulty"
+
+    min_visual, require_text = profile_visual_requirements(bundle.badcase_profile)
+    selected_visual = sum(1 for fact in selected_required if fact.source_mode == "image")
+    selected_text = sum(1 for fact in selected_required if fact.source_mode != "image")
+    if selected_visual < min_visual:
+        return False, "badcase_visual_requirement_not_met"
+    if require_text and selected_text < 1:
+        return False, "badcase_cross_modal_text_requirement_not_met"
+
+    capacity_ok, capacity_reason = required_surface_capacity(selected_required, max_images, max_text_chars)
+    if not capacity_ok:
+        return False, capacity_reason
     return True, ""
 
 
@@ -1300,8 +1428,11 @@ def validate_render(rendered: Mapping[str, Any], plan: Mapping[str, Any]) -> tup
     used = rendered.get("used_fact_ids")
     if not isinstance(used, list):
         return False, "missing_used_fact_ids"
+    normalized_used = [str(x) for x in used]
+    if len(set(normalized_used)) != len(normalized_used):
+        return False, "duplicate_used_fact_ids"
     expected = {str(x) for x in plan.get("required_fact_ids", [])}
-    if {str(x) for x in used} != expected:
+    if set(normalized_used) != expected:
         return False, "used_fact_ids_mismatch"
     return True, ""
 
@@ -1371,9 +1502,14 @@ def final_prompt_and_images(
     max_images: int,
     max_text_chars: int,
 ) -> tuple[str, list[str]]:
+    capacity_ok, reason = required_surface_capacity(required, max_images, max_text_chars)
+    if not capacity_ok:
+        raise ValueError(reason)
+
     ordered = [*required, *distractors]
     images: list[str] = []
     image_map: dict[str, int] = {}
+    # Required images get priority; distractor images use remaining slots.
     for fact in ordered:
         path = fact_image_path(fact)
         if path is None:
@@ -1385,21 +1521,24 @@ def final_prompt_and_images(
 
     lines: list[str] = []
     total = 0
+    required_ids = {fact.fact_id for fact in required}
     for fact in ordered:
         image_number = None
         if fact.source_mode == "image":
             path = fact_image_path(fact)
             if path is not None and portable_path(path) in image_map:
                 image_number = image_map[portable_path(path)] + 1
-        line = fact_prompt_text(fact, distractor=fact in distractors, image_number=image_number)
-        if fact.source_mode == "image":
-            path = fact_image_path(fact)
-            if path is None or portable_path(path) not in image_map:
-                # If image cannot be supplied, do not silently leak the hidden
-                # image fact value into text; simply omit this unusable fact.
+            elif fact.fact_id in required_ids:
+                raise ValueError("required_image_not_in_final_prompt")
+            else:
                 continue
+        line = fact_prompt_text(fact, distractor=fact in distractors, image_number=image_number)
+        if fact.fact_id in required_ids:
+            lines.append(line)
+            total += len(line)
+            continue
         if total + len(line) > max_text_chars:
-            break
+            continue
         lines.append(line)
         total += len(line)
 
@@ -1424,6 +1563,7 @@ def generation_row(
         args.max_images,
         args.max_text_context_chars,
     )
+    actual_difficulty = selected_difficulty(bundle, required, distractors)
     sample_id = stable_id(
         "genrl",
         plan.get("task"),
@@ -1460,7 +1600,7 @@ def generation_row(
                     and edge.get("target") in {f.fact_id for f in required}
                 ],
             },
-            "difficulty": bundle.difficulty,
+            "difficulty": actual_difficulty,
             "badcase_profile": bundle.badcase_profile,
             "construction": {
                 "evidence_model_role": "32B evidence extraction only",
@@ -1516,7 +1656,7 @@ def construct_generation(args: argparse.Namespace, facts: Sequence[EvidenceFact]
             if isinstance(plan, Exception):
                 rejected.append({"stage": "plan", "reason": f"model_error:{plan}"})
                 continue
-            ok, reason = validate_plan(plan, bundle)
+            ok, reason = validate_plan(plan, bundle, args.max_images, args.max_text_context_chars)
             if not ok:
                 rejected.append({"stage": "plan", "reason": reason, "output": plan})
                 continue
@@ -1563,11 +1703,21 @@ def construct_generation(args: argparse.Namespace, facts: Sequence[EvidenceFact]
                 })
                 continue
             expected = {str(x) for x in plan.get("required_fact_ids", [])}
-            verified_ids = verification.get("required_fact_ids")
-            if isinstance(verified_ids, list) and verified_ids and not set(map(str, verified_ids)).issubset(expected):
-                rejected.append({"stage": "verify", "reason": "verifier_used_nonrequired_fact"})
+            if args.verify:
+                verified_ids = verification.get("required_fact_ids")
+                if not isinstance(verified_ids, list) or {str(x) for x in verified_ids} != expected:
+                    rejected.append({"stage": "verify", "reason": "verifier_required_fact_set_mismatch"})
+                    continue
+                required_lookup = {fact.fact_id: fact for fact in bundle.required}
+                expected_visual = any(required_lookup.get(fid) is not None and required_lookup[fid].source_mode == "image" for fid in expected)
+                if expected_visual and not bool(verification.get("visual_required")):
+                    rejected.append({"stage": "verify", "reason": "verifier_says_visual_not_required"})
+                    continue
+            try:
+                row = generation_row(bundle, plan, rendered, args)
+            except ValueError as exc:
+                rejected.append({"stage": "finalize", "reason": str(exc)})
                 continue
-            row = generation_row(bundle, plan, rendered, args)
             question_key = re.sub(r"\s+", "", row["question"]).lower()
             seen_questions.add(question_key)
             accepted.append(row)
@@ -1625,13 +1775,44 @@ def audit_report(
     }
 
 
+def run_all_as_children() -> None:
+    """Run 32B extraction and 235B construction in separate processes.
+
+    vLLM model teardown is not guaranteed to return all CUDA/NCCL resources to
+    a clean state inside one Python process. Child stages avoid loading 32B and
+    235B into the same process on an 8-GPU DLC node.
+    """
+    argv = sys.argv[1:]
+    cleaned: list[str] = []
+    skip_next = False
+    for token in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if token == "--stage":
+            skip_next = True
+            continue
+        if token.startswith("--stage="):
+            continue
+        cleaned.append(token)
+    for stage in ("extract", "construct"):
+        cmd = [sys.executable, str(Path(__file__).resolve()), "--stage", stage, *cleaned]
+        print("+", " ".join(cmd), flush=True)
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            raise SystemExit(result.returncode)
+
+
 def main() -> None:
     args = parse_args()
+    if args.stage == "all":
+        run_all_as_children()
+        return
     args.output_root.mkdir(parents=True, exist_ok=True)
     evidence_facts_path = args.evidence_facts or (args.output_root / "generation_evidence_facts.jsonl")
     extract_failures: list[dict[str, Any]] = []
 
-    if args.stage in {"extract", "all"}:
+    if args.stage == "extract":
         facts, extract_failures = extract_evidence_facts(args)
         write_jsonl(evidence_facts_path, (fact_to_row(fact) for fact in facts))
         write_jsonl(args.output_root / "evidence_extract_failures.jsonl", extract_failures)
