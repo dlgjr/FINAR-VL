@@ -31,7 +31,7 @@ FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Q
   <img src="docs/assets/data_construction_flow.svg" alt="FINAR-VL Data Construction Pipeline" width="100%">
 </p>
 
-SFT、Reasoning RL 和 Generation RL 共用 Finance World 作为证据底座，但三条数据构造流程彼此独立。SFT 保留 Bad Case 飞轮用于定向补数；RL 不设置 Bad Case 专门构造阶段，避免围绕单一失败模式成组造题而削弱组内差异。
+SFT、Reasoning RL 和 Generation RL 共用 Finance World 作为证据底座，但三条数据构造流程彼此独立。
 
 - **Shared foundation**: raw financial data → standardized evidence units → `Qwen3-VL-32B-Instruct` → Finance World.
 - **SFT**: sample construction → filtering and cleaning → SFT training → Bad Case analysis → targeted SFT augmentation.
@@ -87,8 +87,6 @@ FINAR-VL/
 ├── data/train_multi/train_rl_generation.jsonl
 └── data/benchmark/my_benchmark/all.jsonl
 ```
-
-其中 `models/qwen4` 为 Qwen3-VL-4B-Instruct；`models/qwen30` 用于训练阶段评估；`models/qwen32` 对应 Qwen3-VL-32B-Instruct，用于证据事实抽取；`models/qwen235` 对应 Qwen3-VL-235B-A22B-Instruct，用于数据构造和 Generation RL 开放式答案裁判。
 
 初始化本机环境变量：
 
