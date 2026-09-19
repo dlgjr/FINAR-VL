@@ -1,21 +1,13 @@
-# FINAR-VL
+<h1 align="center">
+  <img src="assets/finar_vl_logo.svg" width="80" align="left" alt="FINAR-VL Logo">
+  FINAR-VL
+</h1>
 
 [中文](README.md) | [English](README.en.md)
 
 FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Qwen3-VL-4B-Instruct 训练 `FINAR-VL`。项目重点处理多表、多图、跨页金融材料中的信息提取、证据定位与数值计算问题。
 
-## 核心任务
-
-| 能力 | 任务示例 |
-|---|---|
-| 多表推理 | 跨多个表格定位字段、建立字段关系并完成联合计算 |
-| 多图与跨页推理 | 结合多个图表、财报页面或附件完成证据检索和问答 |
-| 金融数值计算 | 比率、增减幅、累计值、占比和多步算术计算 |
-| 图表理解 | 图表数据提取、趋势判断、指标比较和图表计算 |
-| 文档理解 | 金融 OCR、实体抽取、事实抽取和证据页定位 |
-| 金融生成 | 基于财报、市场材料和专业知识生成分析性回答 |
-
-## 开源内容
+## 📦 开源内容
 
 | 内容 | 说明 |
 |---|---|
@@ -25,7 +17,36 @@ FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Q
 | 最终权重 | MOPD 完成并验证后开源 `FINAR-VL` 模型权重 |
 
 
-## 数据构造
+
+## 📊 性能表现
+
+<div align="center">
+  <img src="assets/finar_vl_logo.svg" width="82" alt="FINAR-VL Logo">
+  <br>
+  <strong>FINAR-VL-4B</strong>
+</div>
+
+<br>
+
+<div align="center">
+  <img src="assets/finar_vl_performance.svg" width="100%" alt="FINAR-VL Performance Comparison">
+  <br>
+  <em><strong>图 1：</strong>FINAR-VL-4B 与通用及金融专项多模态模型在 12 个金融基准上的对比。</em>
+</div>
+
+### ✨ 结果亮点
+
+🏆 **跨基准表现**：覆盖 FAMMA、FinChart-Bench、FinMME、FinMMR、FinMTM、MME-Finance、VisFinEval、XFinBench、CFMME、FinMMDocR、FinDocMRE 和 FinEval-MM 共 12 项金融多模态基准。
+
+⚡ **参数效率**：FINAR-VL 以 4B 参数规模面向金融领域进行专项优化，用更小的模型规模覆盖图表、财报、跨页文档与数值推理任务。
+
+📈 **领域特化**：对比同时保留 Qwen3-VL-4B-Instruct 基线、Qwen3-VL-32B 强通用模型，以及 InternVL、MiniCPM、Fin-R1、FinLMM-R1 等代表性模型。
+
+🧠 **复杂金融推理**：重点评估图表理解、多模态数值计算、跨页证据定位、长文档理解和金融分析推理能力。
+
+> 当前图中 FINAR-VL 分数为用于版式与目标展示的暂定值；正式发布时将以完整实测结果替换。
+
+## 🧩 数据构造
 
 <p align="center">
   <img src="docs/assets/data_construction_flow.svg" alt="FINAR-VL Data Construction Pipeline" width="100%">
@@ -33,14 +54,14 @@ FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Q
 
 SFT、Reasoning RL 和 Generation RL 共用 Finance World 作为证据底座，但三条数据构造流程彼此独立。
 
-- **Shared foundation**: raw financial data → standardized evidence units → `Qwen3-VL-32B-Instruct` → Finance World.
-- **SFT**: sample construction → filtering and cleaning → SFT training → Bad Case analysis → targeted SFT augmentation.
-- **Reasoning RL**: Financial Graph sampling → reasoning path / task skeleton → executable gold → hard candidates.
-- **Generation RL**: evidence bundle → generation task skeleton → question + reference answer.
-- **Construction model**: `Qwen3-VL-235B-A22B-Instruct` handles SFT/RL sample planning, rendering, and answer construction.
+- **共享底座**：原始金融数据 → 标准化证据单元 → `Qwen3-VL-32B-Instruct` → Finance World。
+- **SFT**：样本构造 → 筛选清洗 → SFT 训练 → Bad Case 分析 → 定向 SFT 补数。
+- **Reasoning RL**：金融图谱采样 → 推理路径 / 任务骨架 → 可执行标准答案 → 高难候选样本。
+- **Generation RL**：证据包 → 生成任务骨架 → 问题 + 参考答案。
+- **构造模型**：`Qwen3-VL-235B-A22B-Instruct` 负责 SFT/RL 样本规划、生成与答案构造。
 
 
-## 技术路线
+## 🏗️ 技术路线
 
 <p align="center">
   <img src="assets/finar_vl_training_pipeline.svg" alt="FINAR-VL Training Pipeline" width="100%">
@@ -50,7 +71,7 @@ Reasoning RL 和 Generation RL 是两个独立训练阶段，均从同一个 SFT
 
 MOPD 以 SFT 检查点初始化学生模型，同时加载 Reasoning RL 和 Generation RL 的产出作为两个教师模型，根据 reasoning 和 generation 数据分别提供 token级教师信号。当前训练脚本使用 top-128 GKD：每个样本只路由到对应教师，由教师返回 top-128 token 分布进行蒸馏。MOPD 的产出模型命名为 `FINAR-VL`。
 
-## 快速开始
+## ⚡ 快速开始
 
 ### 1. 克隆仓库
 
@@ -151,30 +172,11 @@ MOPD_GENERATION_DATA=/path/to/generation_train_gspo.jsonl \
 bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh
 ```
 
-脚本默认使用 top-128 GKD，图片路径沿用 RL 数据准备阶段的解析逻辑。训练每 20 step 保存一次 checkpoint 并执行阶段评估；最新 checkpoint 保留完整 optimizer、scheduler、RNG 和 Trainer state，可以直接续训。Qwen3-VL 的学生前向默认开启 `use_logits_to_keep`，只保留需要计算蒸馏损失的 logits，避免长序列在 LM head 处产生过大的显存峰值。
+脚本默认使用 top-128 GKD，图片路径沿用 RL 数据准备阶段的解析逻辑。训练每 20 step 保存一次 checkpoint 并执行阶段评估。Qwen3-VL 的学生前向默认开启 `use_logits_to_keep`，只保留需要计算蒸馏损失的 logits，避免长序列在 LM head 处产生过大的显存峰值。
 
-常用参数可以通过环境变量覆盖：
 
-```bash
-export MOPD_GKD_TOPK=128
-export MOPD_IMAGE_MAX_TOKEN_NUM=10240
-export MOPD_PER_DEVICE_BATCH=2
-export MOPD_GRAD_ACC=4
-export MOPD_INTERVAL_STEPS=20
-```
 
-从 checkpoint 续训时，需要同时提供原 W&B run ID：
-
-```bash
-export WANDB_RUN_ID=<run_id>
-
-bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh \
-  --resume_from_checkpoint /path/to/checkpoint-60
-```
-
-训练过程中生成的 W&B 日志、模型权重、评估结果、奖励审计和各 rank状态均保存在 `output/`。
-
-## 训练阶段
+## 🚀 训练阶段
 
 ### 1. SFT
 
@@ -214,28 +216,10 @@ Generation RL 路线面向开放式金融问答和分析生成任务，与 Reaso
 
 ### 4. MOPD
 
-MOPD 阶段以 SFT 检查点作为学生模型，同时使用 Reasoning RL 和 Generation RL 的产出作为推理教师与生成教师。训练数据保持 reasoning 和 generation 两路等量，样本根据路由只请求对应教师。
+MOPD 阶段以 SFT 检查点初始化学生模型，同时使用 Reasoning RL 和 Generation RL 的产出作为推理教师与生成教师，并采用 top-128 GKD 进行知识蒸馏。
 
-当前实现使用 top-128 GKD。教师服务返回每个目标位置的 top-128 token 概率，学生模型据此计算蒸馏损失。Reasoning teacher 使用 Reasoning RL 训练时的回答格式，Generation teacher 使用 Generation RL 的回答格式，避免在蒸馏阶段混用两套策略提示词。
 
-训练脚本同时复用 SFT 阶段的 Pass@1 / Pass@8 评估。能够程序判分的样本直接使用规则判分，确实需要模型裁判的样本交给 Generation teacher。checkpoint 每 20 step 保存一次，最新 checkpoint 保留完整训练状态，旧 checkpoint 只保留模型权重。
-
-## RL 数据与奖励设计
-
-| 数据路线 | 主要任务 | 奖励方式 |
-|---|---|---|
-| Reasoning | 数值计算、表格推理、证据页检索、结构化问答 | 程序化规则奖励 |
-| Generation | 开放式金融分析、知识问答、图表理解、选择和判断任务 | 规则奖励与模型裁判混合 |
-
-RL 数据进入训练前依次执行：
-
-1. 统一数据结构并生成稳定样本标识；
-2. 校验问题、图片、答案和奖励路由；
-3. 根据图片数量与分辨率、输入长度、生成长度和裁判调用成本估计计算量；
-4. 将数据拆分为细粒度任务并进行负载均衡；
-5. 训练期间记录计划任务数、完成数、剩余数、心跳和错误状态。
-
-## 目录结构
+## 📁 目录结构
 
 ```text
 FINAR-VL/
@@ -259,23 +243,4 @@ FINAR-VL/
 ├── tests/                         # 单元测试
 └── output/                        # 训练日志、权重和评估结果
 ```
-
-## 正式训练脚本
-
-| 脚本 | 作用 |
-|---|---|
-| `scripts/dlc/start_sft_stage1.sh` | SFT 正式训练入口 |
-| `scripts/dlc/start_sft_reasoning_v2.sh` | SFT 推理能力保持配置入口 |
-| `scripts/dlc/start_sft.sh` | SFT 数据准备、采样、训练、评估和保存主流程 |
-| `scripts/dlc/start_gspo_reasoning.sh` | Reasoning RL 启动入口 |
-| `scripts/dlc/start_gspo_generation.sh` | Generation RL 启动入口 |
-| `scripts/dlc/start_gspo.sh` | 两个独立 GSPO 训练共用的主流程 |
-| `scripts/dlc/start_gspo_judge.sh` | Generation RL 多模态裁判服务 |
-| `scripts/dlc/gspo_env.sh` | GSPO 分布式拓扑和训练参数 |
-| `scripts/dlc/gspo_reward_plugin.py` | 规则奖励与模型裁判奖励接入 |
-| `scripts/dlc/gspo_trainer_plugin.py` | 训练监控、奖励审计和阶段评估 |
-| `scripts/rl/prepare_gspo_data.py` | RL 数据转换和计算成本估计 |
-| `scripts/rl/schedule_gspo_data.py` | 多卡、多节点负载均衡 |
-| `scripts/rl/validate_gspo_data.py` | RL 数据和奖励路由校验 |
-| `scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh` | 单机 4 卡双教师 MOPD 训练入口，使用 top-128 GKD，并支持完整断点续训 |
 
