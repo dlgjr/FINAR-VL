@@ -169,25 +169,6 @@ bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh
 
 The script uses top-128 GKD by default. Image paths follow the same resolution logic used during RL data preparation. Training saves a checkpoint and runs stage evaluation every 20 steps. Qwen3-VL student forward passes enable `use_logits_to_keep` by default so only logits required for the distillation loss are retained, avoiding excessive memory peaks at the LM head for long sequences.
 
-Common parameters can be overridden through environment variables:
-
-```bash
-export MOPD_GKD_TOPK=128
-export MOPD_IMAGE_MAX_TOKEN_NUM=10240
-export MOPD_PER_DEVICE_BATCH=2
-export MOPD_GRAD_ACC=4
-export MOPD_INTERVAL_STEPS=20
-```
-
-When resuming from a checkpoint, also provide the original W&B run ID:
-
-```bash
-export WANDB_RUN_ID=<run_id>
-
-bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh \
-  --resume_from_checkpoint /path/to/checkpoint-60
-```
-
 W&B logs, model checkpoints, evaluation results, reward audits, and per-rank status are stored under `output/`.
 
 ## Training Stages
