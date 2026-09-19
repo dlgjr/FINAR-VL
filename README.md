@@ -4,8 +4,6 @@
 
 FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Qwen3-VL-4B-Instruct 训练 `FINAR-VL`。项目重点处理多表、多图、跨页金融材料中的信息提取、证据定位与数值计算问题。
 
-当前已完成 SFT、两个独立的 RL训练链路，并接入 MOPD训练。
-
 ## 核心任务
 
 | 能力 | 任务示例 |
@@ -28,16 +26,9 @@ FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Q
 
 ## 技术路线
 
-```mermaid
-flowchart LR
-    A[Qwen3-VL-4B-Instruct] --> B[SFT]
-    B --> C[Reasoning RL]
-    B --> D[Generation RL]
-    B -. 学生模型初始化 .-> E[MOPD]
-    C -. 推理教师 .-> E
-    D -. 生成教师 .-> E
-    E --> F[FINAR-VL]
-```
+<p align="center">
+  <img src="assets/finar_vl_training_pipeline.svg" alt="FINAR-VL Training Pipeline" width="100%">
+</p>
 
 Reasoning RL 和 Generation RL 是两个独立训练阶段，均从同一个 SFT 检查点启动。Reasoning RL 强化可程序验证的金融推理能力；Generation RL 强化开放式金融问答和分析生成能力。两路 RL 之间不传递模型权重。
 
