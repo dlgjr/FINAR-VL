@@ -10,10 +10,12 @@ keeps rows with total_score >= 4.0 by default.
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import io
 import json
 import os
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
@@ -24,9 +26,30 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "data" / "synthetic" / "cleaned"
 DEFAULT_MODEL = PROJECT_ROOT / "model" / "qwen235"
 
-# Snapshot taken from scripts/sft/sample_plan_base.py TASK_TO_FAMILY plus
-# TASK_TO_FAMILY overrides in scripts/sft/sample_plan.py.
-TASK_LABELS = tuple(["accounting_audit_reasoning","accounting_cost_reasoning","administrative_law_reasoning","anomaly_information_tracing","asset_pricing_model_calculation","bank_customer_service_intent_classification","bank_reserve_requirement_calculation","basic_arithmetic_metrics","business_strategy_analysis","candlestick_time_series","capital_budgeting_calculation","cash_management_calculation","chart_arithmetic_reasoning","chart_counting","chart_data_extraction","chart_legend_identification","chart_statement_verification","chart_trend_inference","chart_visual_property_reasoning","climate_transition_inference","commercial_bank_finance","compliance_safety_suitability","compositional_reasoning","corporate_finance_and_deals","corporate_strategy_inference","cost_accounting_calculation","cost_accounting_variance_reasoning","cost_volume_profit_calculation","counterfactual_reasoning","criminal_law_reasoning","cross_modal_multi_hop","derivatives_analysis","descriptive_statistics_calculation","digital_asset_analysis","div_policies","document_arithmetic_reasoning","document_comparative_explanation","document_comparison","document_counting","document_explanation","document_fact_extraction","document_function_extraction","document_inference","document_multi_span_extraction","document_numeric_extraction","document_opinion_interpretation","document_policy_explanation","document_policy_extraction","document_procedure_extraction","document_program_explanation","document_structure_interpretation","document_summarization","document_technical_explanation","economic_law","economics_and_monetary_policy","entity_extraction_classification","equity_price_driver_inference","equity_valuation_interpretation","esg_investment_reasoning","esg_issue_identification","ethical_decision_reasoning","evidence_retrieval","explanation_anomaly_causality","finance","financial_accounting","financial_asset_management","financial_asset_valuation","financial_audit_and_controls","financial_audit_fundamentals","financial_business_management","financial_calculation_reasoning","financial_cash_flow_calculation","financial_causal_event_reasoning","financial_certification_exam_qa","financial_certification_qa","financial_concept_explanation","financial_consistency_error_detection","financial_counterfactual_inference","financial_customer_analysis_and_marketing","financial_customer_management","financial_data_description","financial_data_interpretation","financial_data_ranking","financial_definition_scope_reasoning","financial_dialogue","financial_diluted_eps_calculation","financial_disclosure_evasion_detection","financial_distress_score_calculation","financial_document_title_classification","financial_engineering","financial_entity_extraction","financial_event_extraction","financial_evidence_reconciliation","financial_foundations","financial_headline_classification","financial_industry_classification","financial_institution_governance","financial_institution_operations","financial_interest_rate_reasoning","financial_liquidity_calculation","financial_market_index_calculation","financial_market_mechanism_reasoning","financial_market_time_series_analysis","financial_math_and_time_value","financial_meeting_classification","financial_metric_interpretation","financial_multi_turn_perception","financial_numeric_labeling","financial_numerical_reasoning","financial_ocr","financial_ocr_transcription","financial_per_share_calculation","financial_planning_and_budgeting","financial_professional_ethics","financial_question_decomposition","financial_recapitalization_calculation","financial_regulation_and_compliance","financial_relation_extraction","financial_report_analysis","financial_return_calculation","financial_return_on_investment_calculation","financial_risk_analysis","financial_scenario_sensitivity_analysis","financial_semantic_role_labeling","financial_sentiment_analysis","financial_statement_adjustment_calculation","financial_statement_calculation","financial_summarization","financial_system_and_institutions","financial_technology_and_banking","financial_term_explanation","financial_time_reasoning","financial_time_value_calculation","financial_tool_use","financial_topic_classification","financial_translation","financial_trust_management","financial_truthfulness_qa","financial_valuation_calculation","financial_valuation_reasoning","financial_visual_description","fiscal_policy_scenario_classification","fixed_income_valuation_reasoning","foreign_currency_translation_calculation","function_relationship_reasoning","general_dialogue","general_legal_reasoning","global_events_impact","hierarchical_table_qa","hypothesis_testing_reasoning","image_caption","inclusive_finance","industry_analysis_and_competition","industry_sentiment_extraction","industry_trend_inference","insufficient_information_detection","insurance_finance","international_finance_and_forex","investment_advice_strategy","investment_and_market_knowledge","investor_suitability_assessment","legal_evidence_reasoning","long","long_context_citation_grounded_qa","long_document_cross_page","macro_regime_classification","macroeconomic_impact_inference","macroeconomic_trend_inference","management_accounting_and_budgeting","management_accounting_and_costing","market_concentration_calculation","market_event_impact_inference","merger_acquisition_completeness_classification","monetary_policy_stance_classification","multi_span_extraction","multi_step_numerical_reasoning","multi_table_reasoning","multimodal_financial_chart_reasoning_v5","multimodal_financial_knowledge","multimodal_financial_knowledge_v5","news_title_generation","nonbank_financial_institutions","pattern_relationship_reasoning","payroll_calculation","personal_financial_planning","portfolio_allocation_risk_return","portfolio_and_risk_management","portfolio_performance_metric_calculation","probability_expected_value_calculation","probability_reasoning","product_information_qa","public_law_reasoning","python_programming","real_estate_finance_and_valuation","relationship_equity_structure","research_report_opinion_qa","research_report_title_generation","risk_sentiment_policy","schedule_temporal_reasoning","single_table_qa","spatial_localization","statistical_hypothesis_testing","statistical_inference_reasoning","statistical_interval_estimation","statistical_numerical_reasoning","statistics","statistics_comparison_ranking","stock_movement_prediction","summary_announcement","supply_demand_reasoning","sustainable_finance","table_aggregation_reasoning","table_arithmetic_reasoning","table_budget_decision","table_budget_reasoning","table_comparison_reasoning","table_counting","table_data_extraction","table_decision_reasoning","table_financial_arithmetic","table_math_reasoning","table_multi_hop_reasoning","table_multi_step_decision_reasoning","table_probability_reasoning","table_proportion_reasoning","table_rate_change","table_ratio_reasoning","table_statement_verification","table_statistical_reasoning","table_statistics_and_comparison","table_structure_detection","taxation_and_tax_law","temporal_financial_reasoning","time_series_forecasting","time_series_regression_forecasting","trust_and_asset_management","valuation_reasoning","visual_counting","visual_pattern_reasoning","vligabench_ru"])
+# task labels are loaded from the actual SFT sampler so construction/cleaning
+# cannot drift from training-time task names.
+def load_task_labels() -> tuple[str, ...]:
+    tasks: set[str] = set()
+    base = PROJECT_ROOT / "scripts" / "sft" / "sample_plan_base.py"
+    wrapper = PROJECT_ROOT / "scripts" / "sft" / "sample_plan.py"
+    if base.exists():
+        tree = ast.parse(base.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "TASK_TO_FAMILY":
+                        value = ast.literal_eval(node.value)
+                        if isinstance(value, dict):
+                            tasks.update(str(key) for key in value)
+    if wrapper.exists():
+        text = wrapper.read_text(encoding="utf-8")
+        tasks.update(re.findall(r'TASK_TO_FAMILY\["([^"]+)"\]\s*=', text))
+    if not tasks:
+        raise RuntimeError("failed to load SFT task vocabulary from scripts/sft/sample_plan*.py")
+    return tuple(sorted(tasks))
+
+
+TASK_LABELS = load_task_labels()
 
 RUBRIC_KEYS = (
     "answerability",
@@ -423,6 +446,12 @@ def main() -> None:
             accepted.append(row)
             counts["accepted"] += 1
             counts[f"task:{row['task']}"] += 1
+            construction_type = str(metadata.get("construction_type") or "")
+            if construction_type:
+                counts[f"construction_type:{construction_type}"] += 1
+            difficulty = metadata.get("difficulty")
+            if isinstance(difficulty, dict) and difficulty.get("label"):
+                counts[f"difficulty:{difficulty['label']}"] += 1
         else:
             rejected.append({
                 "source_file": str(source_file),
