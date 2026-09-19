@@ -152,7 +152,7 @@ class Qwen:
     def __init__(self, model: str, tp: int, max_len: int, max_images: int):
         from transformers import AutoProcessor
         from vllm import LLM, SamplingParams
-        self.processor=AutoProcessor.from_pretrained(model,trust_remote_code=True); self.SamplingParams=SamplingParams
+        self.model=model; self.processor=AutoProcessor.from_pretrained(model,trust_remote_code=True); self.SamplingParams=SamplingParams
         self.llm=LLM(model=model,trust_remote_code=True,tensor_parallel_size=tp,max_model_len=max_len,limit_mm_per_prompt={"image":max_images})
     def json(self, system: str, payload: Any, images: list[str]=[], temp: float=.1, max_tokens: int=2048) -> dict[str,Any]:
         from qwen_vl_utils import process_vision_info
@@ -219,7 +219,7 @@ def build_facts(q: Qwen, units: list[dict[str,Any]], entities: list[dict[str,Any
             if mode=="text" and raw.get("numeric_value") and cid not in cmap: continue
             base=cmap.get(cid,{})
             f={"fact_id":sid("f",u["unit_id"],cid or len(facts),raw.get("metric"),raw.get("evidence_quote")),"document_id":u["document_id"],"entity_id":ent["entity_id"],"company_name":ent.get("company_name",""),"industry_group":ent.get("industry_group",""),"source_ref":u["source_ref"],"page":u.get("page"),"metric":base.get("metric") or raw.get("metric",""),"metric_canonical":base.get("metric_canonical") or raw.get("metric_canonical",""),"value_text":base.get("value_text") or raw.get("value_text",""),"numeric_value":base.get("numeric_value") or raw.get("numeric_value",""),"unit":base.get("unit") or raw.get("unit",""),"currency":raw.get("currency",""),"period":base.get("period") or raw.get("period") or ent.get("period",""),"scope":raw.get("scope",""),"statement_type":raw.get("statement_type","other"),"source_mode":mode,"image_index":raw.get("image_index"),"visual_type":raw.get("visual_type","none"),"visual_observation":raw.get("visual_observation",""),"evidence_quote":base.get("evidence_quote") or raw.get("evidence_quote",""),"images":u.get("images",[])}
-            score=.35 if cid else .1; score+=.25 if f["numeric_value"] else .1; score+=.15 if f["period"] else 0; score+=.1 if f["metric_canonical"] else 0; score+=.1 if mode=="image" and f["images"] else 0; score+=.05 if f["scope"] else 0; f["confidence"]=round(min(score,1),3)
+            f["extractor_model"]=q.model; score=.35 if cid else .1; score+=.25 if f["numeric_value"] else .1; score+=.15 if f["period"] else 0; score+=.1 if f["metric_canonical"] else 0; score+=.1 if mode=="image" and f["images"] else 0; score+=.05 if f["scope"] else 0; f["confidence"]=round(min(score,1),3)
             if f["confidence"]>=trusted: facts.append(f)
             elif f["confidence"]>=recheck:
                 try: chk=q.json(RECHECK_PROMPT,{"fact":f,"text":u["text"],"rule_candidates":cs},u.get("images",[])[:5])
@@ -324,7 +324,7 @@ def synthesize(q: Qwen, facts, edges, out: Path, tasks: list[str], target: int, 
         required_ids=[f["fact_id"] for f in used]
         distractor_ids=[f["fact_id"] for f in fs if f["fact_id"] not in set(required_ids)]
         difficulty="hard" if (task in NUMERIC_TASKS and len(p.get("steps",[]))>=3) or len(required_ids)>=4 else "medium" if len(required_ids)>=2 else "easy"
-        row={"messages":[{"role":"user","content":prompt},{"role":"assistant","content":str(answer)}],"source":"finance_world_initial","split":"train","images":images,"task":task,"metadata":{"construction_type":task,"difficulty":{"label":difficulty,"required_fact_count":len(required_ids),"distractor_count":len(distractor_ids),"visual_fact_count":sum(f.get("source_mode")=="image" for f in used)},"required_evidence_ids":required_ids,"distractor_ids":distractor_ids,"evidence_ids":required_ids,"initial_synthesis":True,"extractor_model":EXTRACT_MODEL,"constructor_model":CONSTRUCT_MODEL}}
+        row={"messages":[{"role":"user","content":prompt},{"role":"assistant","content":str(answer)}],"source":"finance_world_initial","split":"train","images":images,"task":task,"metadata":{"construction_type":task,"difficulty":{"label":difficulty,"required_fact_count":len(required_ids),"distractor_count":len(distractor_ids),"visual_fact_count":sum(f.get("source_mode")=="image" for f in used)},"required_evidence_ids":required_ids,"distractor_ids":distractor_ids,"evidence_ids":required_ids,"initial_synthesis":True,"extractor_model":next((f.get("extractor_model") for f in used if f.get("extractor_model")),EXTRACT_MODEL),"constructor_model":q.model}}
         sft.append(row); counts[task]+=1
     write_jsonl(out/"train_sft.jsonl",sft); (out/"train_rl_reasoning.jsonl").unlink(missing_ok=True); write_jsonl(out/"rejected.jsonl",rejected); (out/"audit.json").write_text(json.dumps({"accepted":len(sft),"tasks":counts,"note":"RL data is constructed by dedicated RL builders; this script emits SFT only."},ensure_ascii=False,indent=2),encoding="utf-8")
 
