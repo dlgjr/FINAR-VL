@@ -24,6 +24,22 @@ FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Q
 | 阶段权重 | 开源 SFT、Reasoning RL 和 Generation RL 的阶段模型权重 |
 | 最终权重 | MOPD 完成并验证后开源 `FINAR-VL` 模型权重 |
 
+
+## 数据构造
+
+<p align="center">
+  <img src="docs/assets/data_construction_flow.svg" alt="FINAR-VL Data Construction Pipeline" width="100%">
+</p>
+
+SFT、Reasoning RL 和 Generation RL 共用 Finance World 作为证据底座，但三条数据构造流程彼此独立。SFT 保留 Bad Case 飞轮用于定向补数；RL 不设置 Bad Case 专门构造阶段，避免围绕单一失败模式成组造题而削弱组内差异。
+
+- **Shared foundation**: raw financial data → standardized evidence units → `Qwen3-VL-32B-Instruct` → Finance World.
+- **SFT**: sample construction → filtering and cleaning → SFT training → Bad Case analysis → targeted SFT augmentation.
+- **Reasoning RL**: Financial Graph sampling → reasoning path / task skeleton → executable gold → hard candidates.
+- **Generation RL**: evidence bundle → generation task skeleton → question + reference answer.
+- **Construction model**: `Qwen3-VL-235B-A22B-Instruct` handles SFT/RL sample planning, rendering, and answer construction.
+
+
 ## 技术路线
 
 <p align="center">
@@ -63,6 +79,7 @@ python -m pip install flash-attn --no-build-isolation
 FINAR-VL/
 ├── models/qwen4/
 ├── models/qwen30/
+├── models/qwen32/
 ├── models/qwen235/
 ├── data/train_multi/train_multi_sft_minhash_dedup.jsonl
 ├── data/train_text/train_text_sft_minhash_dedup.jsonl
@@ -71,7 +88,7 @@ FINAR-VL/
 └── data/benchmark/my_benchmark/all.jsonl
 ```
 
-其中 `models/qwen4` 为 Qwen3-VL-4B-Instruct；`models/qwen30` 用于训练阶段评估；`models/qwen235` 用于 Generation RL 的开放式答案裁判。
+其中 `models/qwen4` 为 Qwen3-VL-4B-Instruct；`models/qwen30` 用于训练阶段评估；`models/qwen32` 对应 Qwen3-VL-32B-Instruct，用于证据事实抽取；`models/qwen235` 对应 Qwen3-VL-235B-A22B-Instruct，用于数据构造和 Generation RL 开放式答案裁判。
 
 初始化本机环境变量：
 
@@ -233,7 +250,8 @@ FINAR-VL/
 ├── models/
 │   ├── qwen4/                     # Qwen3-VL-4B-Instruct
 │   ├── qwen30/                    # 训练评估模型
-│   └── qwen235/                   # Generation RL 裁判模型
+│   ├── qwen32/                    # Qwen3-VL-32B-Instruct，证据抽取
+│   └── qwen235/                   # Qwen3-VL-235B-A22B-Instruct，数据构造与裁判
 ├── scripts/
 │   ├── data/                      # 数据构建、清洗和格式转换
 │   ├── sft/                       # SFT 采样、蒸馏和评估组件
