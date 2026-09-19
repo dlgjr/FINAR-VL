@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""Bad-case driven finance data flywheel for FINAR-VL.
+"""Bad-case driven SFT data flywheel for FINAR-VL.
 
-Known bad cases under data/error are sent to Qwen235 only for taxonomy
-classification. New training data is synthesized from trusted finance-world
-facts/edges, with task/error/scenario-aware visual constraints and hierarchical
-evidence retrieval:
-  same document -> same entity+period -> adjacent period -> other period ->
-  industry peer only when cross-company reasoning is explicitly intended.
+Known bad cases under data/error are classified by Qwen235. The classification
+is converted into graph-sampling constraints, then new SFT samples are built
+from the shared Finance World. Original bad-case questions are not rewritten.
+This script emits SFT candidates only; RL data is built by dedicated RL builders.
 """
 from __future__ import annotations
 
@@ -418,15 +416,15 @@ def render(candidate,facts):
     return "<image>"*len(images)+"参考材料：\n"+"\n".join(lines)+"\n\n问题："+candidate["question"],images
 def rows_for(bad,cls,candidate,facts,judge,p,mode):
     prompt,images=render(candidate,facts); reasoning="\n".join(map(str,candidate.get("reasoning_steps") or [])); answer=str(candidate["answer"]); response=f"{reasoning}\n\n答案：{answer}" if reasoning else answer; sample=sid("flywheel",bad["badcase_id"],cls["error_type"],candidate["question"])
-    meta={"synthetic_method":"badcase_taxonomy_flywheel_v4","source_badcase_id":bad["badcase_id"],"source_error_file":bad["source_file"],"classification":cls,"scenario_mode":mode,"visual_policy":p,"evidence_ids":candidate.get("evidence_ids") or [],"hard_negative_ids":candidate.get("hard_negative_ids") or [],"judge":judge}
-    sft={"sample_id":sample,"messages":[{"role":"user","content":prompt},{"role":"assistant","content":response}],"source":"badcase_flywheel","split":"train","images":images,"task":candidate["task_type"],"metadata":meta}; rl=None
-    if cls["task_type"] in NUMERIC_TASKS:
-        rl={"sample_id":sample,"messages":[{"role":"user","content":prompt}],"source":"badcase_flywheel","split":"train","images":images,"task":candidate["task_type"],"output_format":"number_or_free_text","solution":answer,"metadata":meta,"reward_type":"rule","reward_subtype":"numeric","verifier_type":"numeric","_reward_routing":{"version":"badcase_taxonomy_flywheel_v4","reason":"badcase_targeted_program_verified"}}
-    return sft,rl
+    required_ids=list(dict.fromkeys(candidate.get("evidence_ids") or [])); distractor_ids=list(dict.fromkeys(candidate.get("hard_negative_ids") or []))
+    program=candidate.get("program") or []; required_visual=sum(1 for f in facts if f.get("fact_id") in set(required_ids) and f.get("source_mode")=="image")
+    difficulty="hard" if len(required_ids)>=4 or len(program)>=3 or len(distractor_ids)>=4 else "medium" if len(required_ids)>=2 or len(distractor_ids)>=2 else "easy"
+    meta={"synthetic_method":"badcase_graph_conditioned_sft_v5","construction_type":cls["task_type"],"source_badcase_id":bad["badcase_id"],"source_error_file":bad["source_file"],"classification":cls,"scenario_mode":mode,"visual_policy":p,"required_evidence_ids":required_ids,"distractor_ids":distractor_ids,"evidence_ids":required_ids,"hard_negative_ids":distractor_ids,"difficulty":{"label":difficulty,"required_fact_count":len(required_ids),"distractor_count":len(distractor_ids),"visual_fact_count":required_visual,"operator_count":len(program)},"judge":judge}
+    return {"sample_id":sample,"messages":[{"role":"user","content":prompt},{"role":"assistant","content":response}],"source":"badcase_flywheel","split":"train","images":images,"task":candidate["task_type"],"metadata":meta}
 
 def main():
     a=parse_args(); rng=random.Random(a.seed); a.output_root.mkdir(parents=True,exist_ok=True); raw=list(iter_errors(a.error_root)); raw=raw[:a.max_cases] if a.max_cases else raw; bads=[normalize_bad(*x) for x in raw]; facts=read_jsonl(a.facts); edges=read_jsonl(a.edges); fmap={f["fact_id"]:f for f in facts}; adj=adjacency(edges); runner=Runner(a)
-    classes=[]; variants=[]; sfts=[]; rls=[]; rejected=[]; counts=Counter(); seen=[]
+    classes=[]; variants=[]; sfts=[]; rejected=[]; counts=Counter(); seen=[]
     for bad in bads:
         try: cls=classify(runner,bad)
         except Exception as e: rejected.append({"badcase_id":bad["badcase_id"],"stage":"classify","error":str(e)}); counts["classify_error"]+=1; continue
@@ -447,8 +445,8 @@ def main():
             try:j=runner.json(VERIFY_SYSTEM,jp,images,.1,1536)
             except Exception as e: rejected.append({"badcase_id":bad["badcase_id"],"stage":"judge","error":str(e)}); counts["judge_error"]+=1; continue
             if j.get("supported") is not True or j.get("targets_failure") is not True or j.get("answerable") is not True or j.get("novel") is not True or int(j.get("score") or 0)<a.min_judge_score or (p["required"] and j.get("visual_required") is not True): counts["judge_rejected"]+=1; continue
-            sft,rl=rows_for(bad,cls,c,picked,j,p,mode); sfts.append(sft); rls.extend([rl] if rl else []); variants.append({"sample_id":sft["sample_id"],"source_badcase_id":bad["badcase_id"],"classification":cls,"scenario_mode":mode,"candidate":c,"judge":j}); seen.append(c["question"]); accepted+=1; counts["accepted"]+=1; counts["accepted_visual" if sft["images"] else "accepted_text_only"]+=1
-    write_jsonl(a.output_root/"badcase_classification.jsonl",classes); write_jsonl(a.output_root/"variants.jsonl",variants); write_jsonl(a.output_root/"train_sft_badcase.jsonl",sfts); write_jsonl(a.output_root/"train_sft_badcase_visual.jsonl",[x for x in sfts if x["images"]]); write_jsonl(a.output_root/"train_sft_badcase_text.jsonl",[x for x in sfts if not x["images"]]); write_jsonl(a.output_root/"train_rl_badcase.jsonl",rls); write_jsonl(a.output_root/"rejected.jsonl",rejected)
-    audit={"method":"badcase_taxonomy_flywheel_v4","bad_cases":len(bads),"accepted_sft":len(sfts),"accepted_rl":len(rls),"prefer_visual_ratio":a.prefer_visual_ratio,"evidence_retrieval_hierarchy":["same_document","same_entity_same_period","same_entity_adjacent_period","same_entity_other_period","same_industry_peer_if_explicitly_allowed"],"counts":dict(counts)}; (a.output_root/"audit.json").write_text(json.dumps(audit,ensure_ascii=False,indent=2)+"\n",encoding="utf-8"); print(json.dumps(audit,ensure_ascii=False,indent=2))
+            sft=rows_for(bad,cls,c,picked,j,p,mode); sfts.append(sft); variants.append({"sample_id":sft["sample_id"],"source_badcase_id":bad["badcase_id"],"classification":cls,"scenario_mode":mode,"candidate":c,"judge":j}); seen.append(c["question"]); accepted+=1; counts["accepted"]+=1; counts["accepted_visual" if sft["images"] else "accepted_text_only"]+=1
+    write_jsonl(a.output_root/"badcase_classification.jsonl",classes); write_jsonl(a.output_root/"variants.jsonl",variants); write_jsonl(a.output_root/"train_sft_badcase.jsonl",sfts); write_jsonl(a.output_root/"train_sft_badcase_visual.jsonl",[x for x in sfts if x["images"]]); write_jsonl(a.output_root/"train_sft_badcase_text.jsonl",[x for x in sfts if not x["images"]]); (a.output_root/"train_rl_badcase.jsonl").unlink(missing_ok=True); write_jsonl(a.output_root/"rejected.jsonl",rejected)
+    audit={"method":"badcase_graph_conditioned_sft_v5","bad_cases":len(bads),"accepted_sft":len(sfts),"prefer_visual_ratio":a.prefer_visual_ratio,"evidence_retrieval_hierarchy":["same_document","same_entity_same_period","same_entity_adjacent_period","same_entity_other_period","same_industry_peer_if_explicitly_allowed"],"note":"RL data is constructed by dedicated RL builders; this flywheel emits SFT only.","counts":dict(counts)}; (a.output_root/"audit.json").write_text(json.dumps(audit,ensure_ascii=False,indent=2)+"\n",encoding="utf-8"); print(json.dumps(audit,ensure_ascii=False,indent=2))
 
 if __name__=="__main__": main()
