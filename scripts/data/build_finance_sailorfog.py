@@ -2,7 +2,7 @@
 """Initial FINAR-VL financial data synthesis from data/raw using local model/qwen235."""
 from __future__ import annotations
 
-import argparse, ast, csv, hashlib, json, os, random, re
+import argparse, ast, csv, hashlib, json, os, random, re, subprocess, sys
 from collections import Counter, defaultdict
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -11,7 +11,8 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RAW_ROOT = PROJECT_ROOT / "data" / "raw"
 OUT_ROOT = PROJECT_ROOT / "data" / "synthetic" / "finance_world"
-MODEL = str(PROJECT_ROOT / "model" / "qwen235")
+EXTRACT_MODEL = str(PROJECT_ROOT / "model" / "qwen32")
+CONSTRUCT_MODEL = str(PROJECT_ROOT / "model" / "qwen235")
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 SUPERVISION = {"question","questions","answer","answers","solution","cot","reasoning","rationale","label","labels","target","program","prompt","instruction","choices","options","messages","conversation","conversations"}
 IMAGE_KEYS = {"image","images","image_path","image_paths","media","media_paths"}
@@ -296,7 +297,7 @@ def numeric_sample(q: Qwen, task: str, fs: list[dict[str,Any]], images: list[str
     usedfacts=[aliases[x] for x in used if x in aliases]; return p,usedfacts
 
 def synthesize(q: Qwen, facts, edges, out: Path, tasks: list[str], target: int, seed: int):
-    rng=random.Random(seed); sft=[]; rl=[]; rejected=[]; counts=Counter()
+    rng=random.Random(seed); sft=[]; rejected=[]; counts=Counter()
     normal=[t for t in tasks if t!="fact_consistency_check"]
     for attempt in range(target*30):
         if len(sft)>=target: break
@@ -320,10 +321,12 @@ def synthesize(q: Qwen, facts, edges, out: Path, tasks: list[str], target: int, 
             if not j.get("supported") or not j.get("answerable") or int(j.get("score",0))<4 or (task in VISUAL_TASKS and not j.get("visual_required")): continue
             question,answer=c["question"],c["answer"]; used=[f for f in fs if f["fact_id"] in set(c.get("evidence_ids",[]))] or fs[:2]
         prompt=("<image>"*len(images))+"参考材料：\n"+"\n".join(f'[{i+1}] {f["evidence_quote"]}' if f.get("source_mode")=="text" else f'[{i+1}] 请查看对应图片证据。' for i,f in enumerate(fs))+"\n\n问题："+question
-        row={"messages":[{"role":"user","content":prompt},{"role":"assistant","content":str(answer)}],"source":"finance_world_initial","split":"train","images":images,"task":task,"metadata":{"evidence_ids":[f["fact_id"] for f in used],"initial_synthesis":True}}
+        required_ids=[f["fact_id"] for f in used]
+        distractor_ids=[f["fact_id"] for f in fs if f["fact_id"] not in set(required_ids)]
+        difficulty="hard" if (task in NUMERIC_TASKS and len(p.get("steps",[]))>=3) or len(required_ids)>=4 else "medium" if len(required_ids)>=2 else "easy"
+        row={"messages":[{"role":"user","content":prompt},{"role":"assistant","content":str(answer)}],"source":"finance_world_initial","split":"train","images":images,"task":task,"metadata":{"construction_type":task,"difficulty":{"label":difficulty,"required_fact_count":len(required_ids),"distractor_count":len(distractor_ids),"visual_fact_count":sum(f.get("source_mode")=="image" for f in used)},"required_evidence_ids":required_ids,"distractor_ids":distractor_ids,"evidence_ids":required_ids,"initial_synthesis":True,"extractor_model":EXTRACT_MODEL,"constructor_model":CONSTRUCT_MODEL}}
         sft.append(row); counts[task]+=1
-        if task in NUMERIC_TASKS: rl.append({"sample_id":sid("syn",task,question),"messages":[{"role":"user","content":prompt}],"source":"finance_world_initial","split":"train","images":images,"task":task,"output_format":"number_or_free_text","solution":str(answer),"reward_type":"rule","reward_subtype":"numeric","verifier_type":"numeric","metadata":row["metadata"]})
-    write_jsonl(out/"train_sft.jsonl",sft); write_jsonl(out/"train_rl_reasoning.jsonl",rl); write_jsonl(out/"rejected.jsonl",rejected); (out/"audit.json").write_text(json.dumps({"accepted":len(sft),"rl":len(rl),"tasks":counts},ensure_ascii=False,indent=2),encoding="utf-8")
+    write_jsonl(out/"train_sft.jsonl",sft); (out/"train_rl_reasoning.jsonl").unlink(missing_ok=True); write_jsonl(out/"rejected.jsonl",rejected); (out/"audit.json").write_text(json.dumps({"accepted":len(sft),"tasks":counts,"note":"RL data is constructed by dedicated RL builders; this script emits SFT only."},ensure_ascii=False,indent=2),encoding="utf-8")
 
 def consistency_negatives(cands, limit):
     by=defaultdict(list)
@@ -339,16 +342,61 @@ def consistency_negatives(cands, limit):
     return rows
 
 def parse_args():
-    p=argparse.ArgumentParser(); p.add_argument("--stage",choices=("extract","entities","facts","graph","synthesize","all"),default="all"); p.add_argument("--raw-root",type=Path,default=RAW_ROOT); p.add_argument("--output-root",type=Path,default=OUT_ROOT); p.add_argument("--model",default=MODEL); p.add_argument("--tensor-parallel-size",type=int,default=8); p.add_argument("--max-model-len",type=int,default=32768); p.add_argument("--max-images",type=int,default=5); p.add_argument("--pdf-dpi",type=int,default=144); p.add_argument("--target",type=int,default=2000); p.add_argument("--tasks",nargs="+",choices=TASKS,default=list(TASKS)); p.add_argument("--seed",type=int,default=42); p.add_argument("--consistency-negative-ratio",type=float,default=.05); return p.parse_args()
+    p=argparse.ArgumentParser()
+    p.add_argument("--stage",choices=("extract","entities","facts","evidence","graph","synthesize","all"),default="all")
+    p.add_argument("--raw-root",type=Path,default=RAW_ROOT)
+    p.add_argument("--output-root",type=Path,default=OUT_ROOT)
+    p.add_argument("--extract-model",default=EXTRACT_MODEL,help="32B model used only for entity/fact extraction")
+    p.add_argument("--construct-model",default=CONSTRUCT_MODEL,help="235B model used for SFT construction")
+    p.add_argument("--model",default="",help="Backward-compatible alias for --construct-model")
+    p.add_argument("--tensor-parallel-size",type=int,default=8)
+    p.add_argument("--max-model-len",type=int,default=32768)
+    p.add_argument("--max-images",type=int,default=5)
+    p.add_argument("--pdf-dpi",type=int,default=144)
+    p.add_argument("--target",type=int,default=2000)
+    p.add_argument("--tasks",nargs="+",choices=TASKS,default=list(TASKS))
+    p.add_argument("--seed",type=int,default=42)
+    p.add_argument("--consistency-negative-ratio",type=float,default=.05)
+    a=p.parse_args()
+    if a.model:
+        a.construct_model=a.model
+    return a
+
+def _run_all_children():
+    raw=sys.argv[1:]; rest=[]; skip=False
+    for token in raw:
+        if skip:
+            skip=False; continue
+        if token=="--stage":
+            skip=True; continue
+        if token.startswith("--stage="):
+            continue
+        rest.append(token)
+    for stage in ("extract","evidence","graph","synthesize"):
+        cmd=[sys.executable,str(Path(__file__).resolve()),"--stage",stage,*rest]
+        print("+"," ".join(cmd),flush=True)
+        rc=subprocess.run(cmd).returncode
+        if rc:
+            raise SystemExit(rc)
 
 def main():
-    a=parse_args(); a.output_root.mkdir(parents=True,exist_ok=True); units_path=a.output_root/"evidence_units.jsonl"; ents_path=a.output_root/"document_entities.jsonl"; facts_path=a.output_root/"graph_facts.jsonl"; edges_path=a.output_root/"graph_edges.jsonl"
-    if a.stage in {"extract","all"}: units=extract_units(a.raw_root,a.output_root,a.pdf_dpi)
-    if a.stage in {"entities","facts","synthesize","all"}: q=Qwen(a.model,a.tensor_parallel_size,a.max_model_len,a.max_images)
-    if a.stage in {"entities","all"}: entities=build_entities(q,read_jsonl(units_path),a.output_root)
-    if a.stage in {"facts","all"}: build_facts(q,read_jsonl(units_path),read_jsonl(ents_path),a.output_root)
-    if a.stage in {"graph","all"}: build_graph(read_jsonl(facts_path),read_jsonl(ents_path),a.output_root)
-    if a.stage in {"synthesize","all"}:
+    a=parse_args(); a.output_root.mkdir(parents=True,exist_ok=True)
+    if a.stage=="all":
+        _run_all_children(); return
+    units_path=a.output_root/"evidence_units.jsonl"; ents_path=a.output_root/"document_entities.jsonl"; facts_path=a.output_root/"graph_facts.jsonl"; edges_path=a.output_root/"graph_edges.jsonl"
+    if a.stage=="extract":
+        extract_units(a.raw_root,a.output_root,a.pdf_dpi); return
+    if a.stage in {"entities","facts","evidence"}:
+        q=Qwen(a.extract_model,a.tensor_parallel_size,a.max_model_len,a.max_images)
+        if a.stage in {"entities","evidence"}:
+            build_entities(q,read_jsonl(units_path),a.output_root)
+        if a.stage in {"facts","evidence"}:
+            build_facts(q,read_jsonl(units_path),read_jsonl(ents_path),a.output_root)
+        return
+    if a.stage=="graph":
+        build_graph(read_jsonl(facts_path),read_jsonl(ents_path),a.output_root); return
+    if a.stage=="synthesize":
+        q=Qwen(a.construct_model,a.tensor_parallel_size,a.max_model_len,a.max_images)
         synthesize(q,read_jsonl(facts_path),read_jsonl(edges_path),a.output_root,a.tasks,a.target,a.seed)
         if "fact_consistency_check" in a.tasks:
             rows=read_jsonl(a.output_root/"train_sft.jsonl"); neg=consistency_negatives(read_jsonl(a.output_root/"fact_candidates.jsonl"),max(1,int(a.target*a.consistency_negative_ratio))); write_jsonl(a.output_root/"train_sft.jsonl",rows+neg)
