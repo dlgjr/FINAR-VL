@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1030" viewBox="0 0 1600 1030">
+  <defs>
+    <linearGradient id="blueCard" x1="0" x2="1"><stop offset="0" stop-color="#eef6ff"/><stop offset="1" stop-color="#dcecff"/></linearGradient>
+    <linearGradient id="purpleCard" x1="0" x2="1"><stop offset="0" stop-color="#f6f1ff"/><stop offset="1" stop-color="#ece6ff"/></linearGradient>
+    <linearGradient id="grayCard" x1="0" x2="1"><stop offset="0" stop-color="#f7f9fc"/><stop offset="1" stop-color="#eef3f8"/></linearGradient>
+    <linearGradient id="redCard" x1="0" x2="1"><stop offset="0" stop-color="#fff3f3"/><stop offset="1" stop-color="#ffe7e7"/></linearGradient>
+    <linearGradient id="greenCard" x1="0" x2="1"><stop offset="0" stop-color="#effcf7"/><stop offset="1" stop-color="#dcf4e8"/></linearGradient>
+    <linearGradient id="finalCard" x1="0" x2="1"><stop offset="0" stop-color="#eef6ff"/><stop offset="1" stop-color="#d7eaff"/></linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#18345e" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#294a73"/>
+    </marker>
+    <style>
+      .title{font:700 54px Inter,Segoe UI,Arial,sans-serif;fill:#071b46;letter-spacing:.2px}
+      .h1{font:700 31px Inter,Segoe UI,Arial,sans-serif;fill:#0d234d}
+      .h2{font:700 25px Inter,Segoe UI,Arial,sans-serif;fill:#0d234d}
+      .body{font:500 18px Inter,Segoe UI,Arial,sans-serif;fill:#17315b}
+      .small{font:500 16px Inter,Segoe UI,Arial,sans-serif;fill:#17315b}
+      .tiny{font:600 15px Inter,Segoe UI,Arial,sans-serif;fill:#294a73}
+      .flow{stroke:#294a73;stroke-width:3;fill:none;marker-end:url(#arrow)}
+      .branch{stroke:#294a73;stroke-width:3;fill:none}
+    </style>
+  </defs>
+
+  <rect width="1600" height="1030" fill="#ffffff"/>
+  <text x="800" y="64" text-anchor="middle" class="title">FINAR-VL Training Pipeline</text>
+
+  <g filter="url(#shadow)">
+    <rect x="440" y="95" rx="22" ry="22" width="720" height="158" fill="url(#blueCard)" stroke="#2f73c8" stroke-width="2.4"/>
+    <text x="800" y="135" text-anchor="middle" class="h2">Financial Multimodal Data</text>
+    <rect x="480" y="153" rx="16" ry="16" width="640" height="78" fill="#ffffff" fill-opacity="0.62"/>
+  </g>
+
+  <g stroke="#294a73" fill="none" stroke-width="3">
+    <path d="M550 170 h28 l14 14 v28 h-42 z"/><path d="M578 170 v15 h14"/><line x1="558" y1="194" x2="581" y2="194"/><line x1="558" y1="203" x2="581" y2="203"/>
+    <rect x="684" y="172" width="44" height="38" rx="3"/><line x1="699" y1="172" x2="699" y2="210"/><line x1="713" y1="172" x2="713" y2="210"/><line x1="684" y1="185" x2="728" y2="185"/><line x1="684" y1="198" x2="728" y2="198"/>
+    <rect x="836" y="191" width="9" height="19" fill="#294a73"/><rect x="850" y="181" width="9" height="29" fill="#294a73"/><rect x="864" y="166" width="9" height="44" fill="#294a73"/>
+    <rect x="978" y="171" width="44" height="39" rx="3"/><circle cx="1011" cy="182" r="4" fill="#294a73"/><path d="M982 204 l12-12 9 8 7-6 8 10"/>
+  </g>
+  <text x="571" y="226" text-anchor="middle" class="small">text</text>
+  <text x="706" y="226" text-anchor="middle" class="small">tables</text>
+  <text x="855" y="226" text-anchor="middle" class="small">charts</text>
+  <text x="1000" y="226" text-anchor="middle" class="small">images</text>
+
+  <path class="flow" d="M800 253 V290"/>
+  <g filter="url(#shadow)">
+    <rect x="590" y="302" rx="20" ry="20" width="420" height="105" fill="url(#purpleCard)" stroke="#6a58d7" stroke-width="2.4"/>
+  </g>
+  <g transform="translate(656 331)" fill="none" stroke="#6658d7" stroke-width="6">
+    <circle cx="0" cy="20" r="18"/><circle cx="0" cy="20" r="7" fill="#6658d7" stroke="none"/>
+    <path d="M0 -6 V2 M0 38 V46 M-26 20 H-18 M18 20 H26 M-19 1 L-13 7 M13 33 L19 39 M19 1 L13 7 M-13 33 L-19 39"/>
+  </g>
+  <text x="785" y="344" class="h1">SFT</text>
+  <text x="785" y="374" class="body">instruction tuning</text>
+
+  <path class="branch" d="M800 407 V446 M440 446 H1160"/>
+  <path class="flow" d="M440 446 V492"/>
+  <path class="flow" d="M800 446 V492"/>
+  <path class="flow" d="M1160 446 V492"/>
+
+  <g filter="url(#shadow)">
+    <rect x="20" y="505" rx="17" ry="17" width="220" height="92" fill="#fffaf1" stroke="#e0a93d" stroke-width="2.2"/>
+    <rect x="1360" y="505" rx="17" ry="17" width="220" height="92" fill="#fffaf1" stroke="#e0a93d" stroke-width="2.2"/>
+  </g>
+  <g stroke="#6c5633" fill="none" stroke-width="3">
+    <path d="M45 525 h25 l11 11 v31 H56 z"/><path d="M70 525 v12 h11"/><line x1="53" y1="547" x2="73" y2="547"/><line x1="53" y1="556" x2="73" y2="556"/>
+    <ellipse cx="1390" cy="532" rx="19" ry="8" fill="#6c5633"/><path d="M1371 532 v24 c0 5 38 5 38 0 v-24"/><ellipse cx="1390" cy="544" rx="19" ry="8"/><ellipse cx="1390" cy="556" rx="19" ry="8"/>
+  </g>
+  <text x="150" y="558" text-anchor="middle" style="font:700 20px Inter,Segoe UI,Arial,sans-serif;fill:#0d234d">Reasoning Data</text>
+  <text x="1480" y="558" text-anchor="middle" style="font:700 20px Inter,Segoe UI,Arial,sans-serif;fill:#0d234d">Generation Data</text>
+
+  <g filter="url(#shadow)">
+    <rect x="270" y="492" rx="19" ry="19" width="340" height="120" fill="url(#blueCard)" stroke="#2f73c8" stroke-width="2.4"/>
+    <rect x="630" y="492" rx="19" ry="19" width="340" height="120" fill="url(#grayCard)" stroke="#627a9d" stroke-width="2.4"/>
+    <rect x="990" y="492" rx="19" ry="19" width="340" height="120" fill="url(#redCard)" stroke="#cf4f4f" stroke-width="2.4"/>
+  </g>
+
+  <g transform="translate(315 518)">
+    <path d="M37 7 C17 7 7 22 7 39 c0 15 8 25 20 30 v12 h31 V67 c8-5 14-14 14-27 C72 22 58 7 37 7z" fill="#3478c9"/>
+    <circle cx="31" cy="34" r="5" fill="#fff"/><circle cx="43" cy="28" r="5" fill="#fff"/><circle cx="49" cy="41" r="5" fill="#fff"/><path d="M31 34 L43 28 L49 41" stroke="#fff" stroke-width="3" fill="none"/>
+  </g>
+  <text x="390" y="540" class="h2">Reasoning RL</text>
+  <text x="390" y="572" class="body">reasoning policy</text>
+
+  <g transform="translate(665 523)" fill="#314f78">
+    <path d="M0 18 l38-18 38 18-38 18z"/><rect x="27" y="33" width="22" height="20" rx="3"/><path d="M71 20 v28" stroke="#314f78" stroke-width="4"/>
+  </g>
+  <text x="755" y="540" class="h2">Student Model</text>
+  <text x="755" y="572" class="body">initialized from SFT</text>
+
+  <g transform="translate(1030 524)" fill="#cf4f4f">
+    <rect x="0" y="35" width="12" height="28" rx="3"/><rect x="20" y="20" width="12" height="43" rx="3"/><rect x="40" y="4" width="12" height="59" rx="3"/>
+  </g>
+  <text x="1110" y="540" class="h2">Generation RL</text>
+  <text x="1110" y="572" class="body">generation policy</text>
+
+  <path class="flow" d="M240 551 H270"/>
+  <path class="flow" d="M1360 551 H1330"/>
+
+  <path class="branch" d="M440 612 V652 H610"/>
+  <path class="flow" d="M610 652 V682"/>
+  <path class="flow" d="M800 612 V682"/>
+  <path class="branch" d="M1160 612 V652 H990"/>
+  <path class="flow" d="M990 652 V682"/>
+  <text x="520" y="642" class="tiny" fill="#2f73c8">teacher</text>
+  <text x="825" y="642" class="tiny">student</text>
+  <text x="1055" y="642" class="tiny" fill="#cf4f4f">teacher</text>
+
+  <g filter="url(#shadow)">
+    <rect x="500" y="682" rx="22" ry="22" width="600" height="205" fill="url(#greenCard)" stroke="#19855b" stroke-width="2.4"/>
+    <rect x="530" y="768" rx="16" ry="16" width="540" height="96" fill="#ffffff" fill-opacity="0.70"/>
+  </g>
+  <g transform="translate(585 714)" stroke="#147b61" stroke-width="4" fill="#147b61">
+    <line x1="0" y1="28" x2="28" y2="8"/><line x1="0" y1="28" x2="28" y2="50"/><line x1="28" y1="8" x2="55" y2="28"/><line x1="28" y1="50" x2="55" y2="28"/><line x1="28" y1="8" x2="28" y2="50"/>
+    <circle cx="0" cy="28" r="8"/><circle cx="28" cy="8" r="8"/><circle cx="28" cy="50" r="8"/><circle cx="55" cy="28" r="8"/>
+  </g>
+  <text x="665" y="730" class="h1">MOPD</text>
+  <text x="665" y="758" class="body">dual-teacher on-policy distillation</text>
+
+  <circle cx="575" cy="788" r="13" fill="#19855b"/><text x="575" y="794" text-anchor="middle" font-family="Inter,Segoe UI,Arial" font-size="15" font-weight="700" fill="#fff">1</text>
+  <text x="605" y="795" class="small">reasoning samples → reasoning teacher</text>
+  <circle cx="575" cy="815" r="13" fill="#19855b"/><text x="575" y="821" text-anchor="middle" font-family="Inter,Segoe UI,Arial" font-size="15" font-weight="700" fill="#fff">2</text>
+  <text x="605" y="822" class="small">generation samples → generation teacher</text>
+  <circle cx="575" cy="842" r="13" fill="#19855b"/><text x="575" y="848" text-anchor="middle" font-family="Inter,Segoe UI,Arial" font-size="15" font-weight="700" fill="#fff">3</text>
+  <text x="605" y="849" class="small">Top-128 GKD</text>
+
+  <path class="flow" d="M800 887 V917"/>
+  <g filter="url(#shadow)">
+    <rect x="625" y="919" rx="20" ry="20" width="350" height="88" fill="url(#finalCard)" stroke="#2f73c8" stroke-width="2.4"/>
+  </g>
+  <g transform="translate(676 939)" fill="#3478c9">
+    <path d="M10 0 h38 v18 c0 19-8 29-19 29S10 37 10 18z"/><rect x="24" y="45" width="10" height="15"/><rect x="14" y="58" width="30" height="6" rx="3"/>
+    <path d="M10 8 H0 v8 c0 14 8 21 18 22" fill="none" stroke="#3478c9" stroke-width="5"/><path d="M48 8 h10 v8 c0 14-8 21-18 22" fill="none" stroke="#3478c9" stroke-width="5"/>
+  </g>
+  <text x="755" y="959" class="h1">FINAR-VL</text>
+  <text x="755" y="990" class="body">final model</text>
+</svg>
