@@ -1,10 +1,13 @@
-# FINAR-VL
+<h1 align="center">
+  <img src="assets/finar_vl_logo.svg" width="80" align="left" alt="FINAR-VL Logo">
+  FINAR-VL
+</h1>
 
 [中文](README.md) | [English](README.en.md)
 
 FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Qwen3-VL-4B-Instruct 训练 `FINAR-VL`。项目重点处理多表、多图、跨页金融材料中的信息提取、证据定位与数值计算问题。
 
-## 开源内容
+## 📦 开源内容
 
 | 内容 | 说明 |
 |---|---|
@@ -43,7 +46,7 @@ FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Q
 
 > 当前图中 FINAR-VL 分数为用于版式与目标展示的暂定值；正式发布时将以完整实测结果替换。
 
-## 数据构造
+## 🧩 数据构造
 
 <p align="center">
   <img src="docs/assets/data_construction_flow.svg" alt="FINAR-VL Data Construction Pipeline" width="100%">
@@ -58,7 +61,7 @@ SFT、Reasoning RL 和 Generation RL 共用 Finance World 作为证据底座，�
 - **构造模型**：`Qwen3-VL-235B-A22B-Instruct` 负责 SFT/RL 样本规划、生成与答案构造。
 
 
-## 技术路线
+## 🏗️ 技术路线
 
 <p align="center">
   <img src="assets/finar_vl_training_pipeline.svg" alt="FINAR-VL Training Pipeline" width="100%">
@@ -68,7 +71,7 @@ Reasoning RL 和 Generation RL 是两个独立训练阶段，均从同一个 SFT
 
 MOPD 以 SFT 检查点初始化学生模型，同时加载 Reasoning RL 和 Generation RL 的产出作为两个教师模型，根据 reasoning 和 generation 数据分别提供 token级教师信号。当前训练脚本使用 top-128 GKD：每个样本只路由到对应教师，由教师返回 top-128 token 分布进行蒸馏。MOPD 的产出模型命名为 `FINAR-VL`。
 
-## 快速开始
+## ⚡ 快速开始
 
 ### 1. 克隆仓库
 
@@ -174,7 +177,7 @@ bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh
 
 训练过程中生成的 W&B 日志、模型权重、评估结果、奖励审计和各 rank状态均保存在 `output/`。
 
-## 训练阶段
+## 🚀 训练阶段
 
 ### 1. SFT
 
@@ -220,7 +223,7 @@ MOPD 阶段以 SFT 检查点作为学生模型，同时使用 Reasoning RL 和 G
 
 训练脚本同时复用 SFT 阶段的 Pass@1 / Pass@8 评估。能够程序判分的样本直接使用规则判分，确实需要模型裁判的样本交给 Generation teacher。checkpoint 每 20 step 保存一次，最新 checkpoint 保留完整训练状态，旧 checkpoint 只保留模型权重。
 
-## RL 数据与奖励设计
+## 🎯 RL 数据与奖励设计
 
 | 数据路线 | 主要任务 | 奖励方式 |
 |---|---|---|
@@ -235,7 +238,7 @@ RL 数据进入训练前依次执行：
 4. 将数据拆分为细粒度任务并进行负载均衡；
 5. 训练期间记录计划任务数、完成数、剩余数、心跳和错误状态。
 
-## 目录结构
+## 📁 目录结构
 
 ```text
 FINAR-VL/
