@@ -4,7 +4,7 @@
 
 FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Qwen3-VL-4B-Instruct 训练 `Final-VL`。项目重点处理多表、多图、跨页金融材料中的信息提取、证据定位与数值计算问题。
 
-当前已完成 SFT（监督微调）和两个独立的 RL（强化学习）训练链路；MOPD（Multi-teacher On-Policy Distillation，多教师在策略蒸馏）仍在开发中。
+当前已完成 SFT（监督微调）、两个独立的 RL（强化学习）训练链路，并接入 MOPD（Multi-teacher On-Policy Distillation，多教师在策略蒸馏）训练。
 
 ## 核心任务
 
@@ -41,7 +41,7 @@ flowchart LR
 
 Reasoning RL 和 Generation RL 是两个独立训练阶段，均从同一个 SFT 检查点启动。Reasoning RL 强化可程序验证的金融推理能力；Generation RL 强化开放式金融问答和分析生成能力。两路 RL 之间不传递模型权重。
 
-MOPD 以 SFT 检查点初始化学生模型，同时加载 Reasoning RL 和 Generation RL 的产出作为两个教师模型，根据 reasoning 和 generation 数据分别提供 token（词元）级教师信号。MOPD 的产出模型命名为 `Final-VL`。目前该阶段尚未完成。
+MOPD 以 SFT 检查点初始化学生模型，同时加载 Reasoning RL 和 Generation RL 的产出作为两个教师模型，根据 reasoning 和 generation 数据分别提供 token（词元）级教师信号。当前训练脚本使用 top-128 GKD：每个样本只路由到对应教师，由教师返回 top-128 token 分布进行蒸馏。MOPD 的产出模型命名为 `Final-VL`。
 
 ## 快速开始
 
@@ -132,6 +132,40 @@ GENERATION_RL_OUTPUT_DIR=$QWEN3VL_ROOT/output/gspo_generation \
 bash scripts/dlc/start_gspo_generation.sh
 ```
 
+### 7. 运行 MOPD
+
+当前 MOPD 启动脚本按单机 4 卡设计。默认使用 GPU 0、1 训练学生模型，GPU 2 运行 Reasoning teacher，GPU 3 运行 Generation teacher；需要模型裁判的评估样本也复用 Generation teacher。
+
+```bash
+MOPD_STUDENT_MODEL=/path/to/sft_checkpoint \
+MOPD_REASONING_TEACHER=/path/to/reasoning_rl_checkpoint \
+MOPD_GENERATION_TEACHER=/path/to/generation_rl_checkpoint \
+MOPD_REASONING_DATA=/path/to/reasoning_train_gspo.jsonl \
+MOPD_GENERATION_DATA=/path/to/generation_train_gspo.jsonl \
+bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh
+```
+
+脚本默认使用 top-128 GKD，图片路径沿用 RL 数据准备阶段的解析逻辑。训练每 20 step 保存一次 checkpoint 并执行阶段评估；最新 checkpoint 保留完整 optimizer、scheduler、RNG 和 Trainer state，可以直接续训。Qwen3-VL 的学生前向默认开启 `use_logits_to_keep`，只保留需要计算蒸馏损失的 logits，避免长序列在 LM head 处产生过大的显存峰值。
+
+常用参数可以通过环境变量覆盖：
+
+```bash
+export MOPD_GKD_TOPK=128
+export MOPD_IMAGE_MAX_TOKEN_NUM=10240
+export MOPD_PER_DEVICE_BATCH=2
+export MOPD_GRAD_ACC=4
+export MOPD_INTERVAL_STEPS=20
+```
+
+从 checkpoint 续训时，需要同时提供原 W&B run ID：
+
+```bash
+export WANDB_RUN_ID=<run_id>
+
+bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh \
+  --resume_from_checkpoint /path/to/checkpoint-60
+```
+
 训练过程中生成的 W&B 日志、模型权重、评估结果、奖励审计和各 rank（训练进程）状态均保存在 `output/`。
 
 ## 训练阶段
@@ -172,9 +206,13 @@ Generation RL 路线面向开放式金融问答和分析生成任务，与 Reaso
 - 对开放式金融分析和生成任务使用多模态模型裁判；
 - 对奖励结果、异常输出和各 rank（训练进程）的完成状态进行持续记录。
 
-### 4. MOPD（开发中）
+### 4. MOPD
 
-MOPD 阶段以 SFT 检查点作为学生模型，同时使用 Reasoning RL 和 Generation RL 的产出作为推理教师与生成教师。训练时根据样本所属数据集选择对应教师，通过 token 级 KL（相对熵）信号进行在策略蒸馏，最终产出 `Final-VL`。当前只有启动脚本原型，训练实现和实验结论尚未完成，因此暂不提供快速开始命令。
+MOPD 阶段以 SFT 检查点作为学生模型，同时使用 Reasoning RL 和 Generation RL 的产出作为推理教师与生成教师。训练数据保持 reasoning 和 generation 两路等量，样本根据路由只请求对应教师。
+
+当前实现使用 top-128 GKD。教师服务返回每个目标位置的 top-128 token 概率，学生模型据此计算蒸馏损失。Reasoning teacher 使用 Reasoning RL 训练时的回答格式，Generation teacher 使用 Generation RL 的回答格式，避免在蒸馏阶段混用两套策略提示词。
+
+训练脚本同时复用 SFT 阶段的 Pass@1 / Pass@8 评估。能够程序判分的样本直接使用规则判分，确实需要模型裁判的样本交给 Generation teacher。checkpoint 每 20 step 保存一次，最新 checkpoint 保留完整训练状态，旧 checkpoint 只保留模型权重。
 
 ## RL 数据与奖励设计
 
@@ -317,5 +355,5 @@ FINAR-VL/
 | `scripts/rl/prepare_gspo_data.py` | RL 数据转换和计算成本估计 |
 | `scripts/rl/schedule_gspo_data.py` | 多卡、多节点负载均衡 |
 | `scripts/rl/validate_gspo_data.py` | RL 数据和奖励路由校验 |
-| `scripts/mopd/run_mopd.sh` | MOPD 训练原型，尚未完成 |
+| `scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh` | 单机 4 卡双教师 MOPD 训练入口，使用 top-128 GKD，并支持完整断点续训 |
 
