@@ -30,7 +30,7 @@ FINAR-VL is a multimodal large-model training project for the financial domain, 
   <img src="docs/assets/data_construction_flow.svg" alt="FINAR-VL Data Construction Pipeline" width="100%">
 </p>
 
-SFT, Reasoning RL, and Generation RL share Finance World as the common evidence foundation, while their data-construction pipelines remain independent. SFT keeps a Bad Case flywheel for targeted data replenishment. RL does not use a dedicated Bad Case construction stage, avoiding batches of prompts centered on the same failure mode and preserving useful within-group diversity.
+SFT, Reasoning RL, and Generation RL share Finance World as the common evidence foundation, while their data-construction pipelines remain independent.
 
 - **Shared foundation**: raw financial data → standardized evidence units → `Qwen3-VL-32B-Instruct` → Finance World.
 - **SFT**: sample construction → filtering and cleaning → SFT training → Bad Case analysis → targeted SFT augmentation.
@@ -85,8 +85,6 @@ FINAR-VL/
 ├── data/train_multi/train_rl_generation.jsonl
 └── data/benchmark/my_benchmark/all.jsonl
 ```
-
-`models/qwen4` contains Qwen3-VL-4B-Instruct; `models/qwen30` is used for evaluation during training; `models/qwen32` corresponds to Qwen3-VL-32B-Instruct and is used for evidence-fact extraction; `models/qwen235` corresponds to Qwen3-VL-235B-A22B-Instruct and is used for data construction and open-ended answer judging in Generation RL.
 
 Initialize the local environment variables:
 
