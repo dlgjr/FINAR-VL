@@ -2,46 +2,51 @@
 
 [中文](README.md) | [English](README.en.md)
 
-FINAR-VL is a financial-domain multimodal model training project that develops `Final-VL` from Qwen3-VL-4B-Instruct. It focuses on information extraction, evidence localization, and numerical reasoning over financial materials containing multiple tables, figures, and pages.
-
-The SFT (Supervised Fine-Tuning) pipeline and two independent RL (Reinforcement Learning) pipelines are available. MOPD (Multi-teacher On-Policy Distillation) is still under development.
+FINAR-VL is a multimodal large-model training project for the financial domain, built by training `FINAR-VL` on top of Qwen3-VL-4B-Instruct. The project focuses on information extraction, evidence localization, and numerical reasoning over financial materials containing multiple tables, charts, and pages.
 
 ## Core Tasks
 
 | Capability | Example tasks |
 |---|---|
-| Multi-table reasoning | Locate fields across tables, establish relationships, and perform joint calculations |
-| Multi-image and cross-page reasoning | Retrieve evidence and answer questions using multiple charts, report pages, or attachments |
+| Multi-table reasoning | Locate fields across multiple tables, establish relationships between fields, and perform joint calculations |
+| Multi-image and cross-page reasoning | Retrieve evidence and answer questions using multiple charts, financial-report pages, or attachments |
 | Financial numerical reasoning | Ratios, growth rates, cumulative values, proportions, and multi-step arithmetic |
-| Chart understanding | Data extraction, trend analysis, metric comparison, and chart-based calculations |
+| Chart understanding | Chart-data extraction, trend analysis, metric comparison, and chart-based calculation |
 | Document understanding | Financial OCR, entity extraction, fact extraction, and evidence-page localization |
 | Financial generation | Generate analytical answers from financial reports, market materials, and domain knowledge |
 
-## Open-source Plan
+## Open-source Content
 
 | Item | Description |
 |---|---|
 | Training code | SFT, two independent RL pipelines, MOPD implementation, and launch scripts |
-| Training data | Normalized text, multimodal, Reasoning RL, and Generation RL datasets |
-| Stage checkpoints | SFT, Reasoning RL, and Generation RL model checkpoints |
-| Final checkpoint | The `Final-VL` checkpoint will be released after MOPD is completed and validated |
+| Training data | Normalized text, multimodal, Reasoning RL, and Generation RL data |
+| Stage checkpoints | SFT, Reasoning RL, and Generation RL checkpoints |
+| Final checkpoint | The `FINAR-VL` model checkpoint will be released after MOPD is completed and validated |
+
+## Data Construction
+
+<p align="center">
+  <img src="docs/assets/data_construction_flow.svg" alt="FINAR-VL Data Construction Pipeline" width="100%">
+</p>
+
+SFT, Reasoning RL, and Generation RL share Finance World as the common evidence foundation, while their data-construction pipelines remain independent.
+
+- **Shared foundation**: raw financial data → standardized evidence units → `Qwen3-VL-32B-Instruct` → Finance World.
+- **SFT**: sample construction → filtering and cleaning → SFT training → Bad Case analysis → targeted SFT augmentation.
+- **Reasoning RL**: Financial Graph sampling → reasoning path / task skeleton → executable gold → hard candidates.
+- **Generation RL**: evidence bundle → generation task skeleton → question + reference answer.
+- **Construction model**: `Qwen3-VL-235B-A22B-Instruct` handles SFT/RL sample planning, rendering, and answer construction.
 
 ## Training Pipeline
 
-```mermaid
-flowchart LR
-    A[Qwen3-VL-4B-Instruct] --> B[SFT]
-    B --> C[Reasoning RL]
-    B --> D[Generation RL]
-    B -. Student initialization .-> E[MOPD]
-    C -. Reasoning teacher .-> E
-    D -. Generation teacher .-> E
-    E --> F[Final-VL]
-```
+<p align="center">
+  <img src="assets/finar_vl_training_pipeline.svg" alt="FINAR-VL Training Pipeline" width="100%">
+</p>
 
-Reasoning RL and Generation RL are independent training stages initialized from the same SFT checkpoint. Reasoning RL improves programmatically verifiable financial reasoning, while Generation RL improves open-ended financial question answering and analytical generation. No model weights are passed between the two RL branches.
+Reasoning RL and Generation RL are two independent training stages initialized from the same SFT checkpoint. Reasoning RL strengthens programmatically verifiable financial reasoning, while Generation RL strengthens open-ended financial question answering and analytical generation. No model weights are passed between the two RL branches.
 
-MOPD initializes the student from the SFT checkpoint and loads the outputs of Reasoning RL and Generation RL as two teacher models. The teachers provide token-level supervision for reasoning and generation data respectively. The resulting model is named `Final-VL`. This stage is not yet complete.
+MOPD initializes the student model from the SFT checkpoint and loads the outputs of Reasoning RL and Generation RL as two teacher models. The teachers provide token-level supervision for reasoning and generation data respectively. The current training script uses top-128 GKD: each sample is routed only to its corresponding teacher, and the teacher returns the top-128 token distribution for distillation. The model produced by MOPD is named `FINAR-VL`.
 
 ## Quick Start
 
@@ -66,12 +71,13 @@ python -m pip install flash-attn --no-build-isolation
 
 ### 3. Prepare Models and Data
 
-Place the base model, judge models, and training data in the repository using the following default layout:
+Place the base model, evaluation/judge models, and training data in the repository using the following default layout:
 
 ```text
 FINAR-VL/
 ├── models/qwen4/
 ├── models/qwen30/
+├── models/qwen32/
 ├── models/qwen235/
 ├── data/train_multi/train_multi_sft_minhash_dedup.jsonl
 ├── data/train_text/train_text_sft_minhash_dedup.jsonl
@@ -80,9 +86,7 @@ FINAR-VL/
 └── data/benchmark/my_benchmark/all.jsonl
 ```
 
-`models/qwen4` contains Qwen3-VL-4B-Instruct, `models/qwen30` is used for evaluation during training, and `models/qwen235` serves as the open-ended answer judge for Generation RL.
-
-Set the local environment variables:
+Initialize the local environment variables:
 
 ```bash
 export QWEN3VL_ROOT=$(pwd)
@@ -101,7 +105,7 @@ export JUDGE_MODEL=$QWEN3VL_ROOT/models/qwen30
 bash scripts/dlc/start_sft_stage1.sh
 ```
 
-Outputs are written to `output/sft/` by default. Select an SFT checkpoint from this directory as the starting point for both RL branches.
+Outputs are written to `output/sft/` by default. Select the SFT checkpoint that should be used as the starting point for RL.
 
 ### 5. Run Reasoning RL
 
@@ -132,7 +136,41 @@ GENERATION_RL_OUTPUT_DIR=$QWEN3VL_ROOT/output/gspo_generation \
 bash scripts/dlc/start_gspo_generation.sh
 ```
 
-W&B logs, model checkpoints, evaluation results, reward audits, and per-rank status are saved under `output/` during training.
+### 7. Run MOPD
+
+The current MOPD launcher is designed for a single machine with four GPUs. By default, GPUs 0 and 1 train the student model, GPU 2 serves the Reasoning teacher, and GPU 3 serves the Generation teacher. Evaluation samples that require a model judge also reuse the Generation teacher.
+
+```bash
+MOPD_STUDENT_MODEL=/path/to/sft_checkpoint \
+MOPD_REASONING_TEACHER=/path/to/reasoning_rl_checkpoint \
+MOPD_GENERATION_TEACHER=/path/to/generation_rl_checkpoint \
+MOPD_REASONING_DATA=/path/to/reasoning_train_gspo.jsonl \
+MOPD_GENERATION_DATA=/path/to/generation_train_gspo.jsonl \
+bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh
+```
+
+The script uses top-128 GKD by default. Image paths follow the same resolution logic used during RL data preparation. Training saves a checkpoint and runs stage evaluation every 20 steps. The latest checkpoint keeps the complete optimizer, scheduler, RNG, and Trainer state and can be resumed directly. Qwen3-VL student forward passes enable `use_logits_to_keep` by default so only logits required for the distillation loss are retained, avoiding excessive memory peaks at the LM head for long sequences.
+
+Common parameters can be overridden through environment variables:
+
+```bash
+export MOPD_GKD_TOPK=128
+export MOPD_IMAGE_MAX_TOKEN_NUM=10240
+export MOPD_PER_DEVICE_BATCH=2
+export MOPD_GRAD_ACC=4
+export MOPD_INTERVAL_STEPS=20
+```
+
+When resuming from a checkpoint, also provide the original W&B run ID:
+
+```bash
+export WANDB_RUN_ID=<run_id>
+
+bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh \
+  --resume_from_checkpoint /path/to/checkpoint-60
+```
+
+W&B logs, model checkpoints, evaluation results, reward audits, and per-rank status are stored under `output/`.
 
 ## Training Stages
 
@@ -144,9 +182,9 @@ The training pipeline includes:
 
 - deterministic sampling plans based on task type, modality, and actual token length;
 - minimum sampling quotas for OCR, chart, and cross-modal reasoning tasks;
-- online distillation from the base model for generation samples to reduce general generation capability degradation;
+- online distillation from the base model for generation samples to reduce degradation of general generation capability;
 - Pass@1 and Pass@8 evaluation during training;
-- W&B logging, model checkpoint saving, and evaluation result saving.
+- W&B logging, checkpoint saving, and evaluation-result recording.
 
 ### 2. Reasoning RL
 
@@ -160,27 +198,31 @@ Its primary tasks include:
 - chart-based numerical reasoning;
 - single-choice, multiple-choice, and true-or-false tasks.
 
-This stage uses GSPO (Group Sequence Policy Optimization). Rewards are computed by numerical, unit, option, page-number, and structured-answer verifiers and do not depend on a model judge by default.
+This stage uses GSPO. Rewards are computed by numerical, unit, option, page-number, and structured-answer verifiers and do not depend on a model judge by default.
 
 ### 3. Generation RL
 
-Generation RL targets open-ended financial question answering and analytical generation. It is initialized from the same SFT checkpoint as Reasoning RL.
+Generation RL targets open-ended financial question answering and analytical generation. It is initialized independently from the same SFT checkpoint as Reasoning RL.
 
 This stage uses hybrid rewards:
 
-- rule-based rewards for structured tasks such as multiple-choice and true-or-false questions;
+- rule-based rewards for structured tasks such as selection and true-or-false questions;
 - a multimodal model judge for open-ended financial analysis and generation tasks;
-- continuous records of rewards, abnormal outputs, and completion status for each rank.
+- continuous recording of rewards, abnormal outputs, and completion status for each rank.
 
-### 4. MOPD (In Development)
+### 4. MOPD
 
-MOPD initializes the student from the SFT checkpoint and uses the outputs of Reasoning RL and Generation RL as the reasoning and generation teachers. Each sample is routed to the corresponding teacher by dataset, and token-level KL supervision is applied for on-policy distillation. The resulting model is `Final-VL`. Only a launcher prototype is currently available; the training implementation and experimental results are incomplete, so no quick-start command is provided yet.
+MOPD uses the SFT checkpoint to initialize the student model and uses the outputs of Reasoning RL and Generation RL as the reasoning and generation teachers. The training data keeps the reasoning and generation branches balanced, and each sample requests only the teacher selected by its route.
+
+The current implementation uses top-128 GKD. Teacher services return the top-128 token probabilities at each target position, and the student computes the distillation loss from those distributions. The Reasoning teacher follows the answer format used during Reasoning RL training, while the Generation teacher follows the Generation RL answer format, avoiding policy-format mixing during distillation.
+
+The training script also reuses Pass@1 / Pass@8 evaluation from the SFT stage. Samples that can be scored programmatically use rule-based evaluation directly; only samples that truly require model judging are sent to the Generation teacher. A checkpoint is saved every 20 steps. The latest checkpoint keeps the complete training state, while older checkpoints retain model weights only.
 
 ## RL Data and Reward Design
 
 | Data branch | Main tasks | Reward method |
 |---|---|---|
-| Reasoning | Numerical calculation, table reasoning, evidence-page retrieval, and structured question answering | Programmatic rule-based rewards |
+| Reasoning | Numerical calculation, table reasoning, evidence-page retrieval, structured question answering | Programmatic rule-based rewards |
 | Generation | Open-ended financial analysis, knowledge question answering, chart understanding, selection, and judgment tasks | Hybrid rule-based rewards and model judging |
 
 Before RL training, the data pipeline performs the following steps:
@@ -190,91 +232,6 @@ Before RL training, the data pipeline performs the following steps:
 3. Estimate computation cost from image count and resolution, input length, generation length, and judge-call cost.
 4. Split data into fine-grained tasks and balance the workload.
 5. Record planned, completed, and remaining tasks, heartbeats, and errors during training.
-
-## Data Format
-
-Training data uses JSONL, with one independent sample per line.
-
-### SFT Data
-
-Multimodal and text-only SFT samples share the same schema. A text-only sample uses an empty `images` array. A multimodal sample places `<image>` markers in the user message and stores the corresponding image paths in the same order in `images`.
-
-```json
-{
-  "messages": [
-    {
-      "role": "user",
-      "content": "<image><image>Use the two financial report pages to complete the calculation."
-    },
-    {
-      "role": "assistant",
-      "content": "Calculation process and final answer"
-    }
-  ],
-  "source": "dataset source",
-  "split": "train",
-  "images": [
-    "assets/example/page_1.png",
-    "assets/example/page_2.png"
-  ],
-  "task": "multi_step_numerical_reasoning"
-}
-```
-
-Field definitions:
-
-| Field | Description |
-|---|---|
-| `messages` | User input and supervised answer |
-| `source` | Original dataset or document source |
-| `split` | Data split; training data uses `train` |
-| `images` | Relative image paths in the same order as the `<image>` markers |
-| `task` | Task type used for sampling and capability statistics |
-
-### RL Data
-
-Reasoning RL and Generation RL use a common schema. Only the user message is retained as the training input, while the reference answer and reward configuration are stored as top-level fields.
-
-```json
-{
-  "messages": [
-    {
-      "role": "user",
-      "content": "<image>Calculate the year-over-year revenue growth shown in the chart."
-    }
-  ],
-  "question": "<image>Calculate the year-over-year revenue growth shown in the chart.",
-  "solution": "12.5%",
-  "reward_type": "rule",
-  "reward_subtype": "numeric",
-  "source": "dataset source",
-  "task": "multi_step_numerical_reasoning",
-  "output_format": "number_or_free_text",
-  "gold_option_text": "",
-  "options_shuffled": false,
-  "images": ["assets_rl/example/chart.png"],
-  "verifier_type": "numeric",
-  "_reward_routing": {
-    "version": "finance_rl_route_v2",
-    "reason": "declared_number_or_free_text",
-    "source_line": 1
-  }
-}
-```
-
-Field definitions:
-
-| Field | Description |
-|---|---|
-| `question` | Complete question passed to the model |
-| `solution` | Reference answer for rule-based rewards; it may be empty for model-judge routes |
-| `reward_type` | `rule` for rule-based rewards or `judge` for model judging |
-| `reward_subtype` | Reward subtype such as numeric, single choice, multiple choice, true-or-false, page number, or free text |
-| `output_format` | Expected output format |
-| `verifier_type` | Answer verifier executed for the sample |
-| `gold_option_text` | Text of the correct option for selection tasks |
-| `options_shuffled` | Whether answer options were shuffled |
-| `_reward_routing` | Reward-routing version, reason, and original line number |
 
 ## Repository Structure
 
@@ -289,7 +246,8 @@ FINAR-VL/
 ├── models/
 │   ├── qwen4/                     # Qwen3-VL-4B-Instruct
 │   ├── qwen30/                    # Evaluation model used during training
-│   └── qwen235/                   # Judge model for Generation RL
+│   ├── qwen32/                    # Qwen3-VL-32B-Instruct, evidence extraction
+│   └── qwen235/                   # Qwen3-VL-235B-A22B-Instruct, data construction and judging
 ├── scripts/
 │   ├── data/                      # Data construction, cleaning, and format conversion
 │   ├── sft/                       # SFT sampling, distillation, and evaluation components
@@ -317,5 +275,4 @@ FINAR-VL/
 | `scripts/rl/prepare_gspo_data.py` | RL data conversion and computation-cost estimation |
 | `scripts/rl/schedule_gspo_data.py` | Multi-GPU and multi-node workload balancing |
 | `scripts/rl/validate_gspo_data.py` | RL data and reward-routing validation |
-| `scripts/mopd/run_mopd.sh` | Incomplete MOPD training prototype |
-
+| `scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh` | Single-node four-GPU dual-teacher MOPD entry point with top-128 GKD and full checkpoint resume support |

@@ -25,109 +25,20 @@ FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Q
 | 最终权重 | MOPD 完成并验证后开源 `FINAR-VL` 模型权重 |
 
 
-## 数据构造、Bad Case 飞轮与筛选清洗
+## 数据构造
 
-数据流程包括初步构造、SFT 训练、Bad Case 定向构造和筛选清洗。
+<p align="center">
+  <img src="docs/assets/data_construction_flow.svg" alt="FINAR-VL Data Construction Pipeline" width="100%">
+</p>
 
-```mermaid
-flowchart TD
-    A[data/raw] --> B[初步构造]
-    B --> C[筛选清洗]
-    C --> D[SFT 训练]
-    D --> E[Bad Case]
-    E --> F[定向构造]
-    F --> C
-```
+SFT、Reasoning RL 和 Generation RL 共用 Finance World 作为证据底座，但三条数据构造流程彼此独立。
 
-### 1. 初期数据构造与合成
+- **Shared foundation**: raw financial data → standardized evidence units → `Qwen3-VL-32B-Instruct` → Finance World.
+- **SFT**: sample construction → filtering and cleaning → SFT training → Bad Case analysis → targeted SFT augmentation.
+- **Reasoning RL**: Financial Graph sampling → reasoning path / task skeleton → executable gold → hard candidates.
+- **Generation RL**: evidence bundle → generation task skeleton → question + reference answer.
+- **Construction model**: `Qwen3-VL-235B-A22B-Instruct` handles SFT/RL sample planning, rendering, and answer construction.
 
-入口脚本为 `scripts/data/build_finance_sailorfog.py`。`Qwen32` 负责从原始文本和图片中抽取实体、数值、期间、口径和视觉事实，形成共享的 Finance World；`Qwen235` 基于 Finance World 构造 SFT 样本。
-
-主要步骤：
-
-1. 将结构化文件、文本、PDF 页面和图片标准化为 evidence units；
-2. 构建公司 / 文档实体，并抽取 period、market、document type 等信息；
-3. 使用规则候选配合 Qwen32 抽取并规范化金融 fact，包括文本事实和视觉事实；
-4. 基于 entity、fact、期间、财务关系、视觉关系等建立 relation graph；
-5. Qwen235 从图中采样 required evidence 与 distractor，构造 easy / medium / hard 的文本、多表、多图、跨页和跨模态 SFT 样本；
-6. 数值类样本保留可执行计算结构和证据 ID；构造元数据记录 `construction_type`、难度、required evidence 与 distractor。
-
-默认输出目录为 `data/synthetic/finance_world/`，其中包括 `evidence_units.jsonl`、`document_entities.jsonl`、`graph_facts.jsonl`、`graph_edges.jsonl` 和训练候选数据。
-
-```bash
-python scripts/data/build_finance_sailorfog.py --stage extract
-python scripts/data/build_finance_sailorfog.py --stage evidence --extract-model model/qwen32 --tensor-parallel-size 8
-python scripts/data/build_finance_sailorfog.py --stage graph
-python scripts/data/build_finance_sailorfog.py --stage synthesize --construct-model model/qwen235 --tensor-parallel-size 8 --target 2000
-```
-
-`--stage all` 会按上述四个阶段分别启动子进程，避免 32B 与 235B 在同一 vLLM 进程中同时占用显存。Finance World 同时供 SFT、Reasoning RL 和 Generation RL 的独立数据构造脚本使用；本脚本只输出 SFT 候选数据。
-
-### 2. Bad Case 数据飞轮
-
-入口脚本为 `scripts/data/build_badcase_flywheel.py`。输入为 `data/error` 中的 Bad Case。Qwen235 根据原题、标准答案、模型输出和原始图片标注 `task_type`、`error_type` 和 `scenario_tags`，用于后续定向构造。
-
-每条 Bad Case 被标注为：
-
-- `task_type`：原问题主要考察的能力；
-- `error_type`：模型主要错误类型，覆盖 OCR、表格、图表、K 线、检索、实体/期间/口径对齐、数值推理、知识、摘要、风险、政策、合规等；
-- `scenario_tags`：年报、季报、公告、研报、利润表、现金流量表、多表、多图、跨页、跨模态等金融场景。
-
-分类结果用于生成 graph sampling constraints。新训练题重新从 Finance World 检索 required evidence 和相似 distractor，并记录构造难度；原 Bad Case 不作为新题内容来源。证据和图片按以下层级优先检索：
-
-```text
-同一 document
-→ 同一 entity + 同一 period
-→ 同一 entity + 相邻 period
-→ 同一 entity + 其他 period
-→ 仅在同行比较/行业分析等明确任务中扩展到同行业其他公司
-```
-
-视觉约束由 `task_type + error_type + scenario_tags` 联合决定。多表、多图、K 线和跨模态任务必须真实使用对应图片；普通 QA 默认尽量构造成视觉样本，同时保留一部分 text-only 数据。
-
-```bash
-python scripts/data/build_badcase_flywheel.py --error-root data/error --model model/qwen235 --backend vllm --tensor-parallel-size 8 --variants-per-case 6 --prefer-visual-ratio 0.8
-```
-
-### 3. 数据筛选、清洗与 task 标注
-
-入口脚本为 `scripts/data/clean_synthetic_data.py`。筛选分为格式检查和质量评分两步：
-
-1. 检查 JSON、messages、监督答案、images 路径和图片文件等基础格式；
-2. 格式通过的样本由 Qwen235 统一评分；
-3. Qwen235 同时从 SFT 采样器的 task vocabulary 中选择一个 `task`，写回样本顶层 `task` 字段；原 task 保存在 `metadata.quality_filter.original_task`；
-4. task 列表运行时直接从 `scripts/sft/sample_plan_base.py` 的 `TASK_TO_FAMILY` 和 `scripts/sft/sample_plan.py` 中读取，避免数据清洗与训练采样器的 task 名称漂移；
-5. 质量审核使用 10 条固定 rubric，每条只能为 `0` 或 `0.5`，满分 5 分；总分由 Python 重算，默认 `score >= 4.0` 才进入最终训练池。
-
-| Rubric | 检查内容 |
-|---|---|
-| `answerability` | 材料是否足以唯一回答问题 |
-| `answer_correctness` | 标准答案是否正确 |
-| `evidence_grounding` | 关键结论是否均有证据支持 |
-| `financial_alignment` | entity、period、metric、scope、unit、currency 等金融口径是否一致 |
-| `reasoning_correctness` | 计算、比较、多跳、解释或因果逻辑是否成立 |
-| `instruction_following` | 是否按问题要求的内容、粒度和格式作答 |
-| `modality_grounding` | 图片 / 表格 / 图表是否真实参与任务，而非装饰 |
-| `no_leakage_or_shortcut` | 是否存在答案泄漏或绕过目标能力的捷径 |
-| `training_value` | 是否具有明确、自然的训练价值 |
-| `clarity_and_integrity` | 数据是否清楚、完整、内部一致 |
-
-每条 rubric 独立给分，总分由脚本计算。低于 4 分的数据写入 rejected pool，并保留各项评分结果。
-
-```bash
-python scripts/data/clean_synthetic_data.py --input data/synthetic/finance_world/train_sft.jsonl --input data/synthetic/badcase_flywheel/train_sft_badcase.jsonl --model model/qwen235 --backend vllm --tensor-parallel-size 8 --threshold 4.0
-```
-
-默认清洗输出：
-
-```text
-data/synthetic/cleaned/
-├── accepted.jsonl
-├── rejected_low_score.jsonl
-├── rejected_format.jsonl
-├── judge_failures.jsonl
-└── report.json
-```
 
 ## 技术路线
 
@@ -168,6 +79,7 @@ python -m pip install flash-attn --no-build-isolation
 FINAR-VL/
 ├── models/qwen4/
 ├── models/qwen30/
+├── models/qwen32/
 ├── models/qwen235/
 ├── data/train_multi/train_multi_sft_minhash_dedup.jsonl
 ├── data/train_text/train_text_sft_minhash_dedup.jsonl
@@ -175,8 +87,6 @@ FINAR-VL/
 ├── data/train_multi/train_rl_generation.jsonl
 └── data/benchmark/my_benchmark/all.jsonl
 ```
-
-其中 `models/qwen4` 为 Qwen3-VL-4B-Instruct；`models/qwen30` 用于训练阶段评估；`models/qwen235` 用于 Generation RL 的开放式答案裁判。
 
 初始化本机环境变量：
 
@@ -333,14 +243,13 @@ FINAR-VL/
 ├── README.en.md
 ├── data/
 │   ├── benchmark/                 # 训练期间评估数据
-│   ├── error/                     # 评测产生的已确认 Bad Cases
-│   ├── synthetic/                 # 初期合成、飞轮候选和清洗结果
 │   ├── train_multi/               # 多模态 SFT、RL 数据及图片
 │   └── train_text/                # 纯文本 SFT 数据
 ├── models/
 │   ├── qwen4/                     # Qwen3-VL-4B-Instruct
 │   ├── qwen30/                    # 训练评估模型
-│   └── qwen235/                   # Generation RL 裁判模型
+│   ├── qwen32/                    # Qwen3-VL-32B-Instruct，证据抽取
+│   └── qwen235/                   # Qwen3-VL-235B-A22B-Instruct，数据构造与裁判
 ├── scripts/
 │   ├── data/                      # 数据构建、清洗和格式转换
 │   ├── sft/                       # SFT 采样、蒸馏和评估组件

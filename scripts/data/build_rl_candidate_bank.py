@@ -44,7 +44,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FINANCE_WORLD = PROJECT_ROOT / "data" / "synthetic" / "finance_world"
 DEFAULT_FACTS = FINANCE_WORLD / "graph_facts.jsonl"
 DEFAULT_EDGES = FINANCE_WORLD / "graph_edges.jsonl"
-DEFAULT_BADCASE = PROJECT_ROOT / "data" / "synthetic" / "badcase_flywheel" / "classification.jsonl"
 DEFAULT_OUT = PROJECT_ROOT / "data" / "synthetic" / "rl_candidates"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 NUMBER_RE = re.compile(r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
@@ -72,40 +71,24 @@ FINANCIAL_FORMULA_PAIRS = {
     "segment_contribution": ("segment_revenue", "revenue"),
 }
 
-BADCASE_REASONING_ERRORS = {
-    "visual_ocr_number_error", "chart_value_reading_error", "table_header_error",
-    "table_row_column_alignment_error", "table_merged_cell_error", "chart_axis_error",
-    "chart_legend_series_error", "candlestick_ohlc_error", "period_confusion_error",
-    "scope_confusion_error", "metric_confusion_error", "statement_line_item_error",
-    "segment_confusion_error", "unit_scale_error", "currency_error", "sign_direction_error",
-    "baseline_reference_error", "entity_confusion_error", "formula_selection_error",
-    "arithmetic_error", "ratio_percentage_error", "aggregation_error", "reconciliation_error",
-    "multi_step_reasoning_error", "comparison_error", "ranking_error", "temporal_reasoning_error",
-    "conditional_logic_error", "fact_verification_error", "choice_mapping_error",
-}
-
 
 def default_model() -> Path:
-    a = PROJECT_ROOT / "model" / "qwen235"
-    b = PROJECT_ROOT / "models" / "qwen235"
+    a = PROJECT_ROOT / "model" / "Qwen3-VL-235B-A22B-Instruct"
+    b = PROJECT_ROOT / "models" / "Qwen3-VL-235B-A22B-Instruct"
     return a if a.exists() or not b.exists() else b
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--stage", choices=("existing", "reasoning", "generation", "badcase", "all"), default="all")
+    p.add_argument("--stage", choices=("existing", "reasoning", "generation", "all"), default="all")
     p.add_argument("--facts", type=Path, default=DEFAULT_FACTS)
     p.add_argument("--edges", type=Path, default=DEFAULT_EDGES)
     p.add_argument("--existing-input", type=Path, action="append", default=[])
-    p.add_argument("--badcase-classification", type=Path, default=DEFAULT_BADCASE)
     p.add_argument("--output-root", type=Path, default=DEFAULT_OUT)
     p.add_argument("--reasoning-target", type=int, default=20000)
     p.add_argument("--generation-target", type=int, default=10000)
-    p.add_argument("--badcase-target", type=int, default=10000)
     p.add_argument("--graph-hard-ratio", type=float, default=0.40,
                    help="Fraction of ordinary Reasoning RL candidates built by the graph hard-sample synthesizer.")
-    p.add_argument("--badcase-graph-ratio", type=float, default=0.75,
-                   help="Fraction of Bad Case conditioned reasoning candidates built as graph hard samples.")
     p.add_argument("--graph-distractors", type=int, default=4,
                    help="Number of high-confusion distractor facts added to each graph hard sample.")
     p.add_argument("--disable-graph-hard", action="store_true",
@@ -666,27 +649,16 @@ def ranking_row(group: Sequence[Fact], rng: random.Random, args: argparse.Namesp
 
 
 
-def _profile_text(profile: Mapping[str, Any] | None) -> str:
-    if not profile:
-        return ""
-    return " ".join(
-        [str(profile.get("task_type") or ""), str(profile.get("error_type") or "")]
-        + [str(x) for x in (profile.get("scenario_tags") or [])]
-    ).lower()
-
-
 def distractors_for(
     index: Index,
     required: Sequence[Fact],
     rng: random.Random,
     count: int,
-    profile: Mapping[str, Any] | None = None,
 ) -> list[Fact]:
     """Select high-confusion facts without changing the executable gold path."""
     if count <= 0:
         return []
     required_ids = {f.id for f in required}
-    ptext = _profile_text(profile)
     scored: dict[str, tuple[float, Fact]] = {}
 
     def add(f: Fact, score: float) -> None:
@@ -708,12 +680,12 @@ def distractors_for(
         # Wrong period, same entity/metric/scope/unit.
         for f in index.by_series.get((r.entity_key, r.metric_key, r.scope, r.unit, r.currency), []):
             if f.period != r.period:
-                add(f, 10.0 if "period" in ptext or "temporal" in ptext else 7.0)
+                add(f, 7.0)
 
         # Wrong metric, same entity/period/scope/unit.
         for f in index.by_entity_period.get((r.entity_key, r.period), []):
             if f.metric_key != r.metric_key and f.scope == r.scope and f.unit == r.unit:
-                add(f, 10.0 if "metric" in ptext or "line_item" in ptext else 6.5)
+                add(f, 6.5)
 
         # Wrong scope, same entity/metric/period/unit.
         for f in index.by_entity.get(r.entity_key, []):
@@ -721,18 +693,18 @@ def distractors_for(
                 f.metric_key == r.metric_key and f.period == r.period and f.unit == r.unit
                 and f.scope != r.scope
             ):
-                add(f, 10.0 if "scope" in ptext or "segment" in ptext else 8.0)
+                add(f, 8.0)
 
         # Peer company, same metric/period/unit.
         for f in index.by_metric_period.get((r.metric_key, r.period, r.scope, r.unit, r.currency), []):
             if f.entity_key != r.entity_key:
-                add(f, 10.0 if "entity" in ptext or "company" in ptext else 5.5)
+                add(f, 5.5)
 
         # Same document noise is useful for multi-table / multi-chart search.
         if r.doc_key:
             for f in index.by_doc.get(r.doc_key, []):
                 if f.id != r.id:
-                    add(f, 8.5 if "table" in ptext or "chart" in ptext or "retrieval" in ptext else 4.5)
+                    add(f, 4.5)
 
     ranked = sorted(scored.values(), key=lambda item: item[0], reverse=True)
     return [f for _, f in ranked[:count]]
@@ -791,7 +763,6 @@ def graph_numeric_row(
     args: argparse.Namespace,
     source: str,
     rng: random.Random,
-    profile: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     prompt_facts = list(required) + list(distractors)
     # Required facts are inserted before distractors when collecting images so
@@ -818,9 +789,6 @@ def graph_numeric_row(
         "difficulty": diff,
         "image_fallback_required_ids": [],
     }
-    if profile:
-        extra["badcase_profile"] = dict(profile)
-
     return {
         "messages": messages(question, imgs, ctx.strip()),
         "question": question,
@@ -857,34 +825,24 @@ class GraphReasoningSampler:
         self.rng = rng
         self.args = args
 
-    def sample(self, target: int, profile: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+    def sample(self, target: int) -> list[dict[str, Any]]:
         if target <= 0:
             return []
-        builders = self._builders_for_profile(profile)
+        builders = [self._ratio_change, self._growth_acceleration, self._peer_growth_gap]
         rows: list[dict[str, Any]] = []
         attempts = 0
         max_attempts = max(100, target * 30)
         while len(rows) < target and attempts < max_attempts:
             attempts += 1
             builder = builders[attempts % len(builders)]
-            row = builder(profile)
+            row = builder()
             if row is not None:
                 rows.append(row)
                 rows = dedup(rows)
         self.rng.shuffle(rows)
         return rows[:target]
 
-    def _builders_for_profile(self, profile: Mapping[str, Any] | None):
-        ptext = _profile_text(profile)
-        if any(x in ptext for x in ("ranking", "comparison", "entity_confusion", "company_comparison")):
-            return [self._peer_growth_gap, self._ratio_change, self._growth_acceleration]
-        if any(x in ptext for x in ("period", "temporal", "baseline_reference")):
-            return [self._growth_acceleration, self._ratio_change, self._peer_growth_gap]
-        if any(x in ptext for x in ("ratio", "percentage", "formula", "metric", "scope", "segment")):
-            return [self._ratio_change, self._growth_acceleration, self._peer_growth_gap]
-        return [self._ratio_change, self._growth_acceleration, self._peer_growth_gap]
-
-    def _ratio_change(self, profile: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    def _ratio_change(self) -> dict[str, Any] | None:
         buckets = list(self.index.by_entity_scope_unit.items())
         if not buckets:
             return None
@@ -933,7 +891,7 @@ class GraphReasoningSampler:
             self.index.graph_edge(num_new, den_new),
         ]
         distractors = distractors_for(
-            self.index, required, self.rng, self.args.graph_distractors, profile
+            self.index, required, self.rng, self.args.graph_distractors
         )
         question = (
             f"根据给定材料，分别计算{entity(num_new)}{old_p}和{new_p}"
@@ -943,11 +901,11 @@ class GraphReasoningSampler:
         return graph_numeric_row(
             question, required, distractors, result, "%", program, task,
             f"graph_ratio_change:{formula_name}", edges, self.args,
-            "badcase_conditioned_rl_builder" if profile else "finance_world_graph_rl_builder",
-            self.rng, profile,
+            "finance_world_graph_rl_builder",
+            self.rng,
         )
 
-    def _growth_acceleration(self, profile: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    def _growth_acceleration(self) -> dict[str, Any] | None:
         groups = [g for g in self.index.by_series.values() if len([f for f in g if f.value is not None and f.period]) >= 3]
         if not groups:
             return None
@@ -974,7 +932,7 @@ class GraphReasoningSampler:
         )
         edges = [self.index.graph_edge(a, b), self.index.graph_edge(b, c)]
         distractors = distractors_for(
-            self.index, required, self.rng, self.args.graph_distractors, profile
+            self.index, required, self.rng, self.args.graph_distractors
         )
         question = (
             f"根据给定材料，计算{entity(c)}{metric(c)}从{a.period}到{b.period}、"
@@ -985,11 +943,11 @@ class GraphReasoningSampler:
         return graph_numeric_row(
             question, required, distractors, result, "%", program, task,
             "graph_growth_acceleration", edges, self.args,
-            "badcase_conditioned_rl_builder" if profile else "finance_world_graph_rl_builder",
-            self.rng, profile,
+            "finance_world_graph_rl_builder",
+            self.rng,
         )
 
-    def _peer_growth_gap(self, profile: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    def _peer_growth_gap(self) -> dict[str, Any] | None:
         groups = list(self.index.by_metric_scope_unit.items())
         if not groups:
             return None
@@ -1033,7 +991,7 @@ class GraphReasoningSampler:
             self.index.graph_edge(a_new, b_new),
         ]
         distractors = distractors_for(
-            self.index, required, self.rng, self.args.graph_distractors, profile
+            self.index, required, self.rng, self.args.graph_distractors
         )
         question = (
             f"根据给定材料，分别计算{entity(a_new)}和{entity(b_new)}的{metric(a_new)}"
@@ -1043,8 +1001,8 @@ class GraphReasoningSampler:
         return graph_numeric_row(
             question, required, distractors, result, "%", program, task,
             "graph_peer_growth_gap", edges, self.args,
-            "badcase_conditioned_rl_builder" if profile else "finance_world_graph_rl_builder",
-            self.rng, profile,
+            "finance_world_graph_rl_builder",
+            self.rng,
         )
 
     def _task(self, required: Sequence[Fact], preferred: str) -> str:
@@ -1060,9 +1018,9 @@ class GraphReasoningSampler:
                 return "cross_modal_multi_hop"
         return preferred if preferred in TASK_SET else "multi_step_numerical_reasoning"
 
-def simple_reasoning_pool(index: Index, rng: random.Random, target: int, args: argparse.Namespace, profile: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
-    source = "badcase_conditioned_rl_builder" if profile else "finance_world_rl_builder"
-    extra = {"badcase_profile": dict(profile)} if profile else None
+def simple_reasoning_pool(index: Index, rng: random.Random, target: int, args: argparse.Namespace) -> list[dict[str, Any]]:
+    source = "finance_world_rl_builder"
+    extra = None
     rows: list[dict[str, Any]] = []
     groups = list(index.by_series.values())
     rng.shuffle(groups)
@@ -1145,24 +1103,24 @@ def simple_reasoning_pool(index: Index, rng: random.Random, target: int, args: a
 
 
 
-def reasoning_pool(index: Index, rng: random.Random, target: int, args: argparse.Namespace, profile: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+def reasoning_pool(index: Index, rng: random.Random, target: int, args: argparse.Namespace) -> list[dict[str, Any]]:
     if target <= 0:
         return []
-    ratio = 0.0 if args.disable_graph_hard else (args.badcase_graph_ratio if profile else args.graph_hard_ratio)
+    ratio = 0.0 if args.disable_graph_hard else args.graph_hard_ratio
     ratio = max(0.0, min(1.0, float(ratio)))
     graph_target = int(round(target * ratio))
     simple_target = max(0, target - graph_target)
 
     rows: list[dict[str, Any]] = []
     if graph_target:
-        rows.extend(GraphReasoningSampler(index, rng, args).sample(graph_target, profile=profile))
+        rows.extend(GraphReasoningSampler(index, rng, args).sample(graph_target))
     if simple_target:
-        rows.extend(simple_reasoning_pool(index, rng, simple_target, args, profile=profile))
+        rows.extend(simple_reasoning_pool(index, rng, simple_target, args))
 
     # If the graph topology cannot satisfy the requested ratio, backfill from
     # the simple deterministic builders rather than silently shrinking output.
     if len(rows) < target:
-        rows.extend(simple_reasoning_pool(index, rng, target - len(rows), args, profile=profile))
+        rows.extend(simple_reasoning_pool(index, rng, target - len(rows), args))
     rows = dedup(rows)
     rng.shuffle(rows)
     return rows[:target]
@@ -1246,7 +1204,6 @@ def public_fact(f: Fact) -> dict[str, Any]:
 
 GEN_SYSTEM = """你负责为 FINAR-VL 构造新的 Generation RL 候选数据。\n\n输入是一组新的金融证据以及可能存在的图片。基于这些证据生成一道新的开放式金融问题，并给出严格受证据支持的参考答案。\n\n要求：\n1. 问题只能依赖当前给定证据和图片回答，不得要求外部知识。\n2. 至少综合两条证据，不要生成单个数字抄取题。\n3. 图片存在且相关时，图片中的信息必须实际参与。\n4. 参考答案不得引入证据外的原因、预测、政策影响或公司动机。\n5. 问题不得直接泄露参考答案。\n6. task 必须逐字从 task_labels 中选择。\n7. used_fact_ids 必须来自输入 fact_id，至少两个。\n8. 证据不足时返回 reject。\n\n严格输出一个 JSON：\n{\"status\":\"accepted\",\"task\":\"...\",\"question\":\"...\",\"reference_answer\":\"...\",\"used_fact_ids\":[\"...\"]}\n或 {\"status\":\"reject\",\"reason\":\"...\"}\n只输出 JSON。"""
 
-BADCASE_GEN_SYSTEM = """你负责根据能力缺口构造新的 FINAR-VL RL 候选问题。\n\n输入包含 task_type / error_type / scenario_tags 分类画像，以及与原 Bad Case 内容无关的一组新金融证据。根据分类画像构造一道新的问题，但不得复述或改写原 Bad Case。所有事实必须来自当前新证据。\n\n要求：\n1. 问题针对 error_type 对应能力。\n2. 开放式问题至少综合两条当前证据。\n3. 视觉/跨模态能力要求图片真实参与。\n4. 参考答案不得引入证据外信息。\n5. task 必须逐字从 task_labels 中选择。\n6. used_fact_ids 必须来自当前输入，至少两个。\n7. 当前证据不适合该画像时返回 reject。\n\n严格输出 JSON：\n{\"status\":\"accepted\",\"task\":\"...\",\"question\":\"...\",\"reference_answer\":\"...\",\"used_fact_ids\":[\"...\"]}\n或 {\"status\":\"reject\",\"reason\":\"...\"}\n只输出 JSON。"""
 
 
 @dataclass
@@ -1322,7 +1279,7 @@ class Runner:
         return out
 
 
-def gen_request(bundle: Sequence[Fact], profile: Mapping[str, Any] | None, args: argparse.Namespace) -> Request:
+def gen_request(bundle: Sequence[Fact], args: argparse.Namespace) -> Request:
     imgs, seen = [], set()
     for f in bundle:
         p = resolve_image(f.image)
@@ -1330,8 +1287,7 @@ def gen_request(bundle: Sequence[Fact], profile: Mapping[str, Any] | None, args:
             seen.add(str(p)); imgs.append(p)
         if len(imgs) >= args.max_images: break
     payload = {"task_labels": list(GEN_TASKS), "evidence": [public_fact(f) for f in bundle]}
-    if profile: payload["badcase_profile"] = dict(profile)
-    return Request(BADCASE_GEN_SYSTEM if profile else GEN_SYSTEM, json.dumps(payload, ensure_ascii=False, indent=2), imgs)
+    return Request(GEN_SYSTEM, json.dumps(payload, ensure_ascii=False, indent=2), imgs)
 
 
 def valid_gen(x: Mapping[str, Any], ids: set[str]) -> tuple[bool, str]:
@@ -1344,7 +1300,7 @@ def valid_gen(x: Mapping[str, Any], ids: set[str]) -> tuple[bool, str]:
     return True, ""
 
 
-def gen_row(x: Mapping[str, Any], bundle: Sequence[Fact], profile: Mapping[str, Any] | None, args: argparse.Namespace) -> dict[str, Any] | None:
+def gen_row(x: Mapping[str, Any], bundle: Sequence[Fact], args: argparse.Namespace) -> dict[str, Any] | None:
     lookup = {f.id: f for f in bundle}
     used = [lookup[str(i)] for i in x["used_fact_ids"] if str(i) in lookup]
     imgs, vids = images_for(used, args.max_images)
@@ -1353,69 +1309,44 @@ def gen_row(x: Mapping[str, Any], bundle: Sequence[Fact], profile: Mapping[str, 
         return None
     ctx = context(used, args.max_context_chars, hide_visual=True)
     q, ans = str(x["question"]).strip(), str(x["reference_answer"]).strip()
-    extra = {"badcase_profile": dict(profile)} if profile else None
+    extra = None
     return {
         "messages": messages(q, imgs, ctx), "question": q, "solution": ans, "reference_answer": ans,
-        "task": str(x["task"]), "source": "badcase_conditioned_rl_builder" if profile else "finance_world_rl_builder",
+        "task": str(x["task"]), "source": "finance_world_rl_builder",
         "split": "train", "images": imgs, "output_format": "free_text", "reward_type": "judge",
         "reward_subtype": "model_judge", "verifier_type": "model_judge",
-        "metadata": {"evidence_ids": [f.id for f in used], "construction": meta("badcase_open_ended" if profile else "open_ended_evidence_bundle", used, vids, extra)},
+        "metadata": {"evidence_ids": [f.id for f in used], "construction": meta("open_ended_evidence_bundle", used, vids, extra)},
     }
 
 
-def generation_pool(index: Index, runner: Runner, rng: random.Random, target: int, args: argparse.Namespace, profiles: Sequence[Mapping[str, Any]] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def generation_pool(index: Index, runner: Runner, rng: random.Random, target: int, args: argparse.Namespace) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     accepted, rejected, pending = [], [], []
     attempts, max_attempts = 0, max(100, target * 4)
-    profiles = list(profiles or [])
     while len(accepted) < target and attempts < max_attempts:
         attempts += 1
         bundle = index.bundle(rng, args.bundle_min, args.bundle_max)
         if len(bundle) < args.bundle_min: break
-        profile = rng.choice(profiles) if profiles else None
-        pending.append((gen_request(bundle, profile, args), bundle, profile))
+        pending.append((gen_request(bundle, args), bundle))
         if len(pending) < args.llm_batch_size and attempts < max_attempts: continue
         outs = runner.batch([p[0] for p in pending], args.llm_temperature, args.llm_max_tokens)
-        for (_, bundle, profile), x in zip(pending, outs):
+        for (_, bundle), x in zip(pending, outs):
             if isinstance(x, Exception):
-                rejected.append({"stage":"generation","reason":f"llm_error:{x}","fact_ids":[f.id for f in bundle],"profile":profile}); continue
+                rejected.append({"stage":"generation","reason":f"llm_error:{x}","fact_ids":[f.id for f in bundle]}); continue
             ok, reason = valid_gen(x, {f.id for f in bundle})
             if ok:
-                row = gen_row(x, bundle, profile, args)
+                row = gen_row(x, bundle, args)
                 if row is None:
-                    rejected.append({"stage":"generation","reason":"required_visual_evidence_exceeds_image_cap","output":x,"fact_ids":[f.id for f in bundle],"profile":profile})
+                    rejected.append({"stage":"generation","reason":"required_visual_evidence_exceeds_image_cap","output":x,"fact_ids":[f.id for f in bundle]})
                 else:
                     accepted.append(row)
             else:
-                rejected.append({"stage":"generation","reason":reason,"output":x,"fact_ids":[f.id for f in bundle],"profile":profile})
+                rejected.append({"stage":"generation","reason":reason,"output":x,"fact_ids":[f.id for f in bundle]})
             if len(accepted) >= target: break
         pending = []
     return dedup(accepted)[:target], rejected
 
 
-def badcase_profiles(path: Path) -> list[dict[str, Any]]:
-    out = []
-    for row in iter_jsonl(path):
-        c = row.get("classification") if isinstance(row.get("classification"), Mapping) else row
-        task = str(pick(c, ("task_type", "task", "predicted_task"), "")).strip()
-        err = str(pick(c, ("error_type", "primary_error_type", "error"), "")).strip()
-        sc = pick(c, ("scenario_tags", "scenarios", "scenario"), [])
-        if isinstance(sc, str): sc = [sc]
-        if task or err: out.append({"task_type": task, "error_type": err, "scenario_tags": [str(x) for x in sc] if isinstance(sc, list) else []})
-    return out
-
-
-def split_profiles(profiles: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    r, g = [], []
-    for p in profiles:
-        err, task = str(p.get("error_type") or ""), str(p.get("task_type") or "")
-        if err in BADCASE_REASONING_ERRORS or any(x in task for x in ("numerical", "table", "chart", "ocr", "ranking", "candlestick", "fact_consistency")):
-            r.append(dict(p))
-        else:
-            g.append(dict(p))
-    return r, g
-
-
-def audit(reasoning: Sequence[Mapping[str, Any]], generation: Sequence[Mapping[str, Any]], rejected: Sequence[Mapping[str, Any]], facts: int, edges: int, profiles: int) -> dict[str, Any]:
+def audit(reasoning: Sequence[Mapping[str, Any]], generation: Sequence[Mapping[str, Any]], rejected: Sequence[Mapping[str, Any]], facts: int, edges: int) -> dict[str, Any]:
     tasks, builders, sources, mods, difficulties = Counter(), Counter(), Counter(), Counter(), Counter()
     for route, rows in (("reasoning", reasoning), ("generation", generation)):
         for row in rows:
@@ -1429,7 +1360,7 @@ def audit(reasoning: Sequence[Mapping[str, Any]], generation: Sequence[Mapping[s
                 difficulties[f"{route}:{difficulty['label']}"] += 1
     return {
         "version": "rl_candidate_bank_v2", "facts": facts, "edges": edges, "task_vocabulary_size": len(TASKS),
-        "badcase_profiles": profiles, "reasoning": len(reasoning), "generation": len(generation), "rejected": len(rejected),
+"reasoning": len(reasoning), "generation": len(generation), "rejected": len(rejected),
         "task_counts": dict(tasks), "builder_counts": dict(builders), "source_counts": dict(sources),
         "modality_counts": dict(mods), "difficulty_counts": dict(difficulties),
     }
@@ -1452,29 +1383,11 @@ def main() -> None:
     if args.stage in {"generation", "all"} and args.generation_target > 0:
         runner = Runner(args); rows, rej = generation_pool(index, runner, rng, args.generation_target, args); generation += rows; rejected += rej
 
-    profiles = badcase_profiles(args.badcase_classification) if args.badcase_classification.exists() else []
-    if args.stage in {"badcase", "all"} and args.badcase_target > 0 and profiles:
-        rp, gp = split_profiles(profiles)
-        rt = args.badcase_target if rp and not gp else int(args.badcase_target * 0.65) if rp else 0
-        gt = args.badcase_target - rt
-        badcase_reasoning: list[dict[str, Any]] = []
-        attempts = 0
-        while rt > 0 and len(badcase_reasoning) < rt and attempts < max(20, rt * 3):
-            attempts += 1
-            p = rng.choice(rp)
-            need = rt - len(badcase_reasoning)
-            badcase_reasoning.extend(reasoning_pool(index, rng, min(12, need), args, profile=p))
-            badcase_reasoning = dedup(badcase_reasoning)[:rt]
-        reasoning += badcase_reasoning
-        if gt > 0 and gp:
-            if runner is None: runner = Runner(args)
-            rows, rej = generation_pool(index, runner, rng, gt, args, profiles=gp); generation += rows; rejected += rej
-
     reasoning, generation = dedup(reasoning), dedup(generation)
     write_jsonl(args.output_root / "reasoning.jsonl", reasoning)
     write_jsonl(args.output_root / "generation.jsonl", generation)
     write_jsonl(args.output_root / "rejected.jsonl", rejected)
-    report = audit(reasoning, generation, rejected, len(facts), len(edges), len(profiles))
+    report = audit(reasoning, generation, rejected, len(facts), len(edges))
     (args.output_root / "audit.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
