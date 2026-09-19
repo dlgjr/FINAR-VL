@@ -1,10 +1,13 @@
-# FINAR-VL
+<h1 align="center">
+  <img src="assets/finar_vl_logo.svg" width="80" align="left" alt="FINAR-VL Logo">
+  FINAR-VL
+</h1>
 
 [中文](README.md) | [English](README.en.md)
 
 FINAR-VL is a multimodal large-model training project for the financial domain, built by training `FINAR-VL` on top of Qwen3-VL-4B-Instruct. The project focuses on information extraction, evidence localization, and numerical reasoning over financial materials containing multiple tables, charts, and pages.
 
-## Open-source Content
+## 📦 Open-source Content
 
 | Item | Description |
 |---|---|
@@ -42,7 +45,7 @@ FINAR-VL is a multimodal large-model training project for the financial domain, 
 
 > The FINAR-VL scores in the current figure are provisional values for layout and target visualization; they will be replaced by complete measured results for the formal release.
 
-## Data Construction
+## 🧩 Data Construction
 
 <p align="center">
   <img src="docs/assets/data_construction_flow.svg" alt="FINAR-VL Data Construction Pipeline" width="100%">
@@ -56,7 +59,7 @@ SFT, Reasoning RL, and Generation RL share Finance World as the common evidence 
 - **Generation RL**: evidence bundle → generation task skeleton → question + reference answer.
 - **Construction model**: `Qwen3-VL-235B-A22B-Instruct` handles SFT/RL sample planning, rendering, and answer construction.
 
-## Training Pipeline
+## 🏗️ Training Pipeline
 
 <p align="center">
   <img src="assets/finar_vl_training_pipeline.svg" alt="FINAR-VL Training Pipeline" width="100%">
@@ -66,7 +69,7 @@ Reasoning RL and Generation RL are two independent training stages initialized f
 
 MOPD initializes the student model from the SFT checkpoint and loads the outputs of Reasoning RL and Generation RL as two teacher models. The teachers provide token-level supervision for reasoning and generation data respectively. The current training script uses top-128 GKD: each sample is routed only to its corresponding teacher, and the teacher returns the top-128 token distribution for distillation. The model produced by MOPD is named `FINAR-VL`.
 
-## Quick Start
+## ⚡ Quick Start
 
 ### 1. Clone the Repository
 
@@ -171,7 +174,7 @@ The script uses top-128 GKD by default. Image paths follow the same resolution l
 
 W&B logs, model checkpoints, evaluation results, reward audits, and per-rank status are stored under `output/`.
 
-## Training Stages
+## 🚀 Training Stages
 
 ### 1. SFT
 
@@ -217,7 +220,7 @@ The current implementation uses top-128 GKD. Teacher services return the top-128
 
 The training script also reuses Pass@1 / Pass@8 evaluation from the SFT stage. Samples that can be scored programmatically use rule-based evaluation directly; only samples that truly require model judging are sent to the Generation teacher. A checkpoint is saved every 20 steps. The latest checkpoint keeps the complete training state, while older checkpoints retain model weights only.
 
-## RL Data and Reward Design
+## 🎯 RL Data and Reward Design
 
 | Data branch | Main tasks | Reward method |
 |---|---|---|
@@ -232,7 +235,7 @@ Before RL training, the data pipeline performs the following steps:
 4. Split data into fine-grained tasks and balance the workload.
 5. Record planned, completed, and remaining tasks, heartbeats, and errors during training.
 
-## Repository Structure
+## 📁 Repository Structure
 
 ```text
 FINAR-VL/
