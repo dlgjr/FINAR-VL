@@ -4,17 +4,6 @@
 
 FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Qwen3-VL-4B-Instruct 训练 `FINAR-VL`。项目重点处理多表、多图、跨页金融材料中的信息提取、证据定位与数值计算问题。
 
-## 核心任务
-
-| 能力 | 任务示例 |
-|---|---|
-| 多表推理 | 跨多个表格定位字段、建立字段关系并完成联合计算 |
-| 多图与跨页推理 | 结合多个图表、财报页面或附件完成证据检索和问答 |
-| 金融数值计算 | 比率、增减幅、累计值、占比和多步算术计算 |
-| 图表理解 | 图表数据提取、趋势判断、指标比较和图表计算 |
-| 文档理解 | 金融 OCR、实体抽取、事实抽取和证据页定位 |
-| 金融生成 | 基于财报、市场材料和专业知识生成分析性回答 |
-
 ## 开源内容
 
 | 内容 | 说明 |
@@ -24,6 +13,35 @@ FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Q
 | 阶段权重 | 开源 SFT、Reasoning RL 和 Generation RL 的阶段模型权重 |
 | 最终权重 | MOPD 完成并验证后开源 `FINAR-VL` 模型权重 |
 
+
+
+## 📊 性能表现
+
+<div align="center">
+  <img src="assets/finar_vl_logo.svg" width="82" alt="FINAR-VL Logo">
+  <br>
+  <strong>FINAR-VL-4B</strong>
+</div>
+
+<br>
+
+<div align="center">
+  <img src="assets/finar_vl_performance.svg" width="100%" alt="FINAR-VL Performance Comparison">
+  <br>
+  <em><strong>图 1：</strong>FINAR-VL-4B 与通用及金融专项多模态模型在 12 个金融基准上的对比。</em>
+</div>
+
+### ✨ 结果亮点
+
+🏆 **跨基准表现**：覆盖 FAMMA、FinChart-Bench、FinMME、FinMMR、FinMTM、MME-Finance、VisFinEval、XFinBench、CFMME、FinMMDocR、FinDocMRE 和 FinEval-MM 共 12 项金融多模态基准。
+
+⚡ **参数效率**：FINAR-VL 以 4B 参数规模面向金融领域进行专项优化，用更小的模型规模覆盖图表、财报、跨页文档与数值推理任务。
+
+📈 **领域特化**：对比同时保留 Qwen3-VL-4B-Instruct 基线、Qwen3-VL-32B 强通用模型，以及 InternVL、MiniCPM、Fin-R1、FinLMM-R1 等代表性模型。
+
+🧠 **复杂金融推理**：重点评估图表理解、多模态数值计算、跨页证据定位、长文档理解和金融分析推理能力。
+
+> 当前图中 FINAR-VL 分数为用于版式与目标展示的暂定值；正式发布时将以完整实测结果替换。
 
 ## 数据构造
 
@@ -151,26 +169,8 @@ MOPD_GENERATION_DATA=/path/to/generation_train_gspo.jsonl \
 bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh
 ```
 
-脚本默认使用 top-128 GKD，图片路径沿用 RL 数据准备阶段的解析逻辑。训练每 20 step 保存一次 checkpoint 并执行阶段评估；最新 checkpoint 保留完整 optimizer、scheduler、RNG 和 Trainer state，可以直接续训。Qwen3-VL 的学生前向默认开启 `use_logits_to_keep`，只保留需要计算蒸馏损失的 logits，避免长序列在 LM head 处产生过大的显存峰值。
+脚本默认使用 top-128 GKD，图片路径沿用 RL 数据准备阶段的解析逻辑。训练每 20 step 保存一次 checkpoint 并执行阶段评估。Qwen3-VL 的学生前向默认开启 `use_logits_to_keep`，只保留需要计算蒸馏损失的 logits，避免长序列在 LM head 处产生过大的显存峰值。
 
-常用参数可以通过环境变量覆盖：
-
-```bash
-export MOPD_GKD_TOPK=128
-export MOPD_IMAGE_MAX_TOKEN_NUM=10240
-export MOPD_PER_DEVICE_BATCH=2
-export MOPD_GRAD_ACC=4
-export MOPD_INTERVAL_STEPS=20
-```
-
-从 checkpoint 续训时，需要同时提供原 W&B run ID：
-
-```bash
-export WANDB_RUN_ID=<run_id>
-
-bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh \
-  --resume_from_checkpoint /path/to/checkpoint-60
-```
 
 训练过程中生成的 W&B 日志、模型权重、评估结果、奖励审计和各 rank状态均保存在 `output/`。
 
@@ -259,23 +259,4 @@ FINAR-VL/
 ├── tests/                         # 单元测试
 └── output/                        # 训练日志、权重和评估结果
 ```
-
-## 正式训练脚本
-
-| 脚本 | 作用 |
-|---|---|
-| `scripts/dlc/start_sft_stage1.sh` | SFT 正式训练入口 |
-| `scripts/dlc/start_sft_reasoning_v2.sh` | SFT 推理能力保持配置入口 |
-| `scripts/dlc/start_sft.sh` | SFT 数据准备、采样、训练、评估和保存主流程 |
-| `scripts/dlc/start_gspo_reasoning.sh` | Reasoning RL 启动入口 |
-| `scripts/dlc/start_gspo_generation.sh` | Generation RL 启动入口 |
-| `scripts/dlc/start_gspo.sh` | 两个独立 GSPO 训练共用的主流程 |
-| `scripts/dlc/start_gspo_judge.sh` | Generation RL 多模态裁判服务 |
-| `scripts/dlc/gspo_env.sh` | GSPO 分布式拓扑和训练参数 |
-| `scripts/dlc/gspo_reward_plugin.py` | 规则奖励与模型裁判奖励接入 |
-| `scripts/dlc/gspo_trainer_plugin.py` | 训练监控、奖励审计和阶段评估 |
-| `scripts/rl/prepare_gspo_data.py` | RL 数据转换和计算成本估计 |
-| `scripts/rl/schedule_gspo_data.py` | 多卡、多节点负载均衡 |
-| `scripts/rl/validate_gspo_data.py` | RL 数据和奖励路由校验 |
-| `scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh` | 单机 4 卡双教师 MOPD 训练入口，使用 top-128 GKD，并支持完整断点续训 |
 
