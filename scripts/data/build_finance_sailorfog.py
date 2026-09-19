@@ -49,8 +49,8 @@ VISUAL_TASKS = {"image_caption","financial_ocr","spatial_localization","single_t
 ENTITY_PROMPT = '''识别金融文档实体。输出JSON：{"company_name":"","ticker":"","market":"","industry_group":"","doc_type":"annual_report|semiannual_report|quarterly_report|esg_report|research_report|prospectus|announcement|other","period":"","frequency":"annual|semiannual|quarterly|unknown"}。只使用输入材料，规则hints明确的内容不得无依据改写。'''
 FACT_PROMPT = '''你是金融事实标准化器。输入有document_entity、原文、rule_candidates和原始图片。输出{"facts":[{"candidate_id":"","metric":"","metric_canonical":"","value_text":"","numeric_value":"","unit":"","currency":"","period":"","scope":"","statement_type":"income_statement|balance_sheet|cash_flow|notes|chart|other","source_mode":"text|image","image_index":null,"visual_type":"table|chart|candlestick|relationship_diagram|terminal|document_page|other|none","visual_observation":"","evidence_quote":""}]}。文本数值fact必须引用rule_candidates.candidate_id且数字/metric_canonical保持一致；图片fact必须直接看图，精确数值看不清时只抽视觉关系；K线只描述历史可见信息；不得使用原QA答案。'''
 RECHECK_PROMPT = '''复核一个低置信度金融fact。输出{"accepted":true,"reason":""}。只有原文或原图能直接支持metric/value/period/scope时accepted=true。'''
-PLAN_PROMPT = '''基于真实金融facts规划可程序验证的数值题。输出{"status":"accepted|reject","evidence_ids":[],"steps":[{"id":"s1","operator":"ratio|difference|percentage_change|yoy_growth|gross_margin|net_margin|current_ratio|debt_ratio|cash_conversion|roe|roa|segment_contribution|component_sum","expression":"仅v0/v1/...、前序sN、+ - * /括号和常数1,2,4,12,100,360,365,10000,100000000","claimed_result":"数字","unit":"","evidence_ids":[]}],"answer_value":"","answer_unit":"","question":""}。至少使用2个真实facts；hard题至少3步并形成依赖链；主体/期间/scope/单位必须兼容；不得新增数字。'''
-QA_PROMPT = '''根据requested_task和真实金融facts/原图生成训练QA。输出{"status":"accepted|reject","task_type":"","question":"","answer":"","answer_type":"short_text|free_text|number|page_numbers|image_indices","evidence_ids":[],"visual_evidence_ids":[],"reasoning":""}。公司名、日期、指标名保持明确；难度来自多证据/多表/多图/跨页/口径对齐；视觉任务必须直接看图且图片不可被文字替代；多表/多图至少两张图参与；K线不预测未来；开放分析不超出材料。'''
+PLAN_PROMPT = '''基于真实金融facts规划可程序验证的数值题。输出{"status":"accepted|reject","evidence_ids":[],"steps":[{"id":"s1","operator":"ratio|difference|percentage_change|yoy_growth|gross_margin|net_margin|current_ratio|debt_ratio|cash_conversion|roe|roa|segment_contribution|component_sum","expression":"仅v0/v1/...、前序sN、+ - * /括号和常数1,2,4,12,100,360,365,10000,100000000","claimed_result":"数字","unit":"","evidence_ids":[]}],"answer_value":"","answer_unit":"","question":""}。至少使用2个真实facts；difficulty=easy 时允许1步，medium至少2步，hard至少3步并形成依赖链；主体/期间/scope/单位必须兼容；不得新增数字。'''
+QA_PROMPT = '''根据requested_task和真实金融facts/原图生成训练QA。输出{"status":"accepted|reject","task_type":"","question":"","answer":"","answer_type":"short_text|free_text|number|page_numbers|image_indices","evidence_ids":[],"visual_evidence_ids":[],"reasoning":""}。公司名、日期、指标名保持明确；遵守输入 difficulty：easy可单证据，medium至少2条关键证据，hard至少3条关键证据并包含跨页/多表/多图/口径对齐中的至少一项；视觉任务必须直接看图且图片不可被文字替代；多表/多图至少两张图参与；K线不预测未来；开放分析不超出材料。'''
 JUDGE_PROMPT = '''独立审核金融QA。输出{"supported":true,"answerable":true,"visual_required":true,"score":5,"reason":""}。答案必须被给定facts和原图支持；视觉任务必须真的需要图片；score<4代表应过滤。'''
 
 
@@ -277,10 +277,10 @@ def eval_expr(expr: str, vals: dict[str,Decimal]) -> Decimal:
         raise ValueError(expr)
     return ev(tree)
 
-def numeric_sample(q: Qwen, task: str, fs: list[dict[str,Any]], images: list[str]):
+def numeric_sample(q: Qwen, task: str, fs: list[dict[str,Any]], images: list[str], difficulty: str):
     nums=[f for f in fs if f.get("numeric_value")]
     if len(nums)<2: return None
-    aliases={f"v{i}":f for i,f in enumerate(nums)}; payload={"task":task,"facts":[{**f,"variable":v,"images":[]} for v,f in aliases.items()]}
+    aliases={f"v{i}":f for i,f in enumerate(nums)}; payload={"task":task,"difficulty":difficulty,"facts":[{**f,"variable":v,"images":[]} for v,f in aliases.items()]}
     try: p=q.json(PLAN_PROMPT,payload,images,temp=.3,max_tokens=3072)
     except Exception: return None
     if p.get("status")!="accepted" or not p.get("question") or not p.get("steps"): return None
@@ -296,23 +296,24 @@ def numeric_sample(q: Qwen, task: str, fs: list[dict[str,Any]], images: list[str
     except (ValueError,InvalidOperation,ZeroDivisionError): return None
     usedfacts=[aliases[x] for x in used if x in aliases]; return p,usedfacts
 
-def synthesize(q: Qwen, facts, edges, out: Path, tasks: list[str], target: int, seed: int):
+def synthesize(q: Qwen, facts, edges, out: Path, tasks: list[str], target: int, seed: int, easy_ratio: float, medium_ratio: float, hard_ratio: float):
     rng=random.Random(seed); sft=[]; rejected=[]; counts=Counter()
     normal=[t for t in tasks if t!="fact_consistency_check"]
+    total_ratio=max(easy_ratio+medium_ratio+hard_ratio,1e-9); easy_cut=easy_ratio/total_ratio; medium_cut=(easy_ratio+medium_ratio)/total_ratio
     for attempt in range(target*30):
         if len(sft)>=target: break
-        task=normal[attempt%len(normal)]; fs=sample_facts(rng,facts,edges,task); images=[]
+        task=normal[attempt%len(normal)]; draw=rng.random(); difficulty="easy" if draw<easy_cut else "medium" if draw<medium_cut else "hard"; n_facts=4 if difficulty=="easy" else 7 if difficulty=="medium" else 10; fs=sample_facts(rng,facts,edges,task,n=n_facts); images=[]
         for f in fs:
             if f.get("source_mode")=="image":
                 idx=f.get("image_index"); arr=f.get("images",[]); im=arr[idx] if isinstance(idx,int) and idx<len(arr) else arr[0] if len(arr)==1 else None
                 if im and im not in images: images.append(im)
         images=images[:5]
         if task in NUMERIC_TASKS:
-            result=numeric_sample(q,task,fs,images if task=="multi_visual_numerical_reasoning" else [])
+            result=numeric_sample(q,task,fs,images if task=="multi_visual_numerical_reasoning" else [],difficulty)
             if not result: continue
             p,used=result; question=p["question"]; answer=f'{p["answer_value"]}{p.get("answer_unit","")}'
         else:
-            payload={"requested_task":task,"facts":[{**f,"images":[]} for f in fs]}
+            payload={"requested_task":task,"difficulty":difficulty,"facts":[{**f,"images":[]} for f in fs]}
             try: c=q.json(QA_PROMPT,payload,images,temp=.5,max_tokens=3072)
             except Exception: continue
             if c.get("status")!="accepted" or c.get("task_type")!=task: continue
@@ -323,7 +324,8 @@ def synthesize(q: Qwen, facts, edges, out: Path, tasks: list[str], target: int, 
         prompt=("<image>"*len(images))+"参考材料：\n"+"\n".join(f'[{i+1}] {f["evidence_quote"]}' if f.get("source_mode")=="text" else f'[{i+1}] 请查看对应图片证据。' for i,f in enumerate(fs))+"\n\n问题："+question
         required_ids=[f["fact_id"] for f in used]
         distractor_ids=[f["fact_id"] for f in fs if f["fact_id"] not in set(required_ids)]
-        difficulty="hard" if (task in NUMERIC_TASKS and len(p.get("steps",[]))>=3) or len(required_ids)>=4 else "medium" if len(required_ids)>=2 else "easy"
+        if difficulty=="hard" and (len(required_ids)<3 or (task in NUMERIC_TASKS and len(p.get("steps",[]))<3)): continue
+        if difficulty=="medium" and (len(required_ids)<2 or (task in NUMERIC_TASKS and len(p.get("steps",[]))<2)): continue
         row={"messages":[{"role":"user","content":prompt},{"role":"assistant","content":str(answer)}],"source":"finance_world_initial","split":"train","images":images,"task":task,"metadata":{"construction_type":task,"difficulty":{"label":difficulty,"required_fact_count":len(required_ids),"distractor_count":len(distractor_ids),"visual_fact_count":sum(f.get("source_mode")=="image" for f in used)},"required_evidence_ids":required_ids,"distractor_ids":distractor_ids,"evidence_ids":required_ids,"initial_synthesis":True,"extractor_model":next((f.get("extractor_model") for f in used if f.get("extractor_model")),EXTRACT_MODEL),"constructor_model":q.model}}
         sft.append(row); counts[task]+=1
     write_jsonl(out/"train_sft.jsonl",sft); (out/"train_rl_reasoning.jsonl").unlink(missing_ok=True); write_jsonl(out/"rejected.jsonl",rejected); (out/"audit.json").write_text(json.dumps({"accepted":len(sft),"tasks":counts,"note":"RL data is constructed by dedicated RL builders; this script emits SFT only."},ensure_ascii=False,indent=2),encoding="utf-8")
@@ -356,6 +358,9 @@ def parse_args():
     p.add_argument("--target",type=int,default=2000)
     p.add_argument("--tasks",nargs="+",choices=TASKS,default=list(TASKS))
     p.add_argument("--seed",type=int,default=42)
+    p.add_argument("--easy-ratio",type=float,default=.35)
+    p.add_argument("--medium-ratio",type=float,default=.45)
+    p.add_argument("--hard-ratio",type=float,default=.20)
     p.add_argument("--consistency-negative-ratio",type=float,default=.05)
     a=p.parse_args()
     if a.model:
@@ -397,7 +402,7 @@ def main():
         build_graph(read_jsonl(facts_path),read_jsonl(ents_path),a.output_root); return
     if a.stage=="synthesize":
         q=Qwen(a.construct_model,a.tensor_parallel_size,a.max_model_len,a.max_images)
-        synthesize(q,read_jsonl(facts_path),read_jsonl(edges_path),a.output_root,a.tasks,a.target,a.seed)
+        synthesize(q,read_jsonl(facts_path),read_jsonl(edges_path),a.output_root,a.tasks,a.target,a.seed,a.easy_ratio,a.medium_ratio,a.hard_ratio)
         if "fact_consistency_check" in a.tasks:
             rows=read_jsonl(a.output_root/"train_sft.jsonl"); neg=consistency_negatives(read_jsonl(a.output_root/"fact_candidates.jsonl"),max(1,int(a.target*a.consistency_negative_ratio))); write_jsonl(a.output_root/"train_sft.jsonl",rows+neg)
 
