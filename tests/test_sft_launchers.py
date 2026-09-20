@@ -4,6 +4,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_public_sft_launcher_delegates_to_core_training_script():
+    text = (ROOT / "scripts" / "dlc" / "train_sft.sh").read_text(encoding="utf-8")
+    assert "SFT_FREEZE_VIT=true" in text
+    assert 'exec "$SCRIPT_DIR/start_sft.sh" "$@"' in text
+
+
 def test_shared_environment_makes_project_modules_importable_to_swift_workers():
     text = (ROOT / "scripts" / "dlc" / "dlc_env.sh").read_text(encoding="utf-8")
 
