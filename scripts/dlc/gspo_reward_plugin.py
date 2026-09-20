@@ -115,6 +115,7 @@ class GSPOReward(ORM):
                                 "solution": record.get("solution", ""),
                                 "question": record.get("question", ""),
                                 "parser_result": record.get("_parser_result"),
+                                "process_result": record.get("_process_result"),
                                 "judge_json": record.get("_judge_json"),
                             },
                             ensure_ascii=False,
@@ -122,6 +123,14 @@ class GSPOReward(ORM):
                         + "\n"
                     )
         lengths = [len(str(completion)) for completion in completions]
+        process_results = [
+            record.get("_process_result")
+            for record in records
+            if isinstance(record.get("_process_result"), Mapping)
+        ]
+        process_checked = [item for item in process_results if item.get("status") in {"pass", "fail", "unknown"}]
+        process_failures = [item for item in process_checked if item.get("status") == "fail"]
+        process_unknown = [item for item in process_checked if item.get("status") == "unknown"]
         summary = {
             "gspo/reward_mean": mean(rewards) if rewards else 0.0,
             "gspo/reward_std": pstdev(rewards) if len(rewards) > 1 else 0.0,
@@ -134,6 +143,9 @@ class GSPOReward(ORM):
             "gspo/nonfinite": float(bool(kwargs.get("nonfinite", False))),
             "gspo/rule_samples": route_counts["rule"],
             "gspo/judge_samples": route_counts["judge"],
+            "gspo/process_checked_ratio": len(process_checked) / len(rewards) if rewards else 0.0,
+            "gspo/process_veto_ratio": len(process_failures) / len(rewards) if rewards else 0.0,
+            "gspo/process_unknown_ratio": len(process_unknown) / len(rewards) if rewards else 0.0,
         }
         global_rewards = _gather_rewards(rewards)
         generations = int(os.environ.get("GSPO_NUM_GENERATIONS", "16"))
