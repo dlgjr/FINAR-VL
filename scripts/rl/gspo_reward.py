@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -788,9 +789,10 @@ class MixedReward:
                     record.get("question", ""),
                     record.get("gold_numeric", []),
                 )
+                process_gate_enabled = os.environ.get("GSPO_PROCESS_GATE", "false").lower() == "true"
                 process_result = (
                     verify_numeric_process(completion, verifier_type)
-                    if score >= 1.0
+                    if score >= 1.0 and process_gate_enabled
                     else {"status": "not_checked", "checked": 0, "errors": []}
                 )
                 # Process verification is a one-way veto.  It never creates or
