@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import json
 import os
 import re
@@ -10,6 +9,8 @@ import unicodedata
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Callable, Mapping, Sequence
+
+from .reasoning_process_verifier import verify_reasoning_process
 
 
 _ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.IGNORECASE | re.DOTALL)
@@ -506,153 +507,6 @@ def _numeric_match(
 
 
 
-_PROCESS_NUMERIC_VERIFIERS = {"numeric", "numeric_final", "composite_numeric"}
-_PROCESS_OPERATOR_RE = re.compile(r"[+\-*/×÷]")
-
-
-def _completion_text(completion: Any) -> str:
-    if isinstance(completion, Mapping):
-        return str(completion.get("content", completion.get("text", "")))
-    return str(completion)
-
-
-def _eval_explicit_arithmetic(expression: str) -> Decimal | None:
-    """Evaluate a small, explicit arithmetic expression without eval()."""
-
-    text = unicodedata.normalize("NFKC", expression)
-    text = text.replace("×", "*").replace("÷", "/").replace("−", "-").replace("–", "-")
-    text = text.replace(",", "").replace("，", "")
-    text = text.strip().strip("$")
-    text = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", text)
-    if ":" in text:
-        text = text.rsplit(":", 1)[-1].strip()
-    if "：" in text:
-        text = text.rsplit("：", 1)[-1].strip()
-    # Treat an explicit percentage literal as its numeric ratio.  Keeping this
-    # local to arithmetic verification avoids changing terminal-answer parsing.
-    text = re.sub(
-        r"(?<![\w.])(\d+(?:\.\d+)?|\.\d+)\s*[%％]",
-        r"(\1/100)",
-        text,
-    )
-    if not text or len(text) > 256 or not _PROCESS_OPERATOR_RE.search(text):
-        return None
-    if re.search(r"[A-Za-z_\u4e00-\u9fff￥¥€£]", text):
-        return None
-
-    try:
-        root = ast.parse(text, mode="eval")
-    except SyntaxError:
-        return None
-
-    def visit(node: ast.AST) -> Decimal:
-        if isinstance(node, ast.Expression):
-            return visit(node.body)
-        if isinstance(node, ast.Constant) and not isinstance(node.value, bool) and isinstance(node.value, (int, float)):
-            return Decimal(str(node.value))
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
-            value = visit(node.operand)
-            return value if isinstance(node.op, ast.UAdd) else -value
-        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
-            left, right = visit(node.left), visit(node.right)
-            if isinstance(node.op, ast.Add):
-                return left + right
-            if isinstance(node.op, ast.Sub):
-                return left - right
-            if isinstance(node.op, ast.Mult):
-                return left * right
-            if right == 0:
-                raise ZeroDivisionError
-            return left / right
-        raise ValueError("unsupported arithmetic syntax")
-
-    try:
-        return visit(root)
-    except (InvalidOperation, ValueError, ZeroDivisionError):
-        return None
-
-
-def _explicit_rhs_numeric(rhs: str) -> tuple[Decimal, Decimal] | None:
-    """Return (expected base value, display-rounding tolerance) for a simple RHS."""
-
-    text = unicodedata.normalize("NFKC", rhs).strip()
-    # A RHS such as "20 / 100" is another expression, not a displayed result.
-    if _PROCESS_OPERATOR_RE.search(text.lstrip("+-")):
-        return None
-    match = _NUMBER_TOKEN_RE.search(text)
-    if not match:
-        return None
-    try:
-        parsed = _parse_numeric(match.group(0))
-    except ValueError:
-        return None
-    if parsed.dimension not in {"scalar", "percent"}:
-        return None
-
-    raw = match.group("number").replace(",", "").replace("，", "")
-    mantissa = re.split(r"[eE]", raw, maxsplit=1)[0]
-    decimals = len(mantissa.split(".", 1)[1]) if "." in mantissa else 0
-    display_quantum = Decimal(1).scaleb(-decimals)
-    expected = parsed.base_value if parsed.dimension == "percent" else parsed.value
-    scale = parsed.factor if parsed.dimension == "percent" else Decimal(1)
-    # Only veto errors larger than ordinary display rounding.  This is
-    # intentionally conservative because UNKNOWN should not become a penalty.
-    tolerance = display_quantum * scale / Decimal(2) + Decimal("1e-12")
-    return expected, tolerance
-
-
-def verify_numeric_process(completion: Any, verifier_type: str) -> dict[str, Any]:
-    """Conservatively veto explicit arithmetic contradictions in a numeric CoT.
-
-    PASS means at least one executable equation was checked and none failed.
-    FAIL means an explicit equation is arithmetically inconsistent.
-    UNKNOWN means the trajectory exposed no equation that this high-precision
-    checker can safely evaluate.
-    """
-
-    if verifier_type not in _PROCESS_NUMERIC_VERIFIERS:
-        return {"status": "not_applicable", "checked": 0, "errors": []}
-
-    text = _completion_text(completion)
-    checked: list[dict[str, Any]] = []
-    for line_number, raw_line in enumerate(text.splitlines(), 1):
-        line = raw_line.replace("＝", "=")
-        if "=" not in line:
-            continue
-        parts = line.split("=")
-        for index in range(len(parts) - 1):
-            lhs = parts[index].strip()
-            rhs = parts[index + 1].strip()
-            computed = _eval_explicit_arithmetic(lhs)
-            rhs_value = _explicit_rhs_numeric(rhs)
-            if computed is None or rhs_value is None:
-                continue
-            expected, tolerance = rhs_value
-            delta = abs(computed - expected)
-            ok = delta <= tolerance
-            checked.append(
-                {
-                    "line": line_number,
-                    "lhs": lhs,
-                    "rhs": rhs,
-                    "computed": str(computed),
-                    "expected": str(expected),
-                    "tolerance": str(tolerance),
-                    "ok": bool(ok),
-                }
-            )
-
-    errors = [item for item in checked if not item["ok"]]
-    if errors:
-        status = "fail"
-    elif checked:
-        status = "pass"
-    else:
-        status = "unknown"
-    return {"status": status, "checked": len(checked), "errors": errors}
-
-
-
 def score_programmatic_answer(
     completion: Any,
     gold_atoms: Sequence[str],
@@ -791,7 +645,7 @@ class MixedReward:
                 )
                 process_gate_enabled = os.environ.get("GSPO_PROCESS_GATE", "false").lower() == "true"
                 process_result = (
-                    verify_numeric_process(completion, verifier_type)
+                    verify_reasoning_process(completion, record)
                     if score >= 1.0 and process_gate_enabled
                     else {"status": "not_checked", "checked": 0, "errors": []}
                 )
