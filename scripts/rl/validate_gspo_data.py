@@ -100,6 +100,23 @@ def validate(
                 _add(errors, line_number, sample_id, "invalid_judge_reference_mode", mode=reference_mode)
             if str(row.get("judge_reference") or "").strip() or row.get("gold_claims") or row.get("gold_claim_details"):
                 _add(errors, line_number, sample_id, "judge_must_not_use_reference")
+            if route_mode == "generation":
+                rubric = row.get("generation_rubric")
+                if not isinstance(rubric, Mapping):
+                    _add(errors, line_number, sample_id, "missing_generation_rubric")
+                else:
+                    fact_criteria = rubric.get("fact_criteria")
+                    analysis_criteria = rubric.get("analysis_criteria")
+                    critical_errors = rubric.get("critical_errors")
+                    required_fact_ids = rubric.get("required_fact_ids")
+                    if not isinstance(fact_criteria, list) or not fact_criteria:
+                        _add(errors, line_number, sample_id, "invalid_generation_fact_criteria")
+                    if not isinstance(analysis_criteria, list):
+                        _add(errors, line_number, sample_id, "invalid_generation_analysis_criteria")
+                    if not isinstance(critical_errors, list):
+                        _add(errors, line_number, sample_id, "invalid_generation_critical_errors")
+                    if not isinstance(required_fact_ids, list) or not required_fact_ids:
+                        _add(errors, line_number, sample_id, "invalid_generation_required_fact_ids")
         elif verifier_type in {"numeric", "numeric_final", "composite_numeric"}:
             gold_numeric = row.get("gold_numeric")
             if gold_atoms:
@@ -205,8 +222,8 @@ def validate(
         errors.append(
             {"line": 0, "error": "count_mismatch", "sample_id": "", "count": count, "expected_count": expected_count}
         )
-    if route_mode == "generation" and (reward_counts["rule"] == 0 or reward_counts["judge"] == 0):
-        errors.append({"line": 0, "error": "generation_requires_rule_and_judge_routes", "sample_id": ""})
+    if route_mode == "generation" and reward_counts["judge"] == 0:
+        errors.append({"line": 0, "error": "generation_requires_judge_route", "sample_id": ""})
     elif route_mode == "reasoning" and reward_counts["judge"]:
         errors.append({"line": 0, "error": "reasoning_must_be_programmatic_only", "sample_id": ""})
     report = {
