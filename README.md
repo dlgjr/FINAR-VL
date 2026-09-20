@@ -119,6 +119,7 @@ FINAR-VL/
 ├── models/qwen30/
 ├── models/qwen32/
 ├── models/qwen235/
+├── evaluation/                     # 公开 benchmark 评估入口与配置
 ├── data/train_multi/train_multi_sft_minhash_dedup.jsonl
 ├── data/train_text/train_text_sft_minhash_dedup.jsonl
 ├── data/train_multi/train_rl_reasoning.jsonl
@@ -196,6 +197,14 @@ bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh
 FINAR-VL 在性能图所示的 12 个公开金融多模态 benchmark 上进行统一评估：FAMMA、FinChart-Bench、FinMME、FinMMR、FinMTM、MME-Finance、VisFinEval、XFinBench、CFMME、FinMMDocR、FinDocMRE 和 FinEval-MM。
 
 这些 benchmark 覆盖金融图表理解、财务文档问答、多模态数值推理、跨页证据定位、长文档理解以及综合金融多模态推理，用于衡量模型在不同金融场景下的泛化能力。
+
+统一评估入口参考 Innovator-VL 的组织方式，通过单一脚本调度各 benchmark 的官方 evaluator：
+
+```bash
+MODEL_NAME=FINAR-VL-4B API_BASE=http://127.0.0.1:8000/v1 API_KEY=EMPTY bash evaluation/eval_finar_vl.sh
+```
+
+具体 benchmark 配置见 [`evaluation/README.md`](evaluation/README.md)。
 ## 📁 目录结构
 
 ```text
