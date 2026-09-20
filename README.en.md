@@ -222,7 +222,6 @@ FINAR-VL/
 │   ├── rl/                        # RL data, reward, scheduling, and audit components
 │   ├── dlc/                       # SFT / RL launchers and runtime plugins
 │   └── mopd/                      # MOPD training launcher
-├── tests/                         # Unit tests
 └── output/                        # Training logs, checkpoints, and evaluation results
 ```
 
