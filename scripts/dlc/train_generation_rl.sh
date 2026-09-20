@@ -14,8 +14,8 @@ source "$ROOT/scripts/dlc/gspo_env.sh"
 mkdir -p "$GENERATION_RL_OUTPUT_DIR"
 
 GENERATION_RL_EVIDENCE_FACTS="${GENERATION_RL_EVIDENCE_FACTS:-$ROOT/data/synthetic/generation_rl/generation_evidence_facts.jsonl}"
-GENERATION_RUBRIC_DATA="${GENERATION_RUBRIC_DATA:-$GENERATION_RL_OUTPUT_DIR/train_rl_generation_rubric.jsonl}"
-GENERATION_RUBRIC_READY="$GENERATION_RL_OUTPUT_DIR/generation_rubric.ready"
+GENERATION_RUBRIC_DATA="${GENERATION_RUBRIC_DATA:-$GENERATION_RL_OUTPUT_DIR/train_rl_generation_rubric_binary10.jsonl}"
+GENERATION_RUBRIC_READY="$GENERATION_RL_OUTPUT_DIR/generation_rubric_binary10.ready"
 
 if [[ "$GSPO_NODE_RANK" == "0" && ! -f "$GENERATION_RUBRIC_READY" ]]; then
   RUBRIC_JUDGE_LOG="$GENERATION_RL_OUTPUT_DIR/generation_rubric_judge.log"
