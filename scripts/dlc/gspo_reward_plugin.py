@@ -46,6 +46,8 @@ def records_from_kwargs(kwargs: Mapping[str, Any], count: int) -> list[dict[str,
     for index in range(count):
         def value(name: str, default: Any) -> Any:
             item = _column(kwargs, name, index, default)
+            if isinstance(item, str) and name == "generation_rubric":
+                return json.loads(item)
             if isinstance(item, str) and name in {"images", "gold_atoms", "gold_numeric", "gold_claims", "gold_claim_details", "metadata"}:
                 try:
                     return json.loads(item)
@@ -69,6 +71,7 @@ def records_from_kwargs(kwargs: Mapping[str, Any], count: int) -> list[dict[str,
                 "gold_claim_details": value("gold_claim_details", []),
                 "judge_reference": value("judge_reference", ""),
                 "judge_reference_mode": value("judge_reference_mode", ""),
+                "generation_rubric": value("generation_rubric", {}),
                 "question": value("question", ""),
                 "solution": value("solution", ""),
                 "estimated_cost": value("estimated_cost", 0),
