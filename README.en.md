@@ -5,7 +5,7 @@
 
 [中文](README.md) | [English](README.en.md)
 
-FINAR-VL is a financial multimodal large-model training project built on Qwen3-VL-4B-Instruct. It covers financial and valuation calculations, table and chart reasoning, OCR and document understanding, information extraction and evidence retrieval, cross-page multimodal reasoning, financial knowledge and market/risk analysis, structured QA, and open-ended financial analysis generation.
+FINAR-VL is a financial multimodal large-model training project built on Qwen3-VL-4B-Instruct, covering financial and valuation calculations, table/chart reasoning, OCR/document understanding, information extraction and evidence retrieval, cross-page multimodal reasoning, financial knowledge and market-risk analysis, and structured/open-ended financial QA.
 
 ## 📦 Open-source Content
 
