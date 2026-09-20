@@ -105,18 +105,34 @@ def validate(
                 if not isinstance(rubric, Mapping):
                     _add(errors, line_number, sample_id, "missing_generation_rubric")
                 else:
-                    fact_criteria = rubric.get("fact_criteria")
-                    analysis_criteria = rubric.get("analysis_criteria")
-                    critical_errors = rubric.get("critical_errors")
+                    points = rubric.get("points")
                     required_fact_ids = rubric.get("required_fact_ids")
-                    if not isinstance(fact_criteria, list) or not fact_criteria:
-                        _add(errors, line_number, sample_id, "invalid_generation_fact_criteria")
-                    if not isinstance(analysis_criteria, list):
-                        _add(errors, line_number, sample_id, "invalid_generation_analysis_criteria")
-                    if not isinstance(critical_errors, list):
-                        _add(errors, line_number, sample_id, "invalid_generation_critical_errors")
+                    scoring = rubric.get("scoring")
+                    if rubric.get("version") != "generation_rubric_v2_binary10":
+                        _add(errors, line_number, sample_id, "invalid_generation_rubric_version")
+                    if not isinstance(points, list) or len(points) != 10:
+                        _add(errors, line_number, sample_id, "generation_rubric_requires_10_points")
+                    else:
+                        point_ids = [str(item.get("id") or "") for item in points if isinstance(item, Mapping)]
+                        if point_ids != [f"P{index}" for index in range(1, 11)]:
+                            _add(errors, line_number, sample_id, "invalid_generation_point_ids")
+                        referenced: set[str] = set()
+                        for point in points:
+                            if not isinstance(point, Mapping):
+                                _add(errors, line_number, sample_id, "invalid_generation_point")
+                                continue
+                            fact_ids = point.get("fact_ids")
+                            criterion = str(point.get("criterion") or "").strip()
+                            if not criterion or not isinstance(fact_ids, list) or not fact_ids:
+                                _add(errors, line_number, sample_id, "invalid_generation_point")
+                                continue
+                            referenced.update(map(str, fact_ids))
+                        if isinstance(required_fact_ids, list) and set(map(str, required_fact_ids)) != referenced:
+                            _add(errors, line_number, sample_id, "generation_points_must_cover_required_facts")
                     if not isinstance(required_fact_ids, list) or not required_fact_ids:
                         _add(errors, line_number, sample_id, "invalid_generation_required_fact_ids")
+                    if not isinstance(scoring, Mapping) or scoring.get("num_points") != 10 or scoring.get("point_values") != [0, 1]:
+                        _add(errors, line_number, sample_id, "invalid_generation_binary10_scoring")
         elif verifier_type in {"numeric", "numeric_final", "composite_numeric"}:
             gold_numeric = row.get("gold_numeric")
             if gold_atoms:
