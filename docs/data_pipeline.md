@@ -186,4 +186,65 @@ Reasoning RL 与 Generation RL 都由各自启动脚本从 SFT checkpoint 独立
 
 当前 GSPO 训练每个 prompt 生成 8 个候选，并根据在线 verifier 的结果进行难度处理。实现位于 `scripts/dlc/gspo_direct_curriculum_plugin.py`、`gspo_reward_std_curriculum_plugin.py` 等插件中。
 
-训练、数据构造和 reward routing 的参数可能继续调整；修改实现时应同步更新本文以及中英文 README 中对应的高层描述。
+## 8. 评估框架
+
+### 8.1 通用评估组件
+
+`scripts/sft/pass_at_8_eval.py` 是 SFT 与 MOPD 共用的多模态评估基础组件。评估加载 benchmark 的文本与图片，生成候选答案，并输出整体及分 task 的：
+
+- `pass_at_1`；
+- `pass_at_8`；
+- completed / total；
+- coverage；
+- programmatic / model-judge 计数。
+
+分布式评估会根据图片像素、prompt 长度和参考答案长度估算样本成本，并通过共享任务队列分配长短样本，减少不同 rank 的长尾等待。
+
+### 8.2 判分路由
+
+评估优先使用确定性的 programmatic judge：
+
+- 数值答案：使用与 RL reward 一致的数值、单位和精度语义；
+- choice：比较单选/多选标签集合；
+- true/false：标准化布尔答案；
+- evidence retrieval：比较证据页码；
+- OCR：标准化可见文本和数值；
+- entity extraction：对结构化 JSON 做 canonical comparison；
+- 其他可以直接确定等价性的短答案：使用标准化匹配。
+
+当开放式答案无法可靠使用规则判分时，评估调用模型裁判，并要求候选答案完整覆盖参考答案中的关键事实、方向、数值、实体与关系。
+
+### 8.3 SFT 评估
+
+SFT 训练期间使用 Pass@1 / Pass@8 跟踪 checkpoint：
+
+- Pass@1 生成 1 个候选；
+- Pass@8 生成 8 个候选，只要其中一个通过判分即计为通过；
+- 每个样本使用确定性 seed，checkpoint 之间保持一致，避免将采样噪声误认为训练趋势；
+- 输出整体指标及每个 task 的 Pass@1 / Pass@8。
+
+`scripts/sft/checkpoint_eval_wandb.py` 进一步检查 benchmark task 数量、100% coverage、零评估错误和每个 task 的完成数，再将整体与分 task 指标写入 W&B。
+
+### 8.4 Reasoning RL 评估
+
+Reasoning RL 使用 `scripts/dlc/gspo_reasoning_eval_fix_plugin.py` 固定评估配置：
+
+- 固定使用 `reasoning_calc_seen_50_clean.jsonl` 的 50 条样本；
+- 只判最终 terminal answer，数值任务复用训练时的 reward 语义；
+- 每个 prompt 一次生成 8 个候选，Pass@1 取第 1 个，Pass@8 判断 8 个中是否至少一个正确；
+- 默认使用 `17, 42, 73` 三个固定随机种子；
+- 最终保存三组独立结果，并汇总均值。
+
+`scripts/dlc/gspo_eval_seed_wandb_plugin.py` 将每个 seed 的 Pass@1 / Pass@8 单独写入 W&B，便于区分模型变化和采样波动。
+
+### 8.5 MOPD 评估
+
+MOPD launcher 复用同一套 Pass@1 / Pass@8 evaluator，并根据 benchmark 样本的可验证性自动选择评估路由：
+
+- 可程序验证的样本使用 reasoning 路由和直接答案格式；
+- 开放式样本使用 generation 路由；
+- programmatic judge 无法覆盖的开放式答案使用模型裁判；
+- 两类样本分别使用固定评估 seed，并保留每条样本的评估路由信息。
+
+因此 SFT、Reasoning RL 和 MOPD 的主要评估指标与判分逻辑尽可能共享，避免不同训练阶段使用不一致的答案解析和数值容差。
+训练、数据构造、reward routing 和评估参数可能继续调整；修改实现时应同步更新本文以及中英文 README 中对应的高层描述。
