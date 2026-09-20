@@ -115,6 +115,7 @@ FINAR-VL/
 ├── models/qwen30/
 ├── models/qwen32/
 ├── models/qwen235/
+├── evaluation/                     # Public benchmark evaluation launcher and registry
 ├── data/train_multi/train_multi_sft_minhash_dedup.jsonl
 ├── data/train_text/train_text_sft_minhash_dedup.jsonl
 ├── data/train_multi/train_rl_reasoning.jsonl
@@ -192,6 +193,14 @@ The script uses top-128 GKD by default and saves a checkpoint with stage evaluat
 FINAR-VL is evaluated on the same 12 public financial multimodal benchmarks shown in the performance figure: FAMMA, FinChart-Bench, FinMME, FinMMR, FinMTM, MME-Finance, VisFinEval, XFinBench, CFMME, FinMMDocR, FinDocMRE, and FinEval-MM.
 
 Together, these benchmarks cover financial chart understanding, financial-document QA, multimodal numerical reasoning, cross-page evidence localization, long-document understanding, and broader financial multimodal reasoning.
+
+A unified launcher follows the same organization pattern as Innovator-VL and delegates each benchmark to its official evaluator:
+
+```bash
+MODEL_NAME=FINAR-VL-4B API_BASE=http://127.0.0.1:8000/v1 API_KEY=EMPTY bash evaluation/eval_finar_vl.sh
+```
+
+See [`evaluation/README.md`](evaluation/README.md) for benchmark-specific configuration.
 ## 📁 Repository Structure
 
 ```text
