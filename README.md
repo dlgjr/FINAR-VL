@@ -5,7 +5,7 @@
 
 [中文](README.md) | [English](README.en.md)
 
-FINAR-VL 是一个基于 Qwen3-VL-4B-Instruct 的金融多模态大模型训练项目，面向多表、多图、跨页金融材料中的信息提取、证据定位、数值推理与分析生成。
+FINAR-VL 是一个基于 Qwen3-VL-4B-Instruct 的金融多模态大模型训练项目，覆盖财务与估值计算、表格与图表推理、OCR 与文档理解、信息抽取与证据检索、跨页多模态推理、金融知识与市场/风险分析，以及结构化问答和开放式金融分析生成。
 
 ## 📦 开源内容
 
@@ -38,9 +38,11 @@ FINAR-VL 是一个基于 Qwen3-VL-4B-Instruct 的金融多模态大模型训练�
 
 🏆 **跨基准表现**：覆盖 FAMMA、FinChart-Bench、FinMME、FinMMR、FinMTM、MME-Finance、VisFinEval、XFinBench、CFMME、FinMMDocR、FinDocMRE 和 FinEval-MM 共 12 项金融多模态基准。
 
-⚡ **4B 金融专项模型**：重点覆盖图表理解、多模态数值计算、跨页证据定位、长文档理解和金融分析推理，并与通用模型及金融专项模型进行对比。
+⚡ **参数效率**：以 4B 参数规模覆盖图表、财报、跨页文档与数值推理等金融多模态任务。
 
-> 当前图中 FINAR-VL 分数为用于版式与目标展示的暂定值；正式发布时将以完整实测结果替换。
+📈 **领域特化**：面向金融场景专项训练，并与通用及金融专项多模态模型进行对比。
+
+🧠 **复杂金融推理**：重点评估图表理解、多模态数值计算、跨页证据定位、长文档理解和金融分析推理。
 
 ## 🧩 数据构造
 
@@ -56,6 +58,8 @@ SFT、Reasoning RL 和 Generation RL 共用 Finance World 作为证据底座，�
 - **Generation RL**：证据包 → 生成任务骨架 → 问题 + 参考答案。
 - **构造模型**：`Qwen3-VL-235B-A22B-Instruct` 负责 SFT/RL 样本规划、生成与答案构造。
 
+更详细的数据构造、Bad Case 飞轮、质量筛选与训练数据路由见 [`docs/data_pipeline.md`](docs/data_pipeline.md)。
+
 
 ## 🏗️ 技术路线
 
@@ -65,9 +69,9 @@ SFT、Reasoning RL 和 Generation RL 共用 Finance World 作为证据底座，�
 
 训练流程由 SFT、两路独立 RL 和 MOPD 组成：
 
-- **SFT**：建立金融文档理解、表格/图表推理和答案生成能力。
-- **Reasoning RL**：从 SFT 检查点启动，面向可程序验证的数值、表格、证据页和结构化推理任务。
-- **Generation RL**：同样从 SFT 检查点独立启动，面向开放式金融问答与分析生成；两路 RL 不传递模型权重。
+- **SFT**：建立金融文档理解、表格/图表推理、数值计算和答案生成能力。
+- **Reasoning RL**：从 SFT 检查点启动，训练数值、复合数值、单/多选、判断和证据页等可程序验证任务。
+- **Generation RL**：同样从 SFT 检查点独立启动，训练开放式金融问答与分析生成；两路 RL 不传递模型权重。
 - **MOPD**：以 SFT 检查点初始化学生模型，加载两路 RL 模型作为教师，并按样本类型路由教师信号进行 top-128 GKD，最终产出 `FINAR-VL`。
 
 ## ⚡ 快速开始
