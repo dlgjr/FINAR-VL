@@ -1,0 +1,74 @@
+{
+  "FAMMA": {
+    "group": "financial_qa",
+    "root_env": "FAMMA_ROOT",
+    "repo": "https://github.com/famma-bench/bench-script",
+    "command_env": "FAMMA_EVAL_CMD"
+  },
+  "FinChart-Bench": {
+    "group": "financial_qa",
+    "root_env": "FINCHART_ROOT",
+    "repo": "https://github.com/Tizzzzy/FinChart-Bench",
+    "command_env": "FINCHART_EVAL_CMD"
+  },
+  "FinMME": {
+    "group": "financial_qa",
+    "root_env": "FINMME_ROOT",
+    "repo": "https://github.com/luo-junyu/FinMME",
+    "command_env": "FINMME_EVAL_CMD"
+  },
+  "FinMMR": {
+    "group": "financial_qa",
+    "root_env": "FINMMR_ROOT",
+    "repo": "https://github.com/BUPT-Reasoning-Lab/FinMMR",
+    "command": "bash inference/inference.sh && bash evaluate/evaluate.sh"
+  },
+  "FinMTM": {
+    "group": "comprehensive",
+    "root_env": "FINMTM_ROOT",
+    "repo": "https://github.com/HiThink-Research/FinMTM",
+    "command_env": "FINMTM_EVAL_CMD"
+  },
+  "MME-Finance": {
+    "group": "comprehensive",
+    "root_env": "MME_FINANCE_ROOT",
+    "repo": "https://github.com/HiThink-Research/MME-Finance",
+    "command_env": "MME_FINANCE_EVAL_CMD"
+  },
+  "VisFinEval": {
+    "group": "comprehensive",
+    "root_env": "VISFINEVAL_ROOT",
+    "repo": "https://github.com/SUFE-AIFLM-Lab/VisFinEval",
+    "command": "bash scripts/run_model.sh"
+  },
+  "XFinBench": {
+    "group": "comprehensive",
+    "root_env": "XFINBENCH_ROOT",
+    "repo": "https://github.com/Zhihan72/XFinBench",
+    "command": "bash script/run_evaluate.sh"
+  },
+  "CFMME": {
+    "group": "document_reasoning",
+    "root_env": "CFMME_ROOT",
+    "repo": "",
+    "command_env": "CFMME_EVAL_CMD"
+  },
+  "FinMMDocR": {
+    "group": "document_reasoning",
+    "root_env": "FINMMDOC_R_ROOT",
+    "repo": "https://github.com/BUPT-Reasoning-Lab/FinMMDocR",
+    "command_env": "FINMMDOC_R_EVAL_CMD"
+  },
+  "FinDocMRE": {
+    "group": "document_reasoning",
+    "root_env": "FINDOCMRE_ROOT",
+    "repo": "",
+    "command_env": "FINDOCMRE_EVAL_CMD"
+  },
+  "FinEval-MM": {
+    "group": "document_reasoning",
+    "root_env": "FINEVAL_MM_ROOT",
+    "repo": "",
+    "command_env": "FINEVAL_MM_EVAL_CMD"
+  }
+}

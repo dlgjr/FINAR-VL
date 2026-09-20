@@ -5,7 +5,21 @@
 
 [中文](README.md) | [English](README.en.md)
 
-FINAR-VL is a financial multimodal large-model training project built on Qwen3-VL-4B-Instruct, covering financial and valuation calculations, table/chart reasoning, OCR/document understanding, information extraction and evidence retrieval, cross-page multimodal reasoning, financial knowledge and market-risk analysis, and structured/open-ended financial QA.
+## 🎯 Introduction
+
+**FINAR-VL** is a financial multimodal large language model built on Qwen3-VL-4B-Instruct. It targets financial and valuation calculations, table/chart reasoning, OCR/document understanding, information extraction and evidence retrieval, cross-page multimodal reasoning, financial knowledge and market-risk analysis, and structured/open-ended financial QA.
+
+The project provides an end-to-end pipeline covering financial data construction and cleaning, SFT, Reasoning RL, Generation RL, MOPD, and public-benchmark evaluation, together with the corresponding training code, data, and stage checkpoints.
+
+### Key Highlights
+
+🏦 **Financial Multimodality**: Covers tables, charts, cross-page documents, and numerical tasks in financial reports, announcements, research reports, and related materials.
+
+🧠 **Dual-branch RL**: Reasoning RL strengthens programmatically verifiable financial reasoning, while Generation RL targets open-ended financial analysis and generation.
+
+🔬 **Multi-teacher Distillation**: MOPD uses the two RL models as reasoning and generation teachers and distills them into a unified 4B student with top-128 GKD.
+
+📊 **Public Benchmarks**: FINAR-VL is evaluated on 12 public financial multimodal benchmarks: FAMMA, FinChart-Bench, FinMME, FinMMR, FinMTM, MME-Finance, VisFinEval, XFinBench, CFMME, FinMMDocR, FinDocMRE, and FinEval-MM.
 
 ## 📦 Open-source Content
 
@@ -101,6 +115,7 @@ FINAR-VL/
 ├── models/qwen30/
 ├── models/qwen32/
 ├── models/qwen235/
+├── evaluation/                     # Public benchmark evaluation launcher and registry
 ├── data/train_multi/train_multi_sft_minhash_dedup.jsonl
 ├── data/train_text/train_text_sft_minhash_dedup.jsonl
 ├── data/train_multi/train_rl_reasoning.jsonl
@@ -173,6 +188,19 @@ bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh
 
 The script uses top-128 GKD by default and saves a checkpoint with stage evaluation every 20 steps.
 
+## 🧪 Public Benchmark Evaluation
+
+FINAR-VL is evaluated on the same 12 public financial multimodal benchmarks shown in the performance figure: FAMMA, FinChart-Bench, FinMME, FinMMR, FinMTM, MME-Finance, VisFinEval, XFinBench, CFMME, FinMMDocR, FinDocMRE, and FinEval-MM.
+
+Together, these benchmarks cover financial chart understanding, financial-document QA, multimodal numerical reasoning, cross-page evidence localization, long-document understanding, and broader financial multimodal reasoning.
+
+A unified launcher follows the same organization pattern as Innovator-VL and delegates each benchmark to its official evaluator:
+
+```bash
+MODEL_NAME=FINAR-VL-4B API_BASE=http://127.0.0.1:8000/v1 API_KEY=EMPTY bash evaluation/eval_finar_vl.sh
+```
+
+See [`evaluation/README.md`](evaluation/README.md) for benchmark-specific configuration.
 ## 📁 Repository Structure
 
 ```text
