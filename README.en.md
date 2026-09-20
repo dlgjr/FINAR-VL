@@ -5,7 +5,7 @@
 
 [中文](README.md) | [English](README.en.md)
 
-FINAR-VL is a multimodal large-model training project for the financial domain, built by training `FINAR-VL` on top of Qwen3-VL-4B-Instruct. The project focuses on information extraction, evidence localization, and numerical reasoning over financial materials containing multiple tables, charts, and pages.
+FINAR-VL is a financial multimodal large-model training project built on Qwen3-VL-4B-Instruct, covering financial and valuation calculations, table/chart reasoning, OCR/document understanding, information extraction and evidence retrieval, cross-page multimodal reasoning, financial knowledge and market-risk analysis, and structured/open-ended financial QA.
 
 ## 📦 Open-source Content
 
@@ -37,13 +37,11 @@ FINAR-VL is a multimodal large-model training project for the financial domain, 
 
 🏆 **Cross-benchmark performance**: The comparison covers 12 financial multimodal benchmarks: FAMMA, FinChart-Bench, FinMME, FinMMR, FinMTM, MME-Finance, VisFinEval, XFinBench, CFMME, FinMMDocR, FinDocMRE, and FinEval-MM.
 
-⚡ **Parameter efficiency**: FINAR-VL is specialized for finance at the 4B scale, covering chart understanding, financial reports, cross-page documents, and numerical reasoning with a compact model.
+⚡ **Parameter efficiency**: The 4B model covers financial multimodal tasks involving charts, reports, cross-page documents, and numerical reasoning.
 
-📈 **Domain specialization**: The comparison includes the Qwen3-VL-4B-Instruct baseline, the stronger general-purpose Qwen3-VL-32B model, and representative InternVL, MiniCPM, Fin-R1, and FinLMM-R1 models.
+📈 **Domain specialization**: FINAR-VL is trained specifically for financial scenarios and compared with both general-purpose and finance-specialized multimodal models.
 
-🧠 **Complex financial reasoning**: The evaluation emphasizes chart understanding, multimodal numerical calculation, cross-page evidence localization, long-document understanding, and financial analytical reasoning.
-
-> The FINAR-VL scores in the current figure are provisional values for layout and target visualization; they will be replaced by complete measured results for the formal release.
+🧠 **Complex financial reasoning**: Evaluation emphasizes chart understanding, multimodal numerical calculation, cross-page evidence localization, long-document understanding, and financial analytical reasoning.
 
 ## 🧩 Data Construction
 
@@ -65,9 +63,12 @@ SFT, Reasoning RL, and Generation RL share Finance World as the common evidence 
   <img src="assets/finar_vl_training_pipeline.svg" alt="FINAR-VL Training Pipeline" width="100%">
 </p>
 
-Reasoning RL and Generation RL are two independent training stages initialized from the same SFT checkpoint. Reasoning RL strengthens programmatically verifiable financial reasoning, while Generation RL strengthens open-ended financial question answering and analytical generation. No model weights are passed between the two RL branches.
+The pipeline consists of SFT, two independent RL branches, and MOPD:
 
-MOPD initializes the student model from the SFT checkpoint and loads the outputs of Reasoning RL and Generation RL as two teacher models. The teachers provide token-level supervision for reasoning and generation data respectively. The current training script uses top-128 GKD: each sample is routed only to its corresponding teacher, and the teacher returns the top-128 token distribution for distillation. The model produced by MOPD is named `FINAR-VL`.
+- **SFT**: builds financial document understanding, table/chart reasoning, numerical calculation, and answer-generation capabilities.
+- **Reasoning RL**: starts from the SFT checkpoint and trains programmatically verifiable numeric, composite-numeric, single/multiple-choice, true/false, and evidence-page tasks.
+- **Generation RL**: independently starts from the same SFT checkpoint and trains open-ended financial QA and analytical generation; no model weights are passed between the two RL branches.
+- **MOPD**: initializes the student from the SFT checkpoint, loads the two RL models as teachers, routes each sample to its corresponding teacher, and performs top-128 GKD to produce `FINAR-VL`.
 
 ## ⚡ Quick Start
 
@@ -159,7 +160,7 @@ bash scripts/dlc/start_gspo_generation.sh
 
 ### 7. Run MOPD
 
-The current MOPD launcher is designed for a single machine with four GPUs. By default, GPUs 0 and 1 train the student model, GPU 2 serves the Reasoning teacher, and GPU 3 serves the Generation teacher. Evaluation samples that require a model judge also reuse the Generation teacher.
+The current MOPD launcher is designed for a single machine with four GPUs: GPUs 0 and 1 train the student model, while GPUs 2 and 3 serve the Reasoning and Generation teachers.
 
 ```bash
 MOPD_STUDENT_MODEL=/path/to/sft_checkpoint \
@@ -170,51 +171,7 @@ MOPD_GENERATION_DATA=/path/to/generation_train_gspo.jsonl \
 bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh
 ```
 
-The script uses top-128 GKD by default. Image paths follow the same resolution logic used during RL data preparation. Training saves a checkpoint and runs stage evaluation every 20 steps. Qwen3-VL student forward passes enable `use_logits_to_keep` by default so only logits required for the distillation loss are retained, avoiding excessive memory peaks at the LM head for long sequences.
-
-
-## 🚀 Training Stages
-
-### 1. SFT
-
-SFT jointly uses financial text and multimodal data to establish financial document understanding, table calculation, chart reasoning, and answer generation capabilities.
-
-The training pipeline includes:
-
-- deterministic sampling plans based on task type, modality, and actual token length;
-- minimum sampling quotas for OCR, chart, and cross-modal reasoning tasks;
-- online distillation from the base model for generation samples to reduce degradation of general generation capability;
-- Pass@1 and Pass@8 evaluation during training;
-- W&B logging, checkpoint saving, and evaluation-result recording.
-
-### 2. Reasoning RL
-
-Reasoning RL targets financial reasoning tasks with explicit reference answers and uses programmatically verifiable rewards.
-
-Its primary tasks include:
-
-- multi-step numerical reasoning;
-- single-table and multi-table calculations;
-- evidence-page retrieval from financial reports;
-- chart-based numerical reasoning;
-- single-choice, multiple-choice, and true-or-false tasks.
-
-This stage uses GSPO. Rewards are computed by numerical, unit, option, page-number, and structured-answer verifiers and do not depend on a model judge by default.
-
-### 3. Generation RL
-
-Generation RL targets open-ended financial question answering and analytical generation. It is initialized independently from the same SFT checkpoint as Reasoning RL.
-
-This stage uses hybrid rewards:
-
-- rule-based rewards for structured tasks such as selection and true-or-false questions;
-- a multimodal model judge for open-ended financial analysis and generation tasks;
-- continuous recording of rewards, abnormal outputs, and completion status for each rank.
-
-### 4. MOPD
-
-MOPD initializes the student model from the SFT checkpoint, uses the outputs of Reasoning RL and Generation RL as the reasoning and generation teachers, and performs knowledge distillation with top-128 GKD.
-
+The script uses top-128 GKD by default and saves a checkpoint with stage evaluation every 20 steps.
 
 ## 📁 Repository Structure
 

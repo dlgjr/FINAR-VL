@@ -5,7 +5,7 @@
 
 [中文](README.md) | [English](README.en.md)
 
-FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Qwen3-VL-4B-Instruct 训练 `FINAR-VL`。项目重点处理多表、多图、跨页金融材料中的信息提取、证据定位与数值计算问题。
+FINAR-VL 是一个基于 Qwen3-VL-4B-Instruct 的金融多模态大模型训练项目，面向财务与估值计算、表格/图表推理、OCR/文档理解、信息抽取与证据检索、跨页多模态推理、金融知识与市场风险分析，以及结构化与开放式金融问答。
 
 ## 📦 开源内容
 
@@ -38,13 +38,11 @@ FINAR-VL 是一个面向金融领域的多模态大模型训练项目，基于 Q
 
 🏆 **跨基准表现**：覆盖 FAMMA、FinChart-Bench、FinMME、FinMMR、FinMTM、MME-Finance、VisFinEval、XFinBench、CFMME、FinMMDocR、FinDocMRE 和 FinEval-MM 共 12 项金融多模态基准。
 
-⚡ **参数效率**：FINAR-VL 以 4B 参数规模面向金融领域进行专项优化，用更小的模型规模覆盖图表、财报、跨页文档与数值推理任务。
+⚡ **参数效率**：以 4B 参数规模覆盖图表、财报、跨页文档与数值推理等金融多模态任务。
 
-📈 **领域特化**：对比同时保留 Qwen3-VL-4B-Instruct 基线、Qwen3-VL-32B 强通用模型，以及 InternVL、MiniCPM、Fin-R1、FinLMM-R1 等代表性模型。
+📈 **领域特化**：面向金融场景专项训练，并与通用及金融专项多模态模型进行对比。
 
-🧠 **复杂金融推理**：重点评估图表理解、多模态数值计算、跨页证据定位、长文档理解和金融分析推理能力。
-
-> 当前图中 FINAR-VL 分数为用于版式与目标展示的暂定值；正式发布时将以完整实测结果替换。
+🧠 **复杂金融推理**：重点评估图表理解、多模态数值计算、跨页证据定位、长文档理解和金融分析推理。
 
 ## 🧩 数据构造
 
@@ -60,6 +58,8 @@ SFT、Reasoning RL 和 Generation RL 共用 Finance World 作为证据底座，�
 - **Generation RL**：证据包 → 生成任务骨架 → 问题 + 参考答案。
 - **构造模型**：`Qwen3-VL-235B-A22B-Instruct` 负责 SFT/RL 样本规划、生成与答案构造。
 
+更详细的数据构造、Bad Case 飞轮、质量筛选与训练数据路由见 [`docs/data_pipeline.md`](docs/data_pipeline.md)。
+
 
 ## 🏗️ 技术路线
 
@@ -67,9 +67,12 @@ SFT、Reasoning RL 和 Generation RL 共用 Finance World 作为证据底座，�
   <img src="assets/finar_vl_training_pipeline.svg" alt="FINAR-VL Training Pipeline" width="100%">
 </p>
 
-Reasoning RL 和 Generation RL 是两个独立训练阶段，均从同一个 SFT 检查点启动。Reasoning RL 强化可程序验证的金融推理能力；Generation RL 强化开放式金融问答和分析生成能力。两路 RL 之间不传递模型权重。
+训练流程由 SFT、两路独立 RL 和 MOPD 组成：
 
-MOPD 以 SFT 检查点初始化学生模型，同时加载 Reasoning RL 和 Generation RL 的产出作为两个教师模型，根据 reasoning 和 generation 数据分别提供 token级教师信号。当前训练脚本使用 top-128 GKD：每个样本只路由到对应教师，由教师返回 top-128 token 分布进行蒸馏。MOPD 的产出模型命名为 `FINAR-VL`。
+- **SFT**：建立金融文档理解、表格/图表推理、数值计算和答案生成能力。
+- **Reasoning RL**：从 SFT 检查点启动，训练数值、复合数值、单/多选、判断和证据页等可程序验证任务。
+- **Generation RL**：同样从 SFT 检查点独立启动，训练开放式金融问答与分析生成；两路 RL 不传递模型权重。
+- **MOPD**：以 SFT 检查点初始化学生模型，加载两路 RL 模型作为教师，并按样本类型路由教师信号进行 top-128 GKD，最终产出 `FINAR-VL`。
 
 ## ⚡ 快速开始
 
@@ -161,7 +164,7 @@ bash scripts/dlc/start_gspo_generation.sh
 
 ### 7. 运行 MOPD
 
-当前 MOPD 启动脚本按单机 4 卡设计。默认使用 GPU 0、1 训练学生模型，GPU 2 运行 Reasoning teacher，GPU 3 运行 Generation teacher；需要模型裁判的评估样本也复用 Generation teacher。
+当前 MOPD 启动脚本按单机 4 卡设计：GPU 0、1 训练学生模型，GPU 2、3 分别运行 Reasoning 和 Generation teacher。
 
 ```bash
 MOPD_STUDENT_MODEL=/path/to/sft_checkpoint \
@@ -172,52 +175,7 @@ MOPD_GENERATION_DATA=/path/to/generation_train_gspo.jsonl \
 bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh
 ```
 
-脚本默认使用 top-128 GKD，图片路径沿用 RL 数据准备阶段的解析逻辑。训练每 20 step 保存一次 checkpoint 并执行阶段评估。Qwen3-VL 的学生前向默认开启 `use_logits_to_keep`，只保留需要计算蒸馏损失的 logits，避免长序列在 LM head 处产生过大的显存峰值。
-
-
-
-## 🚀 训练阶段
-
-### 1. SFT
-
-SFT 阶段联合使用金融文本和多模态数据，建立金融文档理解、表格计算、图表推理和答案生成能力。
-
-训练链路包含：
-
-- 按任务类型、模态和实际 token长度生成确定性采样计划；
-- 对 OCR、图表、跨模态推理等任务设置最低采样配额；
-- 对生成类样本使用基础模型在线蒸馏，降低通用生成能力退化；
-- 在训练过程中执行 Pass@1 和 Pass@8 评估；
-- 记录 W&B日志、模型权重和评估结果。
-
-### 2. Reasoning RL
-
-Reasoning RL 路线面向具有明确标准答案的金融推理任务，使用程序化可验证奖励训练模型。
-
-主要任务包括：
-
-- 多步数值推理；
-- 多表和单表计算；
-- 财报证据页检索；
-- 图表数值推理；
-- 单选、多选和判断任务。
-
-该阶段采用 GSPO，奖励由数值、单位、选项、页码及结构化答案校验器计算，默认不依赖模型裁判。
-
-### 3. Generation RL
-
-Generation RL 路线面向开放式金融问答和分析生成任务，与 Reasoning RL 分别从同一个 SFT 检查点启动。
-
-该阶段使用混合奖励：
-
-- 对选择题、判断题等结构化任务使用规则奖励；
-- 对开放式金融分析和生成任务使用多模态模型裁判；
-- 对奖励结果、异常输出和各 rank的完成状态进行持续记录。
-
-### 4. MOPD
-
-MOPD 阶段以 SFT 检查点初始化学生模型，同时使用 Reasoning RL 和 Generation RL 的产出作为推理教师与生成教师，并采用 top-128 GKD 进行知识蒸馏。
-
+脚本默认使用 top-128 GKD，并每 20 step 保存 checkpoint 和执行阶段评估。
 
 ## 📁 目录结构
 
