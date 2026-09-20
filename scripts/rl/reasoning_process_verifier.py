@@ -112,7 +112,7 @@ def _eval_arithmetic(expression: str) -> Decimal | None:
         return None
 
 
-def _rhs_numeric(rhs: str) -> tuple[Decimal, Decimal] | None:
+def _rhs_numeric(rhs: str) -> list[tuple[Decimal, Decimal]] | None:
     text = unicodedata.normalize("NFKC", rhs).strip()
     if _OPERATOR_RE.search(text.lstrip("+-")):
         return None
@@ -130,10 +130,19 @@ def _rhs_numeric(rhs: str) -> tuple[Decimal, Decimal] | None:
     mantissa = re.split(r"[eE]", raw, maxsplit=1)[0]
     decimals = len(mantissa.split(".", 1)[1]) if "." in mantissa else 0
     quantum = Decimal(1).scaleb(-decimals)
-    if percent:
-        value /= Decimal(100)
-        quantum /= Decimal(100)
-    return value, quantum / Decimal(2) + Decimal("1e-12")
+    display = (value, quantum / Decimal(2) + Decimal("1e-12"))
+    if not percent:
+        return [display]
+
+    # Financial CoTs use both conventions:
+    #   (120-100)/100 = 20%        -> ratio 0.2
+    #   (120-100)/100*100 = 20%    -> display value 20
+    # Accept either representation to avoid false vetoes.
+    base = (
+        value / Decimal(100),
+        quantum / Decimal(200) + Decimal("1e-12"),
+    )
+    return [display, base]
 
 
 def _arithmetic_checks(text: str) -> list[dict[str, Any]]:
@@ -147,11 +156,10 @@ def _arithmetic_checks(text: str) -> list[dict[str, Any]]:
             lhs = parts[index].strip()
             rhs = parts[index + 1].strip()
             computed = _eval_arithmetic(lhs)
-            target = _rhs_numeric(rhs)
-            if computed is None or target is None:
+            targets = _rhs_numeric(rhs)
+            if computed is None or targets is None:
                 continue
-            expected, tolerance = target
-            delta = abs(computed - expected)
+            ok = any(abs(computed - expected) <= tolerance for expected, tolerance in targets)
             checks.append(
                 {
                     "kind": "arithmetic",
@@ -159,9 +167,9 @@ def _arithmetic_checks(text: str) -> list[dict[str, Any]]:
                     "lhs": lhs,
                     "rhs": rhs,
                     "computed": str(computed),
-                    "expected": str(expected),
-                    "tolerance": str(tolerance),
-                    "ok": bool(delta <= tolerance),
+                    "expected_candidates": [str(expected) for expected, _ in targets],
+                    "tolerances": [str(tolerance) for _, tolerance in targets],
+                    "ok": bool(ok),
                 }
             )
     return checks
@@ -268,7 +276,7 @@ def _unit_compatible(candidate_unit: str, fact_unit: str) -> bool:
     if not candidate_unit or not fact_unit:
         return True
     aliases = {
-        "%": {"%", "百分点"},
+        "%": {"%"},
         "百分点": {"百分点"},
     }
     return candidate_unit in aliases.get(fact_unit, {fact_unit})
@@ -447,6 +455,10 @@ def _self_test() -> None:
         "2023营业收入=100亿元\n2024营业收入=120亿元\n(120-100)/100=20%\n答案：20%",
         record,
     )
+    good_scaled = verify_reasoning_process(
+        "2023营业收入=100亿元\n2024营业收入=120亿元\n(120-100)/100*100=20%\n答案：20%",
+        record,
+    )
     bad_math = verify_reasoning_process(
         "2023营业收入=100亿元\n2024营业收入=120亿元\n(120-100)/100=25%\n答案：20%",
         record,
@@ -458,10 +470,11 @@ def _self_test() -> None:
     unknown = verify_reasoning_process("经过计算可得答案。\n答案：20%", record)
 
     assert good["status"] == "pass", good
+    assert good_scaled["status"] == "pass", good_scaled
     assert bad_math["status"] == "fail", bad_math
     assert bad_visual["status"] == "fail", bad_visual
     assert unknown["status"] == "unknown", unknown
-    print(json.dumps({"good": good, "bad_math": bad_math, "bad_visual": bad_visual, "unknown": unknown}, ensure_ascii=False))
+    print(json.dumps({"good": good, "good_scaled": good_scaled, "bad_math": bad_math, "bad_visual": bad_visual, "unknown": unknown}, ensure_ascii=False))
 
 
 def main() -> None:
