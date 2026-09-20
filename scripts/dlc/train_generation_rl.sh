@@ -8,6 +8,7 @@ GENERATION_START_MODEL="${GENERATION_START_MODEL:-/mnt/nas/bihaoran/qwen3vl/outp
 
 export QWEN3VL_ROOT="$ROOT"
 export GSPO_ROUTE_MODE=generation
+export ROOT_IMAGE_DIR="${ROOT_IMAGE_DIR:-$(dirname "$GENERATION_RL_DATA")}"
 export GSPO_JUDGE_MAX_TOKENS="${GSPO_JUDGE_MAX_TOKENS:-1024}"
 source "$ROOT/scripts/dlc/gspo_env.sh"
 mkdir -p "$GENERATION_RL_OUTPUT_DIR"
@@ -49,7 +50,6 @@ python "$ROOT/scripts/rl/ensure_unique_sample_ids.py" "$GENERATION_RUBRIC_DATA" 
 
 export GSPO_MODEL="$GENERATION_START_MODEL"
 export GSPO_LEARNING_RATE="${GSPO_LEARNING_RATE:-2e-6}"
-export ROOT_IMAGE_DIR="${ROOT_IMAGE_DIR:-$(dirname "$GENERATION_RL_DATA")}" 
 export GSPO_SOURCE_DATA="$UNIQUE_GSPO_SOURCE"
 export GSPO_OUTPUT_DIR="$GENERATION_RL_OUTPUT_DIR"
 
