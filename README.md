@@ -9,7 +9,7 @@
 
 **FINAR-VL** 是一个基于 Qwen3-VL-4B-Instruct 构建的金融多模态大模型，面向财务与估值计算、表格/图表推理、OCR/文档理解、信息抽取与证据检索、跨页多模态推理、金融知识与市场风险分析，以及结构化与开放式金融问答。
 
-项目提供从金融数据构造与清洗、监督微调（SFT）、Reasoning RL、Generation RL、多教师在策略蒸馏（MOPD）到评估的端到端训练流程，并开放对应的训练代码、数据与阶段模型。
+项目提供从金融数据构造与清洗、SFT、Reasoning RL、Generation RL、MOPD 到公开基准评估的端到端流程，并开放对应的训练代码、数据与阶段模型。
 
 ### 核心特点
 
@@ -19,7 +19,7 @@
 
 🔬 **多教师蒸馏**：MOPD 将两路 RL 模型作为推理与生成教师，通过 top-128 GKD 蒸馏回统一的 4B 学生模型。
 
-📊 **统一评估**：训练阶段统一跟踪 Pass@1 / Pass@8，并按任务使用规则验证或模型裁判，记录整体与分任务指标。
+📊 **Public Benchmarks**：在 FAMMA、FinChart-Bench、FinMME、FinMMR、FinMTM、MME-Finance、VisFinEval、XFinBench、CFMME、FinMMDocR、FinDocMRE 和 FinEval-MM 共 12 个公开金融多模态 benchmark 上进行评估。
 
 ## 📦 开源内容
 
@@ -191,13 +191,11 @@ bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh
 
 脚本默认使用 top-128 GKD，并每 20 step 保存 checkpoint 和执行阶段评估。
 
-## 🧪 评估
+## 🧪 公开 Benchmark 评估
 
-FINAR-VL 使用统一的多模态评估组件跟踪 SFT、RL 和 MOPD 各阶段的模型能力。核心指标为 **Pass@1** 和 **Pass@8**，并同时记录分任务结果与评估覆盖率。
+FINAR-VL 在性能图所示的 12 个公开金融多模态 benchmark 上进行统一评估：FAMMA、FinChart-Bench、FinMME、FinMMR、FinMTM、MME-Finance、VisFinEval、XFinBench、CFMME、FinMMDocR、FinDocMRE 和 FinEval-MM。
 
-结构化和可验证任务优先使用程序化判分，包括数值与单位、单选/多选、判断、页码检索、OCR 和结构化抽取；无法可靠规则判分的开放式答案使用模型裁判。Reasoning RL 额外使用固定 50 条评估集和 3 个固定随机种子汇总 Pass@1 / Pass@8，以减少采样波动；评估结果同步记录到 W&B。
-
-实现细节见 [`docs/data_pipeline.md`](docs/data_pipeline.md#8-评估框架)。
+这些 benchmark 覆盖金融图表理解、财务文档问答、多模态数值推理、跨页证据定位、长文档理解以及综合金融多模态推理，用于衡量模型在不同金融场景下的泛化能力。
 ## 📁 目录结构
 
 ```text
