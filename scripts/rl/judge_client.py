@@ -54,15 +54,13 @@ def _multimodal_content(rubric: str, question: str, candidate: str, images: list
 
 def _generation_rubric_instruction(rubric: Mapping[str, Any]) -> str:
     return (
-        "你是严格的金融 Generation RL 裁判。下面的 sample-specific rubric 已在看到候选答案之前固定，"
-        "其中 required facts 来自上游金融证据图硬约束。你只能按该 rubric 评分，不能新增、删除或改写评分标准。\n"
-        "对每个 criterion 给 0、0.5 或 1：0=未满足或错误，0.5=部分满足且没有反向结论，1=完整满足。"
-        "fact criterion 遗漏应给0；明确篡改/否定 required fact 时同时标记对应 critical error。"
-        "critical_error_ids 只能从 rubric 给出的 critical_errors.id 中选择。措辞不同但语义等价不扣分。"
-        "不要根据文风、篇幅或与 rubric 无关的信息加减分。\n"
-        "严格只返回 JSON："
-        '{"criterion_scores":[{"id":"F1","score":1.0}],"critical_error_ids":[]}\n'
-        "固定 rubric：\n" + json.dumps(rubric, ensure_ascii=False, indent=2)
+        "你是严格的金融 Generation RL 裁判。下面 10 个评分点已在看到候选答案之前根据 required facts 固定。"
+        "你只能逐点判定，不能新增、删除、合并、改写评分点，也不能引入外部事实。\n"
+        "每个 point 只能给 0 或 1：完整满足该 point 才给1；遗漏、事实错误、关系错误、结论不成立或与支撑事实冲突均给0。"
+        "不允许0.5或其他中间分。措辞不同但语义等价可以给1。不要因为文风、长度或格式额外加减分。\n"
+        "必须恰好返回 P1-P10 各一次。严格只返回 JSON："
+        '{"point_scores":[{"id":"P1","score":1},{"id":"P2","score":0}]}\n'
+        "固定10点 rubric：\n" + json.dumps(rubric, ensure_ascii=False, indent=2)
     )
 
 
@@ -82,43 +80,40 @@ def _default_instruction() -> str:
 
 
 def _score_generation_rubric(result: str, rubric: Mapping[str, Any]) -> str:
+    points = rubric.get("points")
+    if not isinstance(points, list) or len(points) != 10:
+        raise ValueError("generation rubric must contain exactly 10 points")
+    expected_ids = [str(item.get("id") or "") for item in points]
+    if expected_ids != [f"P{index}" for index in range(1, 11)]:
+        raise ValueError("generation rubric point ids must be P1-P10")
+
     payload = json.loads(result)
-    if not isinstance(payload, Mapping) or not isinstance(payload.get("criterion_scores"), list):
-        raise ValueError("invalid rubric judge schema")
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("point_scores"), list):
+        raise ValueError("invalid binary10 judge schema")
 
-    criteria = [*(rubric.get("fact_criteria") or []), *(rubric.get("analysis_criteria") or [])]
-    weights = {str(item["id"]): float(item["weight"]) for item in criteria}
-    score_rows = payload["criterion_scores"]
-    scores: dict[str, float] = {}
-    for item in score_rows:
-        criterion_id = str(item.get("id") or "")
+    scores: dict[str, int] = {}
+    for item in payload["point_scores"]:
+        if not isinstance(item, Mapping):
+            raise ValueError("invalid point score item")
+        point_id = str(item.get("id") or "")
         score = item.get("score")
-        if criterion_id in scores or criterion_id not in weights or isinstance(score, bool) or not isinstance(score, (int, float)):
-            raise ValueError("invalid rubric criterion score")
-        score = float(score)
-        if score not in {0.0, 0.5, 1.0}:
-            raise ValueError("rubric criterion score must be 0, 0.5, or 1")
-        scores[criterion_id] = score
-    if set(scores) != set(weights):
-        raise ValueError("rubric judge must score every criterion exactly once")
+        if point_id in scores or point_id not in expected_ids:
+            raise ValueError("unknown or duplicate point id")
+        if isinstance(score, bool) or not isinstance(score, (int, float)) or float(score) not in {0.0, 1.0}:
+            raise ValueError("each Generation reward point must be binary 0/1")
+        scores[point_id] = int(score)
 
-    error_ids = payload.get("critical_error_ids") or []
-    if not isinstance(error_ids, list):
-        raise ValueError("invalid critical_error_ids")
-    error_ids = list(dict.fromkeys(map(str, error_ids)))
-    error_caps = {str(item["id"]): float(item["score_cap"]) for item in rubric.get("critical_errors") or []}
-    if any(error_id not in error_caps for error_id in error_ids):
-        raise ValueError("unknown critical error id")
+    if set(scores) != set(expected_ids):
+        raise ValueError("judge must score all P1-P10 exactly once")
 
-    denominator = sum(weights.values())
-    base_score = sum(weights[criterion_id] * score for criterion_id, score in scores.items()) / denominator
-    final_score = min([base_score, *(error_caps[error_id] for error_id in error_ids)]) if error_ids else base_score
+    total = sum(scores[point_id] for point_id in expected_ids)
+    reward = total / 10.0
     return json.dumps(
         {
-            "score": round(final_score, 6),
-            "base_score": round(base_score, 6),
-            "criterion_scores": [{"id": criterion_id, "score": scores[criterion_id]} for criterion_id in weights],
-            "critical_error_ids": error_ids,
+            "score": reward,
+            "points_earned": total,
+            "points_total": 10,
+            "point_scores": [{"id": point_id, "score": scores[point_id]} for point_id in expected_ids],
         },
         ensure_ascii=False,
     )
