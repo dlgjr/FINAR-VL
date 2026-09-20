@@ -5,7 +5,21 @@
 
 [中文](README.md) | [English](README.en.md)
 
-FINAR-VL is a financial multimodal large-model training project built on Qwen3-VL-4B-Instruct, covering financial and valuation calculations, table/chart reasoning, OCR/document understanding, information extraction and evidence retrieval, cross-page multimodal reasoning, financial knowledge and market-risk analysis, and structured/open-ended financial QA.
+## 🎯 Introduction
+
+**FINAR-VL** is a financial multimodal large language model built on Qwen3-VL-4B-Instruct. It targets financial and valuation calculations, table/chart reasoning, OCR/document understanding, information extraction and evidence retrieval, cross-page multimodal reasoning, financial knowledge and market-risk analysis, and structured/open-ended financial QA.
+
+The project provides an end-to-end training pipeline covering financial data construction and cleaning, supervised fine-tuning (SFT), Reasoning RL, Generation RL, multi-teacher on-policy distillation (MOPD), and evaluation, together with the corresponding training code, data, and stage checkpoints.
+
+### Key Highlights
+
+🏦 **Financial Multimodality**: Covers tables, charts, cross-page documents, and numerical tasks in financial reports, announcements, research reports, and related materials.
+
+🧠 **Dual-branch RL**: Reasoning RL strengthens programmatically verifiable financial reasoning, while Generation RL targets open-ended financial analysis and generation.
+
+🔬 **Multi-teacher Distillation**: MOPD uses the two RL models as reasoning and generation teachers and distills them into a unified 4B student with top-128 GKD.
+
+📊 **Unified Evaluation**: Training stages track Pass@1 / Pass@8 with task-aware programmatic verification or model judging, reporting both overall and per-task metrics.
 
 ## 📦 Open-source Content
 
@@ -173,6 +187,13 @@ bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh
 
 The script uses top-128 GKD by default and saves a checkpoint with stage evaluation every 20 steps.
 
+## 🧪 Evaluation
+
+FINAR-VL uses a shared multimodal evaluation component across SFT, RL, and MOPD. The primary metrics are **Pass@1** and **Pass@8**, with per-task results and evaluation coverage reported alongside the aggregate scores.
+
+Structured and verifiable tasks use programmatic judging whenever possible, including numerical/unit answers, single- and multiple-choice questions, true/false tasks, page retrieval, OCR, and structured extraction. Open-ended answers that cannot be reliably checked by rules fall back to a model judge. Reasoning RL additionally evaluates a fixed 50-example set with three fixed random seeds and aggregates Pass@1 / Pass@8 to reduce sampling variance; evaluation metrics are logged to W&B.
+
+Implementation details are documented in [`docs/data_pipeline.md`](docs/data_pipeline.md#8-评估框架).
 ## 📁 Repository Structure
 
 ```text
