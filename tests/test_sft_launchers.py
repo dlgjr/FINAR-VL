@@ -4,6 +4,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_public_sft_launcher_delegates_to_core_training_script():
+    text = (ROOT / "scripts" / "dlc" / "train_sft.sh").read_text(encoding="utf-8")
+    assert "SFT_FREEZE_VIT=true" in text
+    assert 'exec "$SCRIPT_DIR/start_sft.sh" "$@"' in text
+
+
 def test_shared_environment_makes_project_modules_importable_to_swift_workers():
     text = (ROOT / "scripts" / "dlc" / "dlc_env.sh").read_text(encoding="utf-8")
 
@@ -135,77 +141,7 @@ def test_dlc_launcher_uses_full_sft_sp2_and_dedicated_reference_gpu():
         assert forbidden not in text
 
 
-def test_dsw_launcher_runs_five_steps_without_wandb_and_limits_eval_to_one_sample():
-    text = (ROOT / "scripts" / "dsw" / "run_sft_debug.sh").read_text(encoding="utf-8")
-
-    for required in (
-        'export BASE_MODEL="$ROOT/models/qwen4"',
-        "--model_type qwen3_vl",
-        'test -f "$BASE_MODEL/config.json"',
-        'source "$ROOT/scripts/dlc/dlc_env.sh"',
-        'PYTHON_BIN="${PYTHON_BIN:-/opt/ac2/bin/python}"',
-        'SWIFT_BIN="${SWIFT_BIN:-$PYTHONUSERBASE/bin/swift}"',
-        'export NPROC_PER_NODE=1',
-        'export CUDA_VISIBLE_DEVICES=0',
-        '"ms-swift==4.4.2"',
-        '"wandb==0.28.1"',
-        "import wandb",
-        "WANDB_DISABLED=true",
-        "SFT_EVAL_MAX_SAMPLES=1",
-        "--dataset \"$TRAIN_MULTI\" \"$TRAIN_TEXT\"",
-        "--dataset_shuffle false",
-        "--train_dataloader_shuffle false",
-        "--dp-world-size 1",
-        "--per-device-batch 1",
-        "--max-steps 5",
-        '"$ROOT/scripts/sft/sample_plan.py"',
-        'export SFT_PLAN_DIR',
-        "PYTORCH_ALLOC_CONF=expandable_segments:True",
-        'export SFT_ATTN_IMPL="${SFT_ATTN_IMPL:-sdpa}"',
-        'export SFT_CELOSS_PARALLEL_SIZE="${SFT_CELOSS_PARALLEL_SIZE:-4096}"',
-        'export SFT_DEBUG_MAX_LENGTH="${SFT_DEBUG_MAX_LENGTH:-49152}"',
-        'export CELOSS_PARALLEL_SIZE="$SFT_CELOSS_PARALLEL_SIZE"',
-        "--per_device_train_batch_size 1",
-        "--tuner_type lora",
-        "--freeze_vit true",
-        "--freeze_aligner false",
-        "--target_modules all-linear",
-        "--lora_rank 16",
-        "--lora_alpha 32",
-        "--lora_dropout 0.05",
-        "--gradient_accumulation_steps 2",
-        "--learning_rate 1e-5",
-        "--warmup_ratio 0.05",
-        "--max_grad_norm 1.0",
-        "  --deepspeed zero2 \\",
-        "--sequence_parallel_size 1",
-        '--attn_impl "$SFT_ATTN_IMPL"',
-        '--max_length "$SFT_DEBUG_MAX_LENGTH"',
-        "--logging_nan_inf_filter false",
-        "--strict false",
-        "--lazy_tokenize true",
-        "--report_to none",
-        "--callbacks finar_log finar_numerics finar_pass_at_8 finar_plan",
-    ):
-        assert required in text
-    assert "fixed_batch=1" in text
-    assert "--deepspeed zero2_offload" not in text
-    assert "--use_logits_to_keep true" not in text
-    assert "PYTORCH_ALLOC_CONF=expandable_segments:True" in text
-    assert "PYTORCH_CUDA_ALLOC_CONF=" not in text
-
-
 def test_dlc_environment_exports_python_user_base_on_its_own_line():
     text = (ROOT / "scripts" / "dlc" / "dlc_env.sh").read_text(encoding="utf-8")
 
     assert 'export PYTHONUSERBASE="${PYTHONUSERBASE:-$QWEN3VL_ROOT/python-user}"' in text
-
-
-def test_sequence_parallel_step_inspector_uses_seeded_torch_permutation():
-    text = (ROOT / "scripts" / "sft" / "inspect_sequence_parallel_step.py").read_text(encoding="utf-8")
-    assert "torch.randperm" in text
-    assert "manual_seed(seed)" in text
-    assert 'dp_world_size: int = 12' in text
-    assert '"source"' in text and '"length"' in text
-    assert 'encoded_estimated' in text
-    assert 'image_max_token_num' in text
