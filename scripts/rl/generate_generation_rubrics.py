@@ -221,6 +221,9 @@ def build_row(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     index, row = indexed_row
+    verifier_type = str(row.get("verifier_type") or row.get("reward_subtype") or "")
+    if str(row.get("reward_type") or "") != "judge" and verifier_type != "model_judge":
+        return dict(row)
     metadata = row.get("metadata") or {}
     required_ids = [str(value) for value in metadata.get("required_evidence_ids") or []]
     if not required_ids:
