@@ -143,7 +143,7 @@ export MASTER_PORT=29500
 
 ```bash
 export JUDGE_MODEL=$QWEN3VL_ROOT/models/qwen30
-bash scripts/dlc/start_sft_stage1.sh
+bash scripts/dlc/train_sft.sh
 ```
 
 训练结果默认写入 `output/sft/`。从该目录选择需要进入 RL 的 SFT 检查点。
@@ -158,7 +158,7 @@ GSPO_MASTER_PORT=29510 \
 REASONING_START_MODEL=/path/to/sft_checkpoint \
 REASONING_RL_DATA=$QWEN3VL_ROOT/data/train_multi/train_rl_reasoning.jsonl \
 REASONING_RL_OUTPUT_DIR=$QWEN3VL_ROOT/output/gspo_reasoning \
-bash scripts/dlc/start_gspo_reasoning.sh
+bash scripts/dlc/train_reasoning_rl.sh
 ```
 
 ### 6. 运行 Generation RL
@@ -174,7 +174,7 @@ GSPO_JUDGE_MODEL=$QWEN3VL_ROOT/models/qwen235 \
 GENERATION_START_MODEL=/path/to/sft_checkpoint \
 GENERATION_RL_DATA=$QWEN3VL_ROOT/data/train_multi/train_rl_generation.jsonl \
 GENERATION_RL_OUTPUT_DIR=$QWEN3VL_ROOT/output/gspo_generation \
-bash scripts/dlc/start_gspo_generation.sh
+bash scripts/dlc/train_generation_rl.sh
 ```
 
 ### 7. 运行 MOPD
@@ -187,7 +187,7 @@ MOPD_REASONING_TEACHER=/path/to/reasoning_rl_checkpoint \
 MOPD_GENERATION_TEACHER=/path/to/generation_rl_checkpoint \
 MOPD_REASONING_DATA=/path/to/reasoning_train_gspo.jsonl \
 MOPD_GENERATION_DATA=/path/to/generation_train_gspo.jsonl \
-bash scripts/mopd/run_mopd_dual_expert_4gpu_top128.sh
+bash scripts/mopd/train_mopd.sh
 ```
 
 脚本默认使用 top-128 GKD，并每 20 step 保存 checkpoint 和执行阶段评估。
@@ -201,7 +201,7 @@ FINAR-VL 在性能图所示的 12 个公开金融多模态 benchmark 上进行�
 统一评估入口参考 Innovator-VL 的组织方式，通过单一脚本调度各 benchmark 的官方 evaluator：
 
 ```bash
-MODEL_NAME=FINAR-VL-4B API_BASE=http://127.0.0.1:8000/v1 API_KEY=EMPTY bash evaluation/eval_finar_vl.sh
+MODEL_NAME=FINAR-VL-4B API_BASE=http://127.0.0.1:8000/v1 API_KEY=EMPTY bash evaluation/evaluate.sh
 ```
 
 具体 benchmark 配置见 [`evaluation/README.md`](evaluation/README.md)。
@@ -224,8 +224,8 @@ FINAR-VL/
 │   ├── data/                      # 数据构建、清洗和格式转换
 │   ├── sft/                       # SFT 采样、蒸馏和评估组件
 │   ├── rl/                        # RL 数据、奖励、调度和审计组件
-│   ├── dlc/                       # 正式训练启动脚本
-│   └── mopd/                      # MOPD 训练脚本
+│   ├── dlc/                       # SFT / RL 训练入口与运行时插件
+│   └── mopd/                      # MOPD 训练入口
 ├── tests/                         # 单元测试
 └── output/                        # 训练日志、权重和评估结果
 ```
