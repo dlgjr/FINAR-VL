@@ -6,7 +6,7 @@ import argparse
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .gspo_reward import _structured_numeric
 from .prepare_gspo_data import _FORMAT_TO_VERIFIER, validate_program_metadata
