@@ -107,11 +107,11 @@ def test_gspo_launcher_derives_expected_count_from_filtered_dataset():
 def test_independent_generation_and_reasoning_launchers_share_only_sft_input():
     generation = (ROOT / "scripts" / "dlc" / "train_generation_rl.sh").read_text(encoding="utf-8")
     reasoning = (ROOT / "scripts" / "dlc" / "train_reasoning_rl.sh").read_text(encoding="utf-8")
-    assert 'SFT_MODEL must point to the shared full SFT checkpoint' in generation
+    assert 'GENERATION_START_MODEL=' in generation
     assert 'GENERATION_RL_DATA must point' in generation
     assert 'GENERATION_RL_OUTPUT_DIR must be shared by all DLC nodes' in generation
     assert 'GSPO_ROUTE_MODE=generation' in generation
-    assert 'SFT_MODEL must point to the shared full SFT checkpoint' in reasoning
+    assert 'REASONING_START_MODEL=' in reasoning
     assert 'REASONING_RL_DATA must point' in reasoning
     assert 'REASONING_RL_OUTPUT_DIR must be shared by all DLC nodes' in reasoning
     assert 'GSPO_ROUTE_MODE=reasoning' in reasoning
