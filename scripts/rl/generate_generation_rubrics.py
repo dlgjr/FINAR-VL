@@ -168,9 +168,9 @@ def normalize_rubric(
         if not isinstance(item, Mapping):
             raise ValueError("invalid analysis criterion")
         criterion = str(item.get("criterion") or "").strip()
-        criterion_id = str(item.get("id") or f"A{index}")
+        criterion_id = f"A{index}"
         weight = float(item.get("weight") or 0)
-        if not criterion or weight <= 0 or criterion_id in seen_analysis:
+        if not criterion or weight <= 0:
             raise ValueError("invalid analysis criterion")
         seen_analysis.add(criterion_id)
         normalized_analysis.append({"id": criterion_id, "criterion": criterion, "weight": weight})
