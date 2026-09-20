@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate fixed sample-specific rubrics for FINAR-VL Generation RL."""
+"""Generate fixed 10-point fact-grounded rubrics for FINAR-VL Generation RL."""
 
 from __future__ import annotations
 
@@ -14,27 +14,27 @@ from typing import Any, Mapping, Sequence
 
 RUBRIC_SYSTEM = """你是 FINAR-VL Generation RL 的 rubric 构造器。
 
-上游数据构造已经通过金融证据图固定 required_fact_ids；这些 required facts 是不可修改的硬约束。你的任务是基于问题、参考答案、任务要求和这些事实，为当前样本生成固定评分 rubric。
+上游数据构造已经通过金融证据图固定 required_fact_ids；这些 required facts 是不可修改的硬约束。
+你的任务是根据问题、参考答案、任务要求和 required facts，为当前样本生成恰好 10 个二值评分点。
 
 要求：
-1. fact_criteria 必须与 required_fact_ids 一一对应，不能新增、删除、合并或替换 fact_id。
-2. 每个 fact criterion 只描述候选答案应如何正确使用该事实，不得改写事实值、主体、期间、指标、口径、单位或币种。
-3. analysis_criteria 评价跨事实归纳、比较、因果/风险分析、结论完整性等当前问题真正需要的能力，不要加入泛化的文风偏好。
-4. factual criteria 的总权重至少占全部 criterion 权重的 50%。
-5. critical_errors 只写会实质破坏答案正确性的任务特定错误；不要把措辞、篇幅或风格问题设为 critical error。
-6. rubric 只根据给定材料生成，不引入外部知识。
-7. criterion 要简洁、可判定。权重必须为正数。
+1. 必须输出恰好 10 个 points。
+2. 每个 point 只能依赖给定 required facts，可关联 1 条或多条 fact_id，但不能使用外部知识。
+3. 10 个 points 合起来必须覆盖所有 required_fact_ids；任何 required fact 都不能遗漏。
+4. point 要原子化、可判定。尽量把事实正确性、关键比较、跨事实关系、必要结论拆成独立点。
+5. 不得改写 required fact 的主体、期间、指标、scope、数值、单位、币种或原始结论。
+6. 可以把多个 required facts 的关系作为一个 point，但必须列出所有支撑该 point 的 fact_ids。
+7. 不为文风、篇幅、措辞漂亮程度单独设点；只评价事实、基于事实的分析、完整性和 grounding。
+8. 每点在训练 judge 阶段只能判 0 或 1，因此 criterion 必须能做明确二值判断。
+9. 不要输出 weight、总分、critical error 或其他评分机制；10 点等权，每点 1 分。
 
 严格输出一个 JSON 对象：
 {
-  "fact_criteria": [
-    {"fact_id":"给定 fact_id", "criterion":"候选答案满足该事实约束的判定标准", "weight":0.2}
-  ],
-  "analysis_criteria": [
-    {"id":"A1", "criterion":"当前问题需要的分析/综合要求", "weight":0.2}
-  ],
-  "critical_errors": [
-    {"id":"E1", "description":"任务特定重大错误", "score_cap":0.3}
+  "points": [
+    {
+      "fact_ids": ["给定 fact_id"],
+      "criterion": "候选答案满足该事实或事实关系时得1分，否则0分"
+    }
   ]
 }
 只输出 JSON。"""
@@ -130,88 +130,51 @@ def normalize_rubric(
     required_ids: Sequence[str],
     facts_by_id: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
-    fact_criteria = raw.get("fact_criteria")
-    analysis_criteria = raw.get("analysis_criteria")
-    critical_errors = raw.get("critical_errors") or []
-    if not isinstance(fact_criteria, list) or not isinstance(analysis_criteria, list) or not isinstance(critical_errors, list):
-        raise ValueError("invalid rubric schema")
+    points = raw.get("points")
+    if not isinstance(points, list) or len(points) != 10:
+        raise ValueError("rubric must contain exactly 10 points")
 
-    expected = list(required_ids)
-    actual = [str(item.get("fact_id") or "") for item in fact_criteria if isinstance(item, Mapping)]
-    if len(actual) != len(fact_criteria) or len(set(actual)) != len(actual) or set(actual) != set(expected):
-        raise ValueError("fact_criteria must match required_fact_ids exactly")
+    required = list(dict.fromkeys(map(str, required_ids)))
+    required_set = set(required)
+    covered: set[str] = set()
+    normalized_points: list[dict[str, Any]] = []
+    seen_criteria: set[str] = set()
 
-    normalized_facts: list[dict[str, Any]] = []
-    normalized_analysis: list[dict[str, Any]] = []
-    total_weight = 0.0
-    fact_weight = 0.0
-    for index, fact_id in enumerate(expected, 1):
-        item = next(item for item in fact_criteria if str(item.get("fact_id") or "") == fact_id)
+    for index, item in enumerate(points, 1):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"invalid point at index {index}")
         criterion = str(item.get("criterion") or "").strip()
-        weight = float(item.get("weight") or 0)
-        if not criterion or weight <= 0:
-            raise ValueError(f"invalid fact criterion for {fact_id}")
-        normalized_facts.append(
+        fact_ids = item.get("fact_ids")
+        if not criterion or not isinstance(fact_ids, list) or not fact_ids:
+            raise ValueError(f"point {index} requires criterion and fact_ids")
+
+        normalized_ids = list(dict.fromkeys(map(str, fact_ids)))
+        if any(fact_id not in required_set for fact_id in normalized_ids):
+            raise ValueError(f"point {index} references fact outside required_fact_ids")
+        criterion_key = "".join(criterion.split()).lower()
+        if criterion_key in seen_criteria:
+            raise ValueError(f"duplicate criterion at point {index}")
+        seen_criteria.add(criterion_key)
+        covered.update(normalized_ids)
+
+        normalized_points.append(
             {
-                "id": f"F{index}",
-                "fact_id": fact_id,
+                "id": f"P{index}",
+                "fact_ids": normalized_ids,
                 "criterion": criterion,
-                "weight": weight,
-                "fact": fact_payload(facts_by_id[fact_id]),
+                "facts": [fact_payload(facts_by_id[fact_id]) for fact_id in normalized_ids],
             }
         )
-        fact_weight += weight
-        total_weight += weight
 
-    seen_analysis: set[str] = set()
-    for index, item in enumerate(analysis_criteria, 1):
-        if not isinstance(item, Mapping):
-            raise ValueError("invalid analysis criterion")
-        criterion = str(item.get("criterion") or "").strip()
-        criterion_id = f"A{index}"
-        weight = float(item.get("weight") or 0)
-        if not criterion or weight <= 0:
-            raise ValueError("invalid analysis criterion")
-        seen_analysis.add(criterion_id)
-        normalized_analysis.append({"id": criterion_id, "criterion": criterion, "weight": weight})
-        total_weight += weight
-
-    if total_weight <= 0 or fact_weight / total_weight < 0.5:
-        raise ValueError("factual criterion weight must be at least 50%")
-
-    for item in [*normalized_facts, *normalized_analysis]:
-        item["weight"] = round(float(item["weight"]) / total_weight, 6)
-
-    normalized_errors: list[dict[str, Any]] = [
-        {
-            "id": "E_REQUIRED_FACT_CONTRADICTION",
-            "description": "候选答案明确否定、篡改或混淆任一 required fact 的主体、期间、指标、口径、数值、单位、币种或结论。",
-            "score_cap": 0.2,
-        },
-        {
-            "id": "E_UNSUPPORTED_MATERIAL_CLAIM",
-            "description": "候选答案引入材料无法支持且会实质改变分析结论的重要事实、因果关系或数据。",
-            "score_cap": 0.3,
-        },
-    ]
-    seen_errors = {item["id"] for item in normalized_errors}
-    for index, item in enumerate(critical_errors, 1):
-        if not isinstance(item, Mapping):
-            raise ValueError("invalid critical error")
-        error_id = str(item.get("id") or f"E{index}")
-        description = str(item.get("description") or "").strip()
-        cap = float(item.get("score_cap") if item.get("score_cap") is not None else 0.3)
-        if not description or error_id in seen_errors or not 0 <= cap <= 0.5:
-            raise ValueError("invalid critical error")
-        seen_errors.add(error_id)
-        normalized_errors.append({"id": error_id, "description": description, "score_cap": cap})
+    if covered != required_set:
+        missing = sorted(required_set - covered)
+        raise ValueError(f"10 points do not cover all required facts: {missing}")
 
     return {
-        "version": "generation_rubric_v1",
-        "required_fact_ids": expected,
-        "fact_criteria": normalized_facts,
-        "analysis_criteria": normalized_analysis,
-        "critical_errors": normalized_errors,
+        "version": "generation_rubric_v2_binary10",
+        "scoring": {"num_points": 10, "point_values": [0, 1], "reward": "sum(points)/10"},
+        "required_fact_ids": required,
+        "points": normalized_points,
     }
 
 
@@ -224,6 +187,7 @@ def build_row(
     verifier_type = str(row.get("verifier_type") or row.get("reward_subtype") or "")
     if str(row.get("reward_type") or "") != "judge" and verifier_type != "model_judge":
         return dict(row)
+
     metadata = row.get("metadata") or {}
     required_ids = [str(value) for value in metadata.get("required_evidence_ids") or []]
     if not required_ids:
