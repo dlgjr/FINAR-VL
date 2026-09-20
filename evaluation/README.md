@@ -8,7 +8,7 @@ This directory provides a unified public-benchmark launcher following the same h
 MODEL_NAME=FINAR-VL-4B \
 API_BASE=http://127.0.0.1:8000/v1 \
 API_KEY=EMPTY \
-bash evaluation/eval_finar_vl.sh
+bash evaluation/evaluate.sh
 ```
 
 The launcher covers the 12 benchmarks reported in the FINAR-VL performance figure:
