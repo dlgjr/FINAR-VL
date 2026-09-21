@@ -249,6 +249,7 @@ def normalize_rubric(
         "points": normalized_points,
         "distractor_facts": [fact_payload(facts_by_id[fact_id]) for fact_id in distractors],
         "hard_checks": HARD_CHECKS,
+        "point_bounds": {"min": min_points, "max": max_points},
         "scoring": {
             "point_values": [0, 1],
             "importance_weights": IMPORTANCE_WEIGHTS,
