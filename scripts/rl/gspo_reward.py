@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import unicodedata
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Callable, Mapping, Sequence
+
+from .reasoning_process_verifier import verify_reasoning_process
 
 
 _ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.IGNORECASE | re.DOTALL)
@@ -503,6 +506,7 @@ def _numeric_match(
     return delta <= abs(gold.base_value) * rel_tol
 
 
+
 def score_programmatic_answer(
     completion: Any,
     gold_atoms: Sequence[str],
@@ -631,13 +635,30 @@ class MixedReward:
                 answer = extract_final_answer(completion, str(record.get("verifier_type", "")))
                 if isinstance(record, dict):
                     record["_parser_result"] = {"answer": answer, "verifier_type": record.get("verifier_type", "")}
-                rewards.append(
-                    score_programmatic_answer(
-                        completion,
-                        record.get("gold_atoms", []),
-                        record.get("verifier_type", ""),
-                        record.get("question", ""),
-                        record.get("gold_numeric", []),
-                    )
+                verifier_type = str(record.get("verifier_type", ""))
+                score = score_programmatic_answer(
+                    completion,
+                    record.get("gold_atoms", []),
+                    verifier_type,
+                    record.get("question", ""),
+                    record.get("gold_numeric", []),
                 )
+                process_gate_enabled = os.environ.get("GSPO_PROCESS_GATE", "false").lower() == "true"
+                process_result = (
+                    verify_reasoning_process(completion, record)
+                    if score >= 1.0 and process_gate_enabled
+                    else {"status": "not_checked", "checked": 0, "errors": []}
+                )
+                # Process verification is a one-way veto.  It never creates or
+                # increases reward, and UNKNOWN preserves a correct outcome.
+                if score >= 1.0 and process_result["status"] == "fail":
+                    score = 0.0
+                if isinstance(record, dict):
+                    record["_process_result"] = process_result
+                    record["_parser_result"] = {
+                        "answer": answer,
+                        "verifier_type": verifier_type,
+                        "process_status": process_result["status"],
+                    }
+                rewards.append(score)
         return rewards

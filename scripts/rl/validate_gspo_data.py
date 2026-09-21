@@ -6,7 +6,7 @@ import argparse
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .gspo_reward import _structured_numeric
 from .prepare_gspo_data import _FORMAT_TO_VERIFIER, validate_program_metadata
@@ -100,6 +100,118 @@ def validate(
                 _add(errors, line_number, sample_id, "invalid_judge_reference_mode", mode=reference_mode)
             if str(row.get("judge_reference") or "").strip() or row.get("gold_claims") or row.get("gold_claim_details"):
                 _add(errors, line_number, sample_id, "judge_must_not_use_reference")
+            if route_mode == "generation":
+                rubric = row.get("generation_rubric")
+                if not isinstance(rubric, Mapping):
+                    _add(errors, line_number, sample_id, "missing_generation_rubric")
+                else:
+                    points = rubric.get("points")
+                    required_fact_ids = rubric.get("required_fact_ids")
+                    distractor_fact_ids = rubric.get("distractor_fact_ids")
+                    hard_checks = rubric.get("hard_checks")
+                    point_bounds = rubric.get("point_bounds")
+                    scoring = rubric.get("scoring")
+                    if rubric.get("version") != "generation_rubric_v3_dynamic":
+                        _add(errors, line_number, sample_id, "invalid_generation_rubric_version")
+                    if not isinstance(required_fact_ids, list) or not required_fact_ids:
+                        _add(errors, line_number, sample_id, "invalid_generation_required_fact_ids")
+                        required_set: set[str] = set()
+                    else:
+                        required_set = set(map(str, required_fact_ids))
+                    if not isinstance(distractor_fact_ids, list):
+                        _add(errors, line_number, sample_id, "invalid_generation_distractor_fact_ids")
+                        distractor_set: set[str] = set()
+                    else:
+                        distractor_set = set(map(str, distractor_fact_ids))
+                    if required_set & distractor_set:
+                        _add(errors, line_number, sample_id, "generation_required_distractor_overlap")
+
+                    if not isinstance(point_bounds, Mapping):
+                        _add(errors, line_number, sample_id, "invalid_generation_point_bounds")
+                        min_points, max_points = 2, 15
+                    else:
+                        min_points = point_bounds.get("min")
+                        max_points = point_bounds.get("max")
+                        if (
+                            isinstance(min_points, bool)
+                            or isinstance(max_points, bool)
+                            or not isinstance(min_points, int)
+                            or not isinstance(max_points, int)
+                            or min_points < 1
+                            or max_points < min_points
+                            or max_points > 32
+                        ):
+                            _add(errors, line_number, sample_id, "invalid_generation_point_bounds")
+                            min_points, max_points = 2, 15
+                    if not isinstance(points, list) or not min_points <= len(points) <= max_points:
+                        _add(errors, line_number, sample_id, "generation_rubric_point_count_out_of_bounds")
+                    else:
+                        point_ids = [str(item.get("id") or "") for item in points if isinstance(item, Mapping)]
+                        if point_ids != [f"P{index}" for index in range(1, len(points) + 1)]:
+                            _add(errors, line_number, sample_id, "invalid_generation_point_ids")
+                        referenced: set[str] = set()
+                        seen_criteria: set[str] = set()
+                        core_count = 0
+                        for point in points:
+                            if not isinstance(point, Mapping):
+                                _add(errors, line_number, sample_id, "invalid_generation_point")
+                                continue
+                            fact_ids = point.get("fact_ids")
+                            criterion = str(point.get("criterion") or "").strip()
+                            dimension = str(point.get("dimension") or "")
+                            importance = str(point.get("importance") or "")
+                            if (
+                                not criterion
+                                or not isinstance(fact_ids, list)
+                                or not fact_ids
+                                or dimension not in {"fact", "relation", "synthesis", "completeness"}
+                                or importance not in {"core", "important", "optional"}
+                            ):
+                                _add(errors, line_number, sample_id, "invalid_generation_point")
+                                continue
+                            criterion_key = "".join(criterion.split()).casefold()
+                            if criterion_key in seen_criteria:
+                                _add(errors, line_number, sample_id, "duplicate_generation_criterion")
+                            seen_criteria.add(criterion_key)
+                            point_fact_ids = set(map(str, fact_ids))
+                            if not point_fact_ids <= required_set:
+                                _add(errors, line_number, sample_id, "generation_point_references_nonrequired_fact")
+                            referenced.update(point_fact_ids)
+                            core_count += int(importance == "core")
+                        if required_set and referenced != required_set:
+                            _add(errors, line_number, sample_id, "generation_points_must_cover_required_facts")
+                        if core_count == 0:
+                            _add(errors, line_number, sample_id, "generation_rubric_requires_core_point")
+
+                    expected_hard_checks = {
+                        "H_REQUIRED_FACT_CONTRADICTION",
+                        "H_DISTRACTOR_MISUSE",
+                        "H_UNSUPPORTED_MATERIAL_CLAIM",
+                    }
+                    hard_check_ids = {
+                        str(item.get("id") or "")
+                        for item in hard_checks or []
+                        if isinstance(item, Mapping)
+                    }
+                    if not isinstance(hard_checks, list) or hard_check_ids != expected_hard_checks:
+                        _add(errors, line_number, sample_id, "invalid_generation_hard_checks")
+
+                    if not isinstance(scoring, Mapping):
+                        _add(errors, line_number, sample_id, "invalid_generation_scoring")
+                    else:
+                        if scoring.get("point_values") != [0, 1]:
+                            _add(errors, line_number, sample_id, "generation_points_must_be_binary")
+                        weights = scoring.get("importance_weights")
+                        dimension_weights = scoring.get("dimension_weights")
+                        if weights != {"core": 3, "important": 2, "optional": 1}:
+                            _add(errors, line_number, sample_id, "invalid_generation_importance_weights")
+                        if dimension_weights != {
+                            "fact": 0.50,
+                            "relation": 0.25,
+                            "synthesis": 0.15,
+                            "completeness": 0.10,
+                        }:
+                            _add(errors, line_number, sample_id, "invalid_generation_dimension_weights")
         elif verifier_type in {"numeric", "numeric_final", "composite_numeric"}:
             gold_numeric = row.get("gold_numeric")
             if gold_atoms:
@@ -205,8 +317,8 @@ def validate(
         errors.append(
             {"line": 0, "error": "count_mismatch", "sample_id": "", "count": count, "expected_count": expected_count}
         )
-    if route_mode == "generation" and (reward_counts["rule"] == 0 or reward_counts["judge"] == 0):
-        errors.append({"line": 0, "error": "generation_requires_rule_and_judge_routes", "sample_id": ""})
+    if route_mode == "generation" and reward_counts["judge"] == 0:
+        errors.append({"line": 0, "error": "generation_requires_judge_route", "sample_id": ""})
     elif route_mode == "reasoning" and reward_counts["judge"]:
         errors.append({"line": 0, "error": "reasoning_must_be_programmatic_only", "sample_id": ""})
     report = {

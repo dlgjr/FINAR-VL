@@ -1,8 +1,8 @@
-"""Direct-answer policy controls for the 4-GPU Pass@8 GRPO run.
+"""Reasoning policy controls for the 4-GPU Pass@8 GRPO run.
 
 The filename is kept for compatibility with existing launch/import paths.
-Online rollouts and fixed-set evaluation both use the same minimal direct-answer
-prompt. No response-length or forced-reasoning reward shaping is applied here.
+Online rollouts and fixed-set evaluation use the same explicit-reasoning prompt
+so deterministic process checks observe the trajectory used for training.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import scripts.sft.pass_at_8_eval as eval_module
 from scripts.dlc.gspo_trainer_plugin import GSPOGRPOTrainer
 
 
-# Historical prompts are stripped before applying the direct-answer suffix so
+# Historical prompts are stripped before applying the reasoning suffix so
 # dynamic resampling cannot accumulate conflicting instructions.
 _OLD_PROMPT = (
     "\n请先独立分析问题，结合相关文本、表格和图像信息，完成必要的推理、计算和结果核对后再作答。不要直接猜测答案。"
@@ -60,7 +60,12 @@ _LEGACY_USER_SUFFIX_SENTENCES = (
     "严禁直接给出答案，必须给出计算的相关步骤。",
     "只使用完成用户所问计算直接需要的数据；即使图片中存在其他指标，也不要把它们加入计算过程。",
 )
-_DIRECT_SUFFIX = "请只输出最终答案本身，不要输出分析过程或额外解释。"
+_DIRECT_SUFFIX = (
+    "请展示完成该题所需的关键证据、计算公式和必要推理过程，并核对每一步计算。"
+    "对参与计算的关键输入数值，请明确写出对应的实体、期间、指标和值；"
+    "若该数值来自图片，请同时注明对应页码。"
+    "最后一行严格按“答案：具体答案”的格式给出最终答案。"
+)
 
 
 def _clean_user_text(text: str) -> str:
@@ -142,7 +147,7 @@ def _patch_sample_prompt(sample: Any) -> None:
     _patch_messages(messages, source="GSPO rollout")
 
 
-# Apply the direct-answer suffix to every online rollout, including dynamic resamples.
+# Apply the explicit-reasoning suffix to every online rollout, including dynamic resamples.
 if not getattr(GSPOGRPOTrainer._generate_completions, "_gspo_direct_answer_prompt", False):
     _original_generate_completions = GSPOGRPOTrainer._generate_completions
 

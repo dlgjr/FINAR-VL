@@ -1,4 +1,4 @@
-"""Keep strict Pass@k success while using reward variance to gate k=0 GRPO."""
+"""Keep strict Pass@k success while calibrating partial k=0 GRPO by batch reward scale."""
 
 from __future__ import annotations
 
@@ -93,6 +93,9 @@ def _annotate_and_inject_gold(self, all_samples, rewards_per_func):
     generations = int(self.num_generations)
     inject_enabled = os.environ.get("GSPO_GOLD_INJECT", "true").lower() == "true"
 
+    finite_weighted = weighted[torch.isfinite(weighted)].float()
+    batch_reward_std = finite_weighted.std(unbiased=False)
+
     injected = 0
     injected_weight_sum = 0.0
     for group_index, k_tensor in enumerate(counts):
@@ -113,6 +116,18 @@ def _annotate_and_inject_gold(self, all_samples, rewards_per_func):
             sample.extra["_gspo_group_k"] = k
             sample.extra["_gspo_rl_weight"] = rl_weight
             sample.extra["_gspo_gold_sft_weight"] = 0.0
+            sample.extra.pop("_gspo_advantage_override", None)
+
+        # Strict k=0 groups have no verified-success trajectory. If their
+        # partial verifier rewards still differ, keep the group-centered
+        # baseline but normalize by the whole generation batch reward std.
+        # This prevents a tiny within-group std from magnifying small partial
+        # reward gaps into full-strength GRPO advantages.
+        if k == 0 and rl_weight > 0:
+            group_rewards = grouped[group_index].float()
+            calibrated = (group_rewards - group_rewards.mean()) / batch_reward_std
+            for sample, advantage in zip(samples[start:end], calibrated.tolist()):
+                sample.extra["_gspo_advantage_override"] = float(advantage)
 
         if sft_weight <= 0:
             continue
@@ -205,8 +220,32 @@ def _dynamic_sampling(self, samples, rewards_per_func):
     return annotated_samples[process_slice], selected_rewards
 
 
+_original_postprocess_batch = GSPOGRPOTrainer._postprocess_batch
+
+
+def _postprocess_batch_with_k0_batch_scale(self, samples, batch_encoded_inputs):
+    _original_postprocess_batch(self, samples, batch_encoded_inputs)
+    gas_chunks = self.split_by_mini_batches(samples)
+    if len(gas_chunks) != len(batch_encoded_inputs):
+        raise RuntimeError(
+            f"k0 batch-scale mismatch: {len(gas_chunks)} vs {len(batch_encoded_inputs)}"
+        )
+
+    for batch, batch_encoded in zip(gas_chunks, batch_encoded_inputs):
+        advantages = batch_encoded["grpo_batch"].advantages
+        for row, sample in enumerate(batch):
+            extra = getattr(sample, "extra", {}) or {}
+            override = extra.get("_gspo_advantage_override")
+            if override is None:
+                continue
+            # Gold-injected rows are supervised-only and retain zero RL weight.
+            rl_weight = float(extra.get("_gspo_rl_weight", 1.0))
+            advantages[row] = float(override) * rl_weight
+
+
 curriculum._initial_rollout_metrics = _initial_rollout_metrics
 curriculum._annotate_and_inject_gold = _annotate_and_inject_gold
 curriculum._dynamic_sampling = _dynamic_sampling
 GSPOGRPOTrainer._initial_rollout_metrics = _initial_rollout_metrics
 GSPOGRPOTrainer._dynamic_sampling = _dynamic_sampling
+GSPOGRPOTrainer._postprocess_batch = _postprocess_batch_with_k0_batch_scale

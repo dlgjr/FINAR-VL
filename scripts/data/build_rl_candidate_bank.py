@@ -535,12 +535,39 @@ def messages(question: str, images: Sequence[str], ctx: str = "") -> list[dict[s
     return [{"role": "user", "content": "\n".join(body)}]
 
 
+def _verifier_fact(f: Fact) -> dict[str, Any]:
+    """Hidden gold fact used only by deterministic process verification.
+
+    Visual fact values are intentionally absent from the model-visible text
+    context, but retaining them in metadata lets the reward path reject a
+    rollout that claims an incorrect value was read from the supplied image.
+    """
+
+    is_visual = resolve_image(f.image) is not None
+    return {
+        "id": f.id,
+        "entity": entity(f),
+        "metric": metric(f),
+        "period": f.period,
+        "scope": f.scope,
+        "unit": f.unit,
+        "currency": f.currency,
+        "value": dtext(f.value, 12) if f.value is not None else "",
+        "display_value": fvalue(f) if f.value is not None else "",
+        "page": f.page,
+        "visual_type": f.visual,
+        "is_visual": is_visual,
+        "text_value_hidden": is_visual,
+    }
+
+
 def meta(builder: str, facts: Sequence[Fact], visual_ids: Sequence[str], extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
     x = {
         "version": "rl_candidate_bank_v2",
         "builder": builder,
         "fact_ids": [f.id for f in facts],
         "visual_fact_ids": list(visual_ids),
+        "evidence_facts": [_verifier_fact(f) for f in facts],
         "entity_keys": sorted({f.entity_key for f in facts if f.entity_key}),
         "periods": sorted({f.period for f in facts if f.period}),
         "document_keys": sorted({f.doc_key for f in facts if f.doc_key}),
