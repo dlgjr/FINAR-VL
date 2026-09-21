@@ -12,6 +12,7 @@ from typing import Any, Mapping
 
 _IMAGE_TAG_RE = re.compile(r"(<image>)")
 _DEFAULT_IMPORTANCE_WEIGHTS = {"core": 3.0, "important": 2.0, "optional": 1.0}
+_DEFAULT_DIMENSION_WEIGHTS = {"fact": 0.50, "relation": 0.25, "synthesis": 0.15, "completeness": 0.10}
 
 
 def _local_image_url(value: Any) -> str:
@@ -123,21 +124,27 @@ def _score_generation_rubric(
 
     scoring = rubric.get("scoring") or {}
     importance_weights = scoring.get("importance_weights") or _DEFAULT_IMPORTANCE_WEIGHTS
-    if not isinstance(importance_weights, Mapping):
-        raise ValueError("invalid importance weights")
+    dimension_weights = scoring.get("dimension_weights") or _DEFAULT_DIMENSION_WEIGHTS
+    if not isinstance(importance_weights, Mapping) or not isinstance(dimension_weights, Mapping):
+        raise ValueError("invalid rubric aggregation weights")
 
     point_weights: dict[str, float] = {}
+    point_dimensions: dict[str, str] = {}
     for point in points:
         if not isinstance(point, Mapping):
             raise ValueError("invalid generation rubric point")
         point_id = str(point["id"])
         importance = str(point.get("importance") or "")
+        dimension = str(point.get("dimension") or "")
         if importance not in importance_weights:
             raise ValueError(f"unknown rubric importance: {importance}")
+        if dimension not in dimension_weights:
+            raise ValueError(f"unknown rubric dimension: {dimension}")
         weight = float(importance_weights[importance])
-        if weight <= 0:
-            raise ValueError("rubric importance weights must be positive")
+        if weight <= 0 or float(dimension_weights[dimension]) <= 0:
+            raise ValueError("rubric aggregation weights must be positive")
         point_weights[point_id] = weight
+        point_dimensions[point_id] = dimension
 
     payload = json.loads(result)
     if not isinstance(payload, Mapping) or not isinstance(payload.get("point_scores"), list):
@@ -192,8 +199,18 @@ def _score_generation_rubric(
             raise ValueError("unsupported material claim requires claim and reason")
         unsupported_claims.append({"claim": claim, "reason": reason})
 
-    denominator = sum(point_weights.values())
-    quality_score = sum(point_weights[point_id] * scores[point_id] for point_id in expected_ids) / denominator
+    dimension_scores: dict[str, float] = {}
+    for dimension in dict.fromkeys(point_dimensions[point_id] for point_id in expected_ids):
+        ids = [point_id for point_id in expected_ids if point_dimensions[point_id] == dimension]
+        denominator = sum(point_weights[point_id] for point_id in ids)
+        dimension_scores[dimension] = (
+            sum(point_weights[point_id] * scores[point_id] for point_id in ids) / denominator
+        )
+    dimension_denominator = sum(float(dimension_weights[dimension]) for dimension in dimension_scores)
+    quality_score = sum(
+        float(dimension_weights[dimension]) * value
+        for dimension, value in dimension_scores.items()
+    ) / dimension_denominator
     hard_fail = bool(contradicted_ids or used_distractor_ids or unsupported_claims)
     accepted = (not hard_fail) and quality_score >= accept_threshold
 
@@ -204,6 +221,7 @@ def _score_generation_rubric(
             "accepted": accepted,
             "hard_fail": hard_fail,
             "accept_threshold": accept_threshold,
+            "dimension_scores": {key: round(value, 6) for key, value in dimension_scores.items()},
             "point_scores": [
                 {
                     "id": point_id,
