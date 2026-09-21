@@ -109,6 +109,7 @@ def validate(
                     required_fact_ids = rubric.get("required_fact_ids")
                     distractor_fact_ids = rubric.get("distractor_fact_ids")
                     hard_checks = rubric.get("hard_checks")
+                    point_bounds = rubric.get("point_bounds")
                     scoring = rubric.get("scoring")
                     if rubric.get("version") != "generation_rubric_v3_dynamic":
                         _add(errors, line_number, sample_id, "invalid_generation_rubric_version")
@@ -125,8 +126,25 @@ def validate(
                     if required_set & distractor_set:
                         _add(errors, line_number, sample_id, "generation_required_distractor_overlap")
 
-                    if not isinstance(points, list) or not 3 <= len(points) <= 15:
-                        _add(errors, line_number, sample_id, "generation_rubric_requires_3_to_15_points")
+                    if not isinstance(point_bounds, Mapping):
+                        _add(errors, line_number, sample_id, "invalid_generation_point_bounds")
+                        min_points, max_points = 3, 15
+                    else:
+                        min_points = point_bounds.get("min")
+                        max_points = point_bounds.get("max")
+                        if (
+                            isinstance(min_points, bool)
+                            or isinstance(max_points, bool)
+                            or not isinstance(min_points, int)
+                            or not isinstance(max_points, int)
+                            or min_points < 1
+                            or max_points < min_points
+                            or max_points > 32
+                        ):
+                            _add(errors, line_number, sample_id, "invalid_generation_point_bounds")
+                            min_points, max_points = 3, 15
+                    if not isinstance(points, list) or not min_points <= len(points) <= max_points:
+                        _add(errors, line_number, sample_id, "generation_rubric_point_count_out_of_bounds")
                     else:
                         point_ids = [str(item.get("id") or "") for item in points if isinstance(item, Mapping)]
                         if point_ids != [f"P{index}" for index in range(1, len(points) + 1)]:
