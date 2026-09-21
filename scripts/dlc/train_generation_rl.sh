@@ -29,10 +29,18 @@ if [[ "$GSPO_NODE_RANK" == "0" && ! -f "$GENERATION_RUBRIC_READY" ]]; then
   RUBRIC_JUDGE_PID=$!
   cleanup_rubric_judge() { kill "$RUBRIC_JUDGE_PID" 2>/dev/null || true; wait "$RUBRIC_JUDGE_PID" 2>/dev/null || true; }
   trap cleanup_rubric_judge EXIT
+  RUBRIC_JUDGE_READY=false
   for attempt in $(seq 1 1800); do
-    if "${PYTHON_BIN:-/opt/ac2/bin/python}" -c "import urllib.request; urllib.request.urlopen('$GSPO_JUDGE_URL/health', timeout=2)" >/dev/null 2>&1; then break; fi
+    if "${PYTHON_BIN:-/opt/ac2/bin/python}" -c "import urllib.request; urllib.request.urlopen('$GSPO_JUDGE_URL/health', timeout=2)" >/dev/null 2>&1; then
+      RUBRIC_JUDGE_READY=true
+      break
+    fi
     sleep 2
   done
+  if [[ "$RUBRIC_JUDGE_READY" != "true" ]]; then
+    echo "rubric judge server failed to become healthy: $RUBRIC_JUDGE_LOG" >&2
+    exit 1
+  fi
   "${PYTHON_BIN:-/opt/ac2/bin/python}" "$ROOT/scripts/rl/generate_generation_rubrics.py" \
     "$GENERATION_RL_DATA" "$GENERATION_RUBRIC_DATA" \
     --evidence-facts "$GENERATION_RL_EVIDENCE_FACTS" \
@@ -48,6 +56,7 @@ elif [[ "$GSPO_NODE_RANK" != "0" ]]; then
     if [[ -f "$GENERATION_RUBRIC_READY" ]]; then break; fi
     sleep 1
   done
+  test -f "$GENERATION_RUBRIC_READY" || { echo "timed out waiting for generation rubric data" >&2; exit 1; }
 fi
 
 UNIQUE_GSPO_SOURCE="$(mktemp /tmp/qwen3vl-gspo-generation-unique-ids.XXXXXX.jsonl)"
