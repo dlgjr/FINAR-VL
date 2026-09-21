@@ -107,32 +107,85 @@ def validate(
                 else:
                     points = rubric.get("points")
                     required_fact_ids = rubric.get("required_fact_ids")
+                    distractor_fact_ids = rubric.get("distractor_fact_ids")
+                    hard_checks = rubric.get("hard_checks")
                     scoring = rubric.get("scoring")
-                    if rubric.get("version") != "generation_rubric_v2_binary10":
+                    if rubric.get("version") != "generation_rubric_v3_dynamic":
                         _add(errors, line_number, sample_id, "invalid_generation_rubric_version")
-                    if not isinstance(points, list) or len(points) != 10:
-                        _add(errors, line_number, sample_id, "generation_rubric_requires_10_points")
+                    if not isinstance(required_fact_ids, list) or not required_fact_ids:
+                        _add(errors, line_number, sample_id, "invalid_generation_required_fact_ids")
+                        required_set: set[str] = set()
+                    else:
+                        required_set = set(map(str, required_fact_ids))
+                    if not isinstance(distractor_fact_ids, list):
+                        _add(errors, line_number, sample_id, "invalid_generation_distractor_fact_ids")
+                        distractor_set: set[str] = set()
+                    else:
+                        distractor_set = set(map(str, distractor_fact_ids))
+                    if required_set & distractor_set:
+                        _add(errors, line_number, sample_id, "generation_required_distractor_overlap")
+
+                    if not isinstance(points, list) or not 3 <= len(points) <= 15:
+                        _add(errors, line_number, sample_id, "generation_rubric_requires_3_to_15_points")
                     else:
                         point_ids = [str(item.get("id") or "") for item in points if isinstance(item, Mapping)]
-                        if point_ids != [f"P{index}" for index in range(1, 11)]:
+                        if point_ids != [f"P{index}" for index in range(1, len(points) + 1)]:
                             _add(errors, line_number, sample_id, "invalid_generation_point_ids")
                         referenced: set[str] = set()
+                        seen_criteria: set[str] = set()
+                        core_count = 0
                         for point in points:
                             if not isinstance(point, Mapping):
                                 _add(errors, line_number, sample_id, "invalid_generation_point")
                                 continue
                             fact_ids = point.get("fact_ids")
                             criterion = str(point.get("criterion") or "").strip()
-                            if not criterion or not isinstance(fact_ids, list) or not fact_ids:
+                            dimension = str(point.get("dimension") or "")
+                            importance = str(point.get("importance") or "")
+                            if (
+                                not criterion
+                                or not isinstance(fact_ids, list)
+                                or not fact_ids
+                                or dimension not in {"fact", "relation", "synthesis", "completeness"}
+                                or importance not in {"core", "important", "optional"}
+                            ):
                                 _add(errors, line_number, sample_id, "invalid_generation_point")
                                 continue
-                            referenced.update(map(str, fact_ids))
-                        if isinstance(required_fact_ids, list) and set(map(str, required_fact_ids)) != referenced:
+                            criterion_key = "".join(criterion.split()).casefold()
+                            if criterion_key in seen_criteria:
+                                _add(errors, line_number, sample_id, "duplicate_generation_criterion")
+                            seen_criteria.add(criterion_key)
+                            point_fact_ids = set(map(str, fact_ids))
+                            if not point_fact_ids <= required_set:
+                                _add(errors, line_number, sample_id, "generation_point_references_nonrequired_fact")
+                            referenced.update(point_fact_ids)
+                            core_count += int(importance == "core")
+                        if required_set and referenced != required_set:
                             _add(errors, line_number, sample_id, "generation_points_must_cover_required_facts")
-                    if not isinstance(required_fact_ids, list) or not required_fact_ids:
-                        _add(errors, line_number, sample_id, "invalid_generation_required_fact_ids")
-                    if not isinstance(scoring, Mapping) or scoring.get("num_points") != 10 or scoring.get("point_values") != [0, 1]:
-                        _add(errors, line_number, sample_id, "invalid_generation_binary10_scoring")
+                        if core_count == 0:
+                            _add(errors, line_number, sample_id, "generation_rubric_requires_core_point")
+
+                    expected_hard_checks = {
+                        "H_REQUIRED_FACT_CONTRADICTION",
+                        "H_DISTRACTOR_MISUSE",
+                        "H_UNSUPPORTED_MATERIAL_CLAIM",
+                    }
+                    hard_check_ids = {
+                        str(item.get("id") or "")
+                        for item in hard_checks or []
+                        if isinstance(item, Mapping)
+                    }
+                    if not isinstance(hard_checks, list) or hard_check_ids != expected_hard_checks:
+                        _add(errors, line_number, sample_id, "invalid_generation_hard_checks")
+
+                    if not isinstance(scoring, Mapping):
+                        _add(errors, line_number, sample_id, "invalid_generation_scoring")
+                    else:
+                        if scoring.get("point_values") != [0, 1]:
+                            _add(errors, line_number, sample_id, "generation_points_must_be_binary")
+                        weights = scoring.get("importance_weights")
+                        if weights != {"core": 3, "important": 2, "optional": 1}:
+                            _add(errors, line_number, sample_id, "invalid_generation_importance_weights")
         elif verifier_type in {"numeric", "numeric_final", "composite_numeric"}:
             gold_numeric = row.get("gold_numeric")
             if gold_atoms:
