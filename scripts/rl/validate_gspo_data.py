@@ -128,7 +128,7 @@ def validate(
 
                     if not isinstance(point_bounds, Mapping):
                         _add(errors, line_number, sample_id, "invalid_generation_point_bounds")
-                        min_points, max_points = 3, 15
+                        min_points, max_points = 2, 15
                     else:
                         min_points = point_bounds.get("min")
                         max_points = point_bounds.get("max")
@@ -202,8 +202,16 @@ def validate(
                         if scoring.get("point_values") != [0, 1]:
                             _add(errors, line_number, sample_id, "generation_points_must_be_binary")
                         weights = scoring.get("importance_weights")
+                        dimension_weights = scoring.get("dimension_weights")
                         if weights != {"core": 3, "important": 2, "optional": 1}:
                             _add(errors, line_number, sample_id, "invalid_generation_importance_weights")
+                        if dimension_weights != {
+                            "fact": 0.50,
+                            "relation": 0.25,
+                            "synthesis": 0.15,
+                            "completeness": 0.10,
+                        }:
+                            _add(errors, line_number, sample_id, "invalid_generation_dimension_weights")
         elif verifier_type in {"numeric", "numeric_final", "composite_numeric"}:
             gold_numeric = row.get("gold_numeric")
             if gold_atoms:
