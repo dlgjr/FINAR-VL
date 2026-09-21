@@ -71,6 +71,7 @@ RUBRIC_REVIEW_SYSTEM = """你是 FINAR-VL Generation RL rubric reviewer。你会
 
 DIMENSIONS = {"fact", "relation", "synthesis", "completeness"}
 IMPORTANCE_WEIGHTS = {"core": 3, "important": 2, "optional": 1}
+DIMENSION_WEIGHTS = {"fact": 0.50, "relation": 0.25, "synthesis": 0.15, "completeness": 0.10}
 HARD_CHECKS = [
     {
         "id": "H_REQUIRED_FACT_CONTRADICTION",
@@ -98,7 +99,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--max-tokens", type=int, default=2048)
     parser.add_argument("--retries", type=int, default=2)
-    parser.add_argument("--min-points", type=int, default=3)
+    parser.add_argument("--min-points", type=int, default=2)
     parser.add_argument("--max-points", type=int, default=15)
     parser.add_argument("--skip-review", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
@@ -253,7 +254,8 @@ def normalize_rubric(
         "scoring": {
             "point_values": [0, 1],
             "importance_weights": IMPORTANCE_WEIGHTS,
-            "quality_score": "importance_weighted_mean",
+            "dimension_weights": DIMENSION_WEIGHTS,
+            "quality_score": "dimension_weighted_mean",
             "acceptance": "quality_score>=runtime_threshold and no_hard_fail",
         },
     }
