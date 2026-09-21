@@ -142,7 +142,7 @@ def validate(
                             or max_points > 32
                         ):
                             _add(errors, line_number, sample_id, "invalid_generation_point_bounds")
-                            min_points, max_points = 3, 15
+                            min_points, max_points = 2, 15
                     if not isinstance(points, list) or not min_points <= len(points) <= max_points:
                         _add(errors, line_number, sample_id, "generation_rubric_point_count_out_of_bounds")
                     else:
