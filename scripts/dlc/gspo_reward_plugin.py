@@ -613,7 +613,10 @@ class GSPOReward(ORM):
         scorer = MixedReward(judge=judge_from_record)
         rewards = scorer(completions, records=records)
         rewards = _apply_generation_reward_policy(rewards, records)
-        rewards = _apply_reasoning_reward_policy(rewards, records)
+        # Reasoning keeps the strict/partial outcome reward here. Perception
+        # and process signals remain separate advantage channels and are
+        # combined only at token-level inside the trainer.
+
 
         self.completed += len(completions)
         route_counts = {"rule": 0, "judge": 0}
