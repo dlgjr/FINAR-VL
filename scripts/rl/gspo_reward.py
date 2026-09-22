@@ -646,11 +646,14 @@ class MixedReward:
                 process_gate_enabled = os.environ.get("GSPO_PROCESS_GATE", "false").lower() == "true"
                 process_result = (
                     verify_reasoning_process(completion, record)
-                    if score >= 1.0 and process_gate_enabled
-                    else {"status": "not_checked", "checked": 0, "errors": []}
+                    if process_gate_enabled
+                    else {"status": "not_checked", "checked": 0, "errors": [], "criteria": {}}
                 )
-                # Process verification is a one-way veto.  It never creates or
-                # increases reward, and UNKNOWN preserves a correct outcome.
+                # Process verification is a one-way veto for outcome reward.
+                # Running it on every rollout supplies trajectory-level
+                # perception/reasoning criteria for group-normalized shaping;
+                # those auxiliary criteria never turn an incorrect outcome
+                # into a strict success.
                 if score >= 1.0 and process_result["status"] == "fail":
                     score = 0.0
                 if isinstance(record, dict):
