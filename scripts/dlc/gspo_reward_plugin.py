@@ -336,7 +336,31 @@ def _apply_generation_reward_policy(
                 detail["policy_signal"] = policy_signal
                 detail["policy_quality"] = policy_quality
                 if diagnostics:
-                    detail["group_criterion_diagnostics"] = diagnostics
+                    compact_diagnostics = {
+                        key: value
+                        for key, value in diagnostics.items()
+                        if key != "criterion_stats"
+                    }
+                    detail["group_criterion_diagnostics"] = compact_diagnostics
+                    if index == indices[0] and "criterion_stats" in diagnostics:
+                        detail["group_criterion_stats"] = diagnostics["criterion_stats"]
+
+            if complete_group:
+                group_mean = sum(output[index] for index in indices) / len(indices)
+                accepted_rewards = [
+                    output[index]
+                    for index in indices
+                    if records[index]["_generation_reward"]["accepted"]
+                ]
+                rejected_rewards = [
+                    output[index]
+                    for index in indices
+                    if not records[index]["_generation_reward"]["accepted"]
+                ]
+                if accepted_rewards and min(accepted_rewards) + 1e-12 < group_mean:
+                    raise RuntimeError("accepted Generation rollout received negative group-relative sign")
+                if rejected_rewards and max(rejected_rewards) - 1e-12 > group_mean:
+                    raise RuntimeError("rejected Generation rollout received positive group-relative sign")
 
         for index in indices:
             detail = records[index]["_generation_reward"]
