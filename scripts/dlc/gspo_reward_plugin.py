@@ -373,192 +373,6 @@ def _apply_generation_reward_policy(
     return output
 
 
-_REASONING_CRITERION_WEIGHTS = {
-    "format": 0.5,
-    "perception_sufficiency": 2.0,
-    "perception_productive": 1.0,
-    "perception_nonredundant": 0.5,
-    "reasoning_arithmetic_valid": 1.5,
-    "reasoning_step_coverage": 1.5,
-    "grounding_consistency": 2.0,
-}
-
-
-def _reasoning_criterion_weight(name: str) -> float:
-    if name.startswith("visual_fact:"):
-        return 2.0
-    return float(_REASONING_CRITERION_WEIGHTS.get(name, 1.0))
-
-
-def _reasoning_criterion_signal(
-    indices: Sequence[int],
-    records: Sequence[dict[str, Any]],
-) -> tuple[dict[int, float], dict[str, Any]]:
-    """Normalize each hard-verifiable trajectory criterion inside a rollout group.
-
-    This is trajectory-level shaping rather than a hard token mask.  The XML
-    perception spans make actions observable; Finance World / program verifiers
-    decide whether those actions are grounded and useful.  Criteria that are
-    already always-passed or always-failed receive zero learnability weight.
-    """
-
-    eps = float(os.environ.get("GSPO_REASONING_CRITERION_EPS", "1e-6"))
-    if eps <= 0:
-        raise ValueError("GSPO_REASONING_CRITERION_EPS must be positive")
-
-    rows: dict[int, dict[str, float]] = {}
-    common: set[str] | None = None
-    for index in indices:
-        process = records[index].get("_process_result")
-        raw = process.get("criteria") if isinstance(process, Mapping) else {}
-        criteria = {
-            str(key): float(value)
-            for key, value in raw.items()
-            if not isinstance(value, bool) and isinstance(value, (int, float))
-            and math.isfinite(float(value))
-        } if isinstance(raw, Mapping) else {}
-        rows[index] = criteria
-        common = set(criteria) if common is None else common & set(criteria)
-
-    keys = sorted(common or [])
-    signal = {index: 0.0 for index in indices}
-    stats: dict[str, dict[str, float]] = {}
-    total_weight = 0.0
-
-    for key in keys:
-        values = [rows[index][key] for index in indices]
-        mean_value = sum(values) / len(values)
-        variance = sum((value - mean_value) ** 2 for value in values) / len(values)
-        # Binary criteria max out at 0.25; continuous criteria use the same
-        # calibrated scale and are clipped at one.
-        learnability = min(1.0, 4.0 * variance)
-        static_weight = _reasoning_criterion_weight(key)
-        stats[key] = {
-            "mean": mean_value,
-            "variance": variance,
-            "learnability": learnability,
-            "static_weight": static_weight,
-        }
-        if learnability <= eps or static_weight <= 0:
-            continue
-        std = math.sqrt(variance + eps)
-        weight = static_weight * learnability
-        total_weight += weight
-        for index, value in zip(indices, values):
-            signal[index] += weight * ((value - mean_value) / std)
-
-    if total_weight > eps:
-        signal = {index: value / total_weight for index, value in signal.items()}
-        max_abs = max((abs(value) for value in signal.values()), default=0.0)
-        if max_abs > eps:
-            signal = {
-                index: max(-1.0, min(1.0, value / max_abs))
-                for index, value in signal.items()
-            }
-    else:
-        signal = {index: 0.0 for index in indices}
-
-    active = sum(float(item["learnability"]) > eps for item in stats.values())
-    return signal, {
-        "criterion_stats": stats,
-        "criterion_count": len(stats),
-        "active_criteria": active,
-        "active_criterion_ratio": active / len(stats) if stats else 0.0,
-    }
-
-
-def _apply_reasoning_reward_policy(
-    rewards: Sequence[float],
-    records: Sequence[dict[str, Any]],
-) -> list[float]:
-    """Acceptance-anchored trajectory shaping for structured Reasoning RL.
-
-    Strict outcome correctness remains the gate.  Perception / step criteria
-    only rank trajectories inside a mixed group, with a G-sized acceptance
-    anchor that guarantees rejected rollouts cannot cross the group mean and
-    become positive-advantage samples.  All-failed groups keep their original
-    partial rewards so the existing Pass@0 batch-scale path remains intact.
-    """
-
-    output = [float(value) for value in rewards]
-    if os.environ.get("GSPO_ROUTE_MODE", "mixed") != "reasoning":
-        return output
-    if os.environ.get("GSPO_REASONING_TRAJECTORY_SHAPING", "true").lower() != "true":
-        return output
-
-    generations = int(os.environ.get("GSPO_NUM_GENERATIONS", "8"))
-    groups: dict[str, list[int]] = {}
-    for index, record in enumerate(records):
-        if str(record.get("verifier_type") or "") not in {"numeric", "numeric_final", "composite_numeric"}:
-            continue
-        if record.get("reward_type") == "judge":
-            continue
-        groups.setdefault(str(record.get("sample_id", f"batch:{index}")), []).append(index)
-
-    for sample_id, indices in groups.items():
-        complete = len(indices) == generations
-        accepted = {index: output[index] >= 1.0 for index in indices}
-        accepted_count = sum(accepted.values())
-
-        for index in indices:
-            process = records[index].get("_process_result")
-            records[index]["_reasoning_reward"] = {
-                "accepted": bool(accepted[index]),
-                "raw_reward": float(output[index]),
-                "criteria": dict(process.get("criteria") or {}) if isinstance(process, Mapping) else {},
-            }
-
-        if not complete:
-            group_policy = "incomplete_group_original"
-        elif accepted_count == 0:
-            # Preserve partial numeric/composite rewards.  The trainer's
-            # Pass@0 calibration handles their small variance globally.
-            group_policy = "all_rejected_original"
-        elif accepted_count == generations:
-            output_values = {index: 1.0 for index in indices}
-            for index, value in output_values.items():
-                output[index] = value
-            group_policy = "all_accepted_one"
-        else:
-            signals, diagnostics = _reasoning_criterion_signal(indices, records)
-            for index in indices:
-                policy_signal = max(-1.0, min(1.0, float(signals[index])))
-                policy_quality = 0.5 * (policy_signal + 1.0)
-                output[index] = (
-                    generations * int(accepted[index]) + policy_quality
-                ) / (generations + 1.0)
-                detail = records[index]["_reasoning_reward"]
-                detail["policy_signal"] = policy_signal
-                detail["policy_quality"] = policy_quality
-                detail["group_criterion_diagnostics"] = {
-                    key: value for key, value in diagnostics.items()
-                    if key != "criterion_stats"
-                }
-                if index == indices[0]:
-                    detail["group_criterion_stats"] = diagnostics.get("criterion_stats", {})
-            group_policy = "mixed_acceptance_anchored"
-
-            group_mean = sum(output[index] for index in indices) / len(indices)
-            accepted_rewards = [output[index] for index in indices if accepted[index]]
-            rejected_rewards = [output[index] for index in indices if not accepted[index]]
-            if accepted_rewards and min(accepted_rewards) + 1e-12 < group_mean:
-                raise RuntimeError("accepted Reasoning rollout received negative group-relative sign")
-            if rejected_rewards and max(rejected_rewards) - 1e-12 > group_mean:
-                raise RuntimeError("rejected Reasoning rollout received positive group-relative sign")
-
-        for index in indices:
-            detail = records[index]["_reasoning_reward"]
-            detail["group_policy"] = group_policy
-            detail["group_sample_id"] = sample_id
-            detail["group_size"] = len(indices)
-            detail["expected_group_size"] = generations
-            detail["group_accept_count"] = accepted_count
-            detail["final_reward"] = float(output[index])
-
-    return output
-
-
-
 def records_from_kwargs(kwargs: Mapping[str, Any], count: int) -> list[dict[str, Any]]:
     supplied = kwargs.get("records", kwargs.get("data"))
     if isinstance(supplied, Sequence) and not isinstance(supplied, (str, bytes)) and supplied and isinstance(supplied[0], Mapping):
@@ -651,7 +465,6 @@ class GSPOReward(ORM):
                                 "process_result": record.get("_process_result"),
                                 "judge_json": record.get("_judge_json"),
                                 "generation_reward": record.get("_generation_reward"),
-                                "reasoning_reward": record.get("_reasoning_reward"),
                             },
                             ensure_ascii=False,
                         )
@@ -667,21 +480,6 @@ class GSPOReward(ORM):
         process_checked = [item for item in process_results if item.get("status") in {"pass", "fail", "unknown"}]
         process_failures = [item for item in process_checked if item.get("status") == "fail"]
         process_unknown = [item for item in process_checked if item.get("status") == "unknown"]
-
-        reasoning_details = [
-            record["_reasoning_reward"]
-            for record in records
-            if isinstance(record.get("_reasoning_reward"), Mapping)
-        ]
-        reasoning_accept = [bool(item.get("accepted")) for item in reasoning_details]
-        reasoning_mixed = [
-            item for item in reasoning_details
-            if item.get("group_policy") == "mixed_acceptance_anchored"
-        ]
-        reasoning_active = [
-            float((item.get("group_criterion_diagnostics") or {}).get("active_criterion_ratio", 0.0))
-            for item in reasoning_mixed
-        ]
 
         generation_details = [
             record["_generation_reward"]
@@ -731,12 +529,6 @@ class GSPOReward(ORM):
             "gspo/process_checked_ratio": len(process_checked) / len(rewards) if rewards else 0.0,
             "gspo/process_veto_ratio": len(process_failures) / len(rewards) if rewards else 0.0,
             "gspo/process_unknown_ratio": len(process_unknown) / len(rewards) if rewards else 0.0,
-            "reasoning/accept_ratio": (
-                sum(reasoning_accept) / len(reasoning_accept) if reasoning_accept else 0.0
-            ),
-            "reasoning/criterion_active_ratio": (
-                mean(reasoning_active) if reasoning_active else 0.0
-            ),
             "generation/quality_mean": mean(quality_scores) if quality_scores else 0.0,
             "generation/accept_ratio": sum(accepted_flags) / len(accepted_flags) if accepted_flags else 0.0,
             "generation/hard_fail_ratio": sum(hard_fail_flags) / len(hard_fail_flags) if hard_fail_flags else 0.0,
@@ -809,14 +601,6 @@ class GSPOReward(ORM):
             "gspo/group_all_zero_ratio",
             "gspo/group_mixed_ratio",
         ]
-        if reasoning_details:
-            live_keys.extend(
-                [
-                    "reasoning/accept_ratio",
-                    "reasoning/criterion_active_ratio",
-                    "gspo/process_veto_ratio",
-                ]
-            )
         if generation_details:
             live_keys.extend(
                 [
