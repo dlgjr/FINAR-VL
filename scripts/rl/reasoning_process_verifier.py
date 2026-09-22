@@ -37,6 +37,12 @@ _ASSIGN_RE = re.compile(
 )
 _PAGE_RE = re.compile(r"第\s*(\d+)\s*页")
 _TRAILING_PAGE_RE = re.compile(r"(?:page|p\.?)[\s:#-]*(\d+)", re.IGNORECASE)
+_PERCEPTION_RE = re.compile(
+    r"<perception(?:\s+page\s*=\s*[\"']?(?P<page>\d+)[\"']?)?\s*>(?P<body>.*?)</perception>",
+    re.IGNORECASE | re.DOTALL,
+)
+_THINK_RE = re.compile(r"<think>(.*?)</think>", re.IGNORECASE | re.DOTALL)
+_ANSWER_TAG_RE = re.compile(r"<answer>(.*?)</answer>", re.IGNORECASE | re.DOTALL)
 
 
 def _completion_text(completion: Any) -> str:
@@ -291,6 +297,203 @@ def _display_tolerance(raw_number: str, gold: Decimal) -> Decimal:
     return max(rounding, relative, Decimal("1e-12"))
 
 
+
+def _structured_format(text: str) -> dict[str, Any]:
+    think_matches = list(_THINK_RE.finditer(text))
+    answer_matches = list(_ANSWER_TAG_RE.finditer(text))
+    perception_matches = list(_PERCEPTION_RE.finditer(text))
+    open_count = len(re.findall(r"<perception(?:\s|>)", text, flags=re.IGNORECASE))
+    close_count = len(re.findall(r"</perception>", text, flags=re.IGNORECASE))
+    valid = (
+        len(think_matches) == 1
+        and len(answer_matches) == 1
+        and open_count == close_count == len(perception_matches)
+        and think_matches[0].start() < think_matches[0].end() <= answer_matches[0].start()
+        and all(
+            think_matches[0].start() <= match.start()
+            and match.end() <= think_matches[0].end()
+            for match in perception_matches
+        )
+    )
+    return {
+        "valid": bool(valid),
+        "think_count": len(think_matches),
+        "answer_count": len(answer_matches),
+        "perception_count": len(perception_matches),
+        "perception_open_count": open_count,
+        "perception_close_count": close_count,
+    }
+
+
+def _perception_metrics(text: str, constraints: Mapping[str, Any]) -> dict[str, Any]:
+    """Score PG-CoT perception actions against construction-time visual facts.
+
+    This follows the spirit of Learning-When-to-Look / Vision-SR1 without
+    pretending XML spans are themselves token-level visual dependencies:
+    tags define observable perception actions, while hard Finance World facts
+    decide whether each action is grounded, sufficient, and non-redundant.
+    """
+
+    facts = [
+        item
+        for item in constraints.get("evidence_facts", [])
+        if isinstance(item, Mapping) and bool(item.get("is_visual"))
+    ]
+    required_ids = {
+        str(value) for value in constraints.get("required_evidence_ids", [])
+    }
+    facts = [
+        fact for fact in facts
+        if not required_ids or str(fact.get("id") or "") in required_ids
+    ]
+    required = {str(fact.get("id") or ""): fact for fact in facts if str(fact.get("id") or "")}
+
+    segments = []
+    covered: set[str] = set()
+    productive = 0
+    redundant = 0
+    explicit_errors: list[dict[str, Any]] = []
+
+    for index, match in enumerate(_PERCEPTION_RE.finditer(text)):
+        body = unicodedata.normalize("NFKC", match.group("body")).strip()
+        flat = re.sub(r"\s+", " ", body)
+        tag_page = str(match.group("page") or "").strip()
+        introduced: list[str] = []
+        mentioned: list[str] = []
+
+        for fact_id, fact in required.items():
+            if not _line_matches_fact(flat, fact, facts):
+                continue
+            mentioned.append(fact_id)
+            assignment = _assignment_after_fact(flat, fact)
+            gold = _decimal(fact.get("value"))
+            value_ok: bool | None = None
+            claimed_value = ""
+            if assignment is not None and gold is not None:
+                candidate = _decimal(assignment.group("number"))
+                if candidate is not None:
+                    claimed_value = str(candidate)
+                    candidate_unit = str(assignment.group("unit") or "")
+                    fact_unit = str(fact.get("unit") or "")
+                    if _unit_compatible(candidate_unit, fact_unit):
+                        tolerance = _display_tolerance(assignment.group("number"), gold)
+                        value_ok = abs(candidate - gold) <= tolerance
+                        if not value_ok:
+                            explicit_errors.append(
+                                {
+                                    "kind": "perception_value",
+                                    "segment": index,
+                                    "fact_id": fact_id,
+                                    "expected": str(gold),
+                                    "claimed": claimed_value,
+                                    "unit": fact_unit,
+                                }
+                            )
+
+            page_ok: bool | None = None
+            gold_page = str(fact.get("page") or "").strip()
+            if tag_page and gold_page:
+                page_ok = (tag_page.lstrip("0") or "0") == (gold_page.lstrip("0") or "0")
+                if not page_ok:
+                    explicit_errors.append(
+                        {
+                            "kind": "perception_page",
+                            "segment": index,
+                            "fact_id": fact_id,
+                            "expected_page": gold_page,
+                            "claimed_page": tag_page,
+                        }
+                    )
+
+            # A visual fact counts as covered only when the model explicitly
+            # emits its value and any explicit page claim is correct. Missing
+            # page stays an omission, while a wrong page is a hard contradiction.
+            if value_ok is True and page_ok is not False:
+                introduced.append(fact_id)
+
+        new_ids = [fact_id for fact_id in introduced if fact_id not in covered]
+        if new_ids:
+            productive += 1
+            covered.update(new_ids)
+        else:
+            redundant += 1
+        segments.append(
+            {
+                "index": index,
+                "page": tag_page,
+                "body": body,
+                "mentioned_fact_ids": mentioned,
+                "matched_fact_ids": introduced,
+                "new_fact_ids": new_ids,
+                "productive": bool(new_ids),
+            }
+        )
+
+    total = len(segments)
+    required_count = len(required)
+    coverage = len(covered) / required_count if required_count else 1.0
+    productive_ratio = productive / total if total else (1.0 if required_count == 0 else 0.0)
+    nonredundant_ratio = 1.0 - (redundant / total) if total else (1.0 if required_count == 0 else 0.0)
+    sufficient = 1.0 if not required or len(covered) == required_count else 0.0
+
+    return {
+        "segments": segments,
+        "required_visual_fact_ids": sorted(required),
+        "covered_visual_fact_ids": sorted(covered),
+        "coverage": float(coverage),
+        "productive_ratio": float(productive_ratio),
+        "nonredundant_ratio": float(nonredundant_ratio),
+        "sufficient": float(sufficient),
+        "explicit_errors": explicit_errors,
+    }
+
+
+def _criterion_scores(
+    *,
+    format_result: Mapping[str, Any],
+    perception: Mapping[str, Any],
+    arithmetic_checks: Sequence[Mapping[str, Any]],
+    fact_checks: Sequence[Mapping[str, Any]],
+    constraints: Mapping[str, Any],
+) -> dict[str, float]:
+    """Expose trajectory-level criteria for group-normalized reward shaping."""
+
+    criteria: dict[str, float] = {
+        "format": float(bool(format_result.get("valid"))),
+        "perception_sufficiency": float(perception.get("sufficient", 0.0)),
+        "perception_productive": float(perception.get("productive_ratio", 0.0)),
+        "perception_nonredundant": float(perception.get("nonredundant_ratio", 0.0)),
+    }
+
+    covered = set(perception.get("covered_visual_fact_ids") or [])
+    for fact_id in perception.get("required_visual_fact_ids") or []:
+        criteria[f"visual_fact:{fact_id}"] = float(fact_id in covered)
+
+    operation_count = constraints.get("operation_count")
+    try:
+        operation_count = int(operation_count) if operation_count is not None else 0
+    except (TypeError, ValueError):
+        operation_count = 0
+    passed_arithmetic = sum(bool(item.get("ok")) for item in arithmetic_checks)
+    criteria["reasoning_arithmetic_valid"] = float(
+        bool(arithmetic_checks) and passed_arithmetic == len(arithmetic_checks)
+    )
+    criteria["reasoning_step_coverage"] = (
+        min(1.0, passed_arithmetic / operation_count)
+        if operation_count > 0
+        else float(bool(arithmetic_checks))
+    )
+
+    grounded_checks = [
+        item for item in fact_checks
+        if item.get("kind") in {"evidence_value", "evidence_page"}
+    ]
+    criteria["grounding_consistency"] = float(
+        bool(grounded_checks) and all(bool(item.get("ok")) for item in grounded_checks)
+    ) if constraints.get("vision_required") else 1.0
+    return criteria
+
+
 def _fact_checks(text: str, constraints: Mapping[str, Any]) -> list[dict[str, Any]]:
     facts = [
         item
@@ -381,17 +584,31 @@ def verify_reasoning_process(
 
     text = _completion_text(completion)
     constraints = process_constraints(record)
-    checks = _arithmetic_checks(text)
-    checks.extend(_fact_checks(text, constraints))
-    errors = [item for item in checks if not item.get("ok", False)]
+    format_result = _structured_format(text)
+    arithmetic_checks = _arithmetic_checks(text)
+    fact_checks = _fact_checks(text, constraints)
+    perception = _perception_metrics(text, constraints)
+    checks = [*arithmetic_checks, *fact_checks]
+    errors = [
+        *[item for item in checks if not item.get("ok", False)],
+        *list(perception.get("explicit_errors") or []),
+    ]
 
     integrity_errors: list[str] = []
     if constraints.get("vision_required") and not constraints.get("images_present"):
         integrity_errors.append("required_visual_evidence_without_images")
 
+    criteria = _criterion_scores(
+        format_result=format_result,
+        perception=perception,
+        arithmetic_checks=arithmetic_checks,
+        fact_checks=fact_checks,
+        constraints=constraints,
+    )
+
     if errors:
         status = "fail"
-    elif checks:
+    elif checks or perception.get("segments"):
         status = "pass"
     else:
         status = "unknown"
@@ -401,6 +618,9 @@ def verify_reasoning_process(
         "checked": len(checks),
         "errors": errors,
         "checks": checks,
+        "format": format_result,
+        "perception": perception,
+        "criteria": criteria,
         "constraints": {
             "builder": constraints.get("builder"),
             "vision_required": constraints.get("vision_required"),
