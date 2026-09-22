@@ -229,11 +229,16 @@ def _local_rows(self, samples: Sequence[Any]) -> list[dict[str, Any]]:
             str(record.get("question", "")),
             record.get("gold_numeric", []),
         )
-        strict_success = bool(raw_score >= 1.0 and process.get("status") != "fail")
+        extra = getattr(sample, "extra", {}) or {}
+        gold_injected = bool(extra.get("_gold_injected"))
+        strict_success = bool(
+            raw_score >= 1.0
+            and process.get("status") != "fail"
+            and not gold_injected
+        )
         first_error_char = process.get("first_error_char")
         if not strict_success and first_error_char is None:
             first_error_char = process.get("answer_start_char")
-        extra = getattr(sample, "extra", {}) or {}
         rows.append(
             {
                 "rank": rank,
@@ -244,6 +249,7 @@ def _local_rows(self, samples: Sequence[Any]) -> list[dict[str, Any]]:
                     or f"{rank}:{local_index // max(1, int(self.num_generations))}"
                 ),
                 "strict_success": strict_success,
+                "gold_injected": gold_injected,
                 "criteria": dict(process.get("criteria") or {}),
                 "first_error_char": first_error_char,
                 "process_status": str(process.get("status") or ""),
@@ -275,7 +281,13 @@ def _compute_local_channels(self, samples: Sequence[Any]) -> list[dict[str, Any]
 
     for rows in groups.values():
         rows.sort(key=lambda row: int(row["global_index"]))
-        k = sum(bool(row["strict_success"]) for row in rows)
+        annotated_k = {int(row.get("group_k", -1)) for row in rows}
+        annotated_k.discard(-1)
+        k = (
+            next(iter(annotated_k))
+            if len(annotated_k) == 1
+            else sum(bool(row["strict_success"]) for row in rows)
+        )
         complete = len(rows) == expected
 
         if complete and 0 < k < expected:
