@@ -420,6 +420,8 @@ def _perception_metrics(text: str, constraints: Mapping[str, Any]) -> dict[str, 
         segments.append(
             {
                 "index": index,
+                "char_start": match.start(),
+                "char_end": match.end(),
                 "page": tag_page,
                 "body": body,
                 "mentioned_fact_ids": mentioned,
@@ -594,6 +596,34 @@ def verify_reasoning_process(
         *list(perception.get("explicit_errors") or []),
     ]
 
+    # Map hard-verifier failures back to the earliest observable character
+    # position. The trainer uses this to preserve verified-good prefixes rather
+    # than broadcasting a negative outcome advantage over the whole CoT.
+    line_offsets: dict[int, int] = {}
+    offset = 0
+    for line_number, line in enumerate(text.splitlines(keepends=True), 1):
+        line_offsets[line_number] = offset
+        offset += len(line)
+    perception_starts = {
+        int(item["index"]): int(item["char_start"])
+        for item in perception.get("segments", [])
+        if "index" in item and "char_start" in item
+    }
+    for error in errors:
+        if "char_start" in error:
+            continue
+        if "line" in error:
+            error["char_start"] = line_offsets.get(int(error["line"]), 0)
+        elif "segment" in error:
+            error["char_start"] = perception_starts.get(int(error["segment"]), 0)
+
+    first_error_char = min(
+        (int(item["char_start"]) for item in errors if "char_start" in item),
+        default=None,
+    )
+    answer_match = _ANSWER_TAG_RE.search(text)
+    answer_start_char = answer_match.start() if answer_match else None
+
     integrity_errors: list[str] = []
     if constraints.get("vision_required") and not constraints.get("images_present"):
         integrity_errors.append("required_visual_evidence_without_images")
@@ -621,6 +651,8 @@ def verify_reasoning_process(
         "format": format_result,
         "perception": perception,
         "criteria": criteria,
+        "first_error_char": first_error_char,
+        "answer_start_char": answer_start_char,
         "constraints": {
             "builder": constraints.get("builder"),
             "vision_required": constraints.get("vision_required"),
