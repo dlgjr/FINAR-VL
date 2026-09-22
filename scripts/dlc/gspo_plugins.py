@@ -65,6 +65,9 @@ wandb_plugin.TRAIN_WANDB_KEYS.update(
         "gold/ce_loss",
         "sampling/resample_rounds",
         "sampling/zero_resample_ratio",
+        "multi_adv/visual_dependency_mean",
+        "multi_adv/perception_adv_abs_mean",
+        "multi_adv/reasoning_adv_abs_mean",
     }
 )
 
