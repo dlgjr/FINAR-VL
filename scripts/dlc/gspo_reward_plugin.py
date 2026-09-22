@@ -467,6 +467,24 @@ class GSPOReward(ORM):
             generation_groups[group_id] = item
         group_accept_counts = [int(item.get("group_accept_count", 0)) for item in generation_groups.values()]
         group_sizes = [int(item.get("group_size", 0)) for item in generation_groups.values()]
+        criterion_diagnostics = [
+            item.get("group_criterion_diagnostics")
+            for item in generation_groups.values()
+            if isinstance(item.get("group_criterion_diagnostics"), Mapping)
+            and "criterion_error" not in item.get("group_criterion_diagnostics", {})
+        ]
+        criterion_active_ratios = [
+            float(item.get("active_criterion_ratio", 0.0))
+            for item in criterion_diagnostics
+        ]
+        criterion_learnabilities = [
+            float(item.get("mean_learnability", 0.0))
+            for item in criterion_diagnostics
+        ]
+        criterion_fallbacks = [
+            item for item in generation_groups.values()
+            if "fallback" in str(item.get("group_policy", ""))
+        ]
 
         summary = {
             "gspo/reward_mean": mean(rewards) if rewards else 0.0,
@@ -499,6 +517,16 @@ class GSPOReward(ORM):
                 sum(0 < count < size for count, size in zip(group_accept_counts, group_sizes))
                 / len(group_accept_counts)
                 if group_accept_counts else 0.0
+            ),
+            "generation/criterion_active_ratio": (
+                mean(criterion_active_ratios) if criterion_active_ratios else 0.0
+            ),
+            "generation/criterion_learnability_mean": (
+                mean(criterion_learnabilities) if criterion_learnabilities else 0.0
+            ),
+            "generation/criterion_fallback_ratio": (
+                len(criterion_fallbacks) / len(generation_groups)
+                if generation_groups else 0.0
             ),
         }
 
@@ -552,6 +580,9 @@ class GSPOReward(ORM):
                     "generation/accept_ratio",
                     "generation/hard_fail_ratio",
                     "generation/group_mixed_accept_ratio",
+                    "generation/criterion_active_ratio",
+                    "generation/criterion_learnability_mean",
+                    "generation/criterion_fallback_ratio",
                 ]
             )
         live_summary = {key: summary[key] for key in live_keys}
