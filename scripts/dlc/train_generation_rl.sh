@@ -13,6 +13,9 @@ export GSPO_JUDGE_MAX_TOKENS="${GSPO_JUDGE_MAX_TOKENS:-1024}"
 export GSPO_GENERATION_ACCEPT_THRESHOLD="${GSPO_GENERATION_ACCEPT_THRESHOLD:-0.75}"
 export GSPO_GENERATION_LEARNABILITY_POWER="${GSPO_GENERATION_LEARNABILITY_POWER:-1.0}"
 export GSPO_GENERATION_CRITERION_EPS="${GSPO_GENERATION_CRITERION_EPS:-1e-6}"
+# Generation uses rubric/judge rewards; do not let the shared Reasoning
+# hard-group curriculum replace open-ended rollouts with reference-answer CE.
+export GSPO_GOLD_INJECT=false
 export GENERATION_RUBRIC_MIN_POINTS="${GENERATION_RUBRIC_MIN_POINTS:-2}"
 export GENERATION_RUBRIC_MAX_POINTS="${GENERATION_RUBRIC_MAX_POINTS:-15}"
 source "$ROOT/scripts/dlc/gspo_env.sh"
