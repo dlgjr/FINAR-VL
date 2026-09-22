@@ -1,4 +1,4 @@
-"""Combined external plugin entrypoint for direct-answer token-level GRPO."""
+"""Combined external plugin entrypoint for FINAR-VL GSPO training."""
 
 from scripts.dlc.gspo_reward_plugin import GSPOReward
 from scripts.dlc.gspo_trainer_plugin import GSPOEvalCallback
@@ -12,6 +12,11 @@ import scripts.dlc.gspo_direct_curriculum_distributed_fix  # noqa: F401,E402
 # Keep strict Pass@k success, but preserve GRPO on strict 0/8 groups whenever
 # partial verifier rewards still have non-zero variance.
 import scripts.dlc.gspo_reward_std_curriculum_plugin  # noqa: F401,E402
+
+# Keep outcome / perception / reasoning advantages separate until token-level
+# policy optimization. Visual token weights come from an image-counterfactual
+# forward; rejected trajectories preserve the verified-good prefix.
+import scripts.dlc.gspo_multi_advantage_plugin  # noqa: F401,E402
 
 # Concise W&B sink + fixed-set evaluation plumbing.
 import scripts.dlc.gspo_wandb_plugin as wandb_plugin  # noqa: F401,E402
@@ -60,6 +65,9 @@ wandb_plugin.TRAIN_WANDB_KEYS.update(
         "gold/ce_loss",
         "sampling/resample_rounds",
         "sampling/zero_resample_ratio",
+        "multi_adv/visual_dependency_mean",
+        "multi_adv/perception_adv_abs_mean",
+        "multi_adv/reasoning_adv_abs_mean",
     }
 )
 
