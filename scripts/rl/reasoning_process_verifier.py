@@ -684,11 +684,24 @@ def verify_reasoning_process(
         if "line" in error:
             error["char_start"] = line_offsets.get(int(error["line"]), 0)
         elif "segment" in error:
-            error["char_start"] = perception_starts.get(int(error["segment"]), 0)
+            segment_index = int(error["segment"])
+            error["char_start"] = perception_starts.get(segment_index, 0)
+            for segment in perception.get("segments", []):
+                if int(segment.get("index", -1)) == segment_index:
+                    error["char_end"] = int(segment.get("char_end", error["char_start"]))
+                    break
 
-    first_error_char = min(
-        (int(item["char_start"]) for item in errors if "char_start" in item),
-        default=None,
+    located_errors = [item for item in errors if "char_start" in item]
+    first_error = (
+        min(located_errors, key=lambda item: int(item["char_start"]))
+        if located_errors
+        else None
+    )
+    first_error_char = int(first_error["char_start"]) if first_error is not None else None
+    first_error_end_char = (
+        int(first_error.get("char_end", first_error_char))
+        if first_error is not None
+        else None
     )
     answer_start_char, answer_end_char = _answer_span(text)
 
@@ -721,6 +734,7 @@ def verify_reasoning_process(
         "criteria": criteria,
         "reasoning_steps": reasoning_steps,
         "first_error_char": first_error_char,
+        "first_error_end_char": first_error_end_char,
         "answer_start_char": answer_start_char,
         "answer_end_char": answer_end_char,
         "constraints": {
