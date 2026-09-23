@@ -501,6 +501,78 @@ def _criterion_scores(
     ) if constraints.get("vision_required") else 1.0
     return criteria
 
+
+def _reasoning_step_spans(
+    arithmetic_checks: Sequence[Mapping[str, Any]],
+    constraints: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Build hard-verifiable, relevance-gated mathematical step spans.
+
+    A correct but unrelated equation such as ``1+1=2`` must not earn process
+    credit. A step is eligible only when it consumes a gold evidence value or
+    the result of an earlier verified-correct eligible step. Legacy rows without
+    evidence metadata fall back to checking all explicit equations.
+    """
+
+    known_values: list[Decimal] = []
+    for fact in constraints.get("evidence_facts", []) or []:
+        if not isinstance(fact, Mapping):
+            continue
+        value = _decimal(fact.get("value"))
+        if value is not None:
+            known_values.append(value)
+
+    fallback_all = not known_values
+    grouped: dict[tuple[int, int], list[Mapping[str, Any]]] = {}
+    for check in arithmetic_checks:
+        if "char_start" not in check or "char_end" not in check:
+            continue
+        key = (int(check["char_start"]), int(check["char_end"]))
+        grouped.setdefault(key, []).append(check)
+
+    steps: list[dict[str, Any]] = []
+    for (char_start, char_end), checks in sorted(grouped.items()):
+        lhs_values: list[Decimal] = []
+        for check in checks:
+            for match in _NUMBER_RE.finditer(str(check.get("lhs") or "")):
+                value = _decimal(match.group(0))
+                if value is not None:
+                    lhs_values.append(value)
+
+        relevant = fallback_all or any(
+            _decimal_equivalent(value, known)
+            for value in lhs_values
+            for known in known_values
+        )
+        if not relevant:
+            continue
+
+        ok = all(bool(check.get("ok")) for check in checks)
+        steps.append(
+            {
+                "kind": "reasoning_step",
+                "char_start": char_start,
+                "char_end": char_end,
+                "score": 1.0 if ok else 0.0,
+                "ok": bool(ok),
+                "line": int(checks[0].get("line", 0) or 0),
+                "checks": len(checks),
+            }
+        )
+
+        if ok:
+            for check in checks:
+                computed = _decimal(check.get("computed"))
+                if computed is not None:
+                    known_values.append(computed)
+                for candidate in check.get("expected_candidates", []) or []:
+                    value = _decimal(candidate)
+                    if value is not None:
+                        known_values.append(value)
+
+    return steps
+
+
 def _fact_checks(text: str, constraints: Mapping[str, Any]) -> list[dict[str, Any]]:
     facts = [
         item
@@ -675,6 +747,7 @@ def verify_reasoning_process(
     fact_checks = _fact_checks(text, constraints)
     perception = _perception_metrics(text, constraints)
     terminal_support = _reasoning_terminal_support(text)
+    reasoning_steps = _reasoning_step_spans(arithmetic_checks, constraints)
     checks = [*arithmetic_checks, *fact_checks]
     errors = [
         *[item for item in checks if not item.get("ok", False)],
@@ -682,6 +755,28 @@ def verify_reasoning_process(
     ]
 
     answer_start_char, answer_end_char = _answer_span(text)
+    first_error_char = min(
+        (
+            int(item["char_start"])
+            for item in errors
+            if item.get("char_start") is not None
+        ),
+        default=None,
+    )
+    wrong_step_start = min(
+        (
+            int(item["char_start"])
+            for item in reasoning_steps
+            if not bool(item.get("ok"))
+        ),
+        default=None,
+    )
+    if wrong_step_start is not None:
+        first_error_char = (
+            wrong_step_start
+            if first_error_char is None
+            else min(first_error_char, wrong_step_start)
+        )
 
     integrity_errors: list[str] = []
     if constraints.get("vision_required") and not constraints.get("images_present"):
@@ -711,6 +806,8 @@ def verify_reasoning_process(
         "format": format_result,
         "perception": perception,
         "criteria": criteria,
+        "reasoning_steps": reasoning_steps,
+        "first_error_char": first_error_char,
         "answer_start_char": answer_start_char,
         "answer_end_char": answer_end_char,
         "constraints": {
@@ -794,6 +891,9 @@ def _self_test() -> None:
     assert good["criteria"]["reasoning_terminal_support"] == 1.0, good
     assert good_scaled["criteria"]["reasoning_terminal_support"] == 1.0, good_scaled
     assert unsupported_terminal["criteria"]["reasoning_terminal_support"] == 0.0, unsupported_terminal
+    assert good["reasoning_steps"] and all(step["ok"] for step in good["reasoning_steps"]), good
+    assert bad_math["first_error_char"] is not None, bad_math
+    assert any(not step["ok"] for step in bad_math["reasoning_steps"]), bad_math
     print(json.dumps({
         "good": good,
         "good_scaled": good_scaled,
