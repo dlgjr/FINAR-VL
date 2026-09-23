@@ -518,17 +518,29 @@ def _postprocess_batch_multi_advantage(self, samples, batch_encoded_inputs):
                     self, sample, int(answer_start)
                 )
 
+            first_error = row.get("first_error_char")
             for step in row.get("step_advantages") or []:
+                step_start = int(step.get("char_start", 0))
                 span = _span_mask(
                     self,
                     sample,
-                    int(step.get("char_start", 0)),
+                    step_start,
                     int(step.get("char_end", step.get("char_start", 0))),
                     seq_len=seq_len,
                     device=device,
                     dtype=dtype,
                 )
                 value = float(step.get("advantage", 0.0))
+                # Save-the-Good-Prefix rule: once a hard error is observed,
+                # later self-consistent calculations are no longer eligible
+                # for positive process credit because they may depend on the
+                # erroneous state.
+                if (
+                    value > 0
+                    and first_error is not None
+                    and step_start >= int(first_error)
+                ):
+                    value = 0.0
                 current = step_offset[row_index]
                 # A verified error dominates an overlapping positive step.
                 if value < 0:
@@ -554,7 +566,6 @@ def _postprocess_batch_multi_advantage(self, samples, batch_encoded_inputs):
                         span,
                     )
 
-            first_error = row.get("first_error_char")
             if first_error is not None:
                 error_start_token = _token_index_for_char(
                     self, sample, int(first_error)
