@@ -1,16 +1,17 @@
 """Deterministic process-grounding verifier for FINAR-VL Reasoning RL.
 
-The verifier is deliberately conservative. It only vetoes an outcome-correct
-numeric rollout when it can prove a contradiction from hard construction-time
-constraints:
+The verifier is deliberately conservative. It labels and localizes only
+process facts that can be proved from hard construction-time constraints:
 
 1. an explicit arithmetic equation is numerically inconsistent;
 2. an explicitly assigned evidence value contradicts a hidden verifier-only
    Finance World fact;
 3. an explicitly cited page for that fact contradicts the gold evidence page.
 
-Anything unsupported or ambiguous is UNKNOWN rather than a failure. The module
-can be used both from the GSPO reward path and as a standalone JSONL auditor.
+Anything unsupported or ambiguous is UNKNOWN rather than a failure. Terminal
+answer correctness is kept separate from these process labels so the trainer
+can assign answer and step credit independently. The module can be used both
+from the GSPO reward path and as a standalone JSONL auditor.
 """
 
 from __future__ import annotations
