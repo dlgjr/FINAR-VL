@@ -44,6 +44,10 @@ _PERCEPTION_RE = re.compile(
 )
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.IGNORECASE | re.DOTALL)
 _ANSWER_TAG_RE = re.compile(r"<answer>(.*?)</answer>", re.IGNORECASE | re.DOTALL)
+_ANSWER_PREFIX_RE = re.compile(
+    r"(?:最终答案|答案|最终结果|结论|Final\\s+Answer|Answer)\\s*[:：]\\s*([^\\r\\n]*)",
+    re.IGNORECASE,
+)
 
 
 def _completion_text(completion: Any) -> str:
@@ -465,8 +469,9 @@ def _criterion_scores(
     arithmetic_checks: Sequence[Mapping[str, Any]],
     fact_checks: Sequence[Mapping[str, Any]],
     constraints: Mapping[str, Any],
+    terminal_support: float,
 ) -> dict[str, float]:
-    """Expose trajectory-level criteria for group-normalized reward shaping."""
+    """Expose independent visual/reasoning criteria for group normalization."""
 
     criteria: dict[str, float] = {
         "format": float(bool(format_result.get("valid"))),
@@ -479,20 +484,13 @@ def _criterion_scores(
     for fact_id in perception.get("required_visual_fact_ids") or []:
         criteria[f"visual_fact:{fact_id}"] = float(fact_id in covered)
 
-    operation_count = constraints.get("operation_count")
-    try:
-        operation_count = int(operation_count) if operation_count is not None else 0
-    except (TypeError, ValueError):
-        operation_count = 0
     passed_arithmetic = sum(bool(item.get("ok")) for item in arithmetic_checks)
     criteria["reasoning_arithmetic_valid"] = float(
         bool(arithmetic_checks) and passed_arithmetic == len(arithmetic_checks)
     )
-    criteria["reasoning_step_coverage"] = (
-        min(1.0, passed_arithmetic / operation_count)
-        if operation_count > 0
-        else float(bool(arithmetic_checks))
-    )
+    # Keep this deliberately simple: the terminal answer must already appear,
+    # numerically normalized, somewhere before the final-answer span.
+    criteria["reasoning_terminal_support"] = float(terminal_support)
 
     grounded_checks = [
         item for item in fact_checks
@@ -502,7 +500,6 @@ def _criterion_scores(
         bool(grounded_checks) and all(bool(item.get("ok")) for item in grounded_checks)
     ) if constraints.get("vision_required") else 1.0
     return criteria
-
 
 def _fact_checks(text: str, constraints: Mapping[str, Any]) -> list[dict[str, Any]]:
     facts = [
@@ -586,56 +583,71 @@ def _fact_checks(text: str, constraints: Mapping[str, Any]) -> list[dict[str, An
     return checks
 
 
-def _reasoning_steps(arithmetic_checks: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Collapse executable equations on the same line into one verifiable step."""
-
-    grouped: dict[tuple[int, int, int], list[Mapping[str, Any]]] = {}
-    for item in arithmetic_checks:
-        key = (
-            int(item.get("line", 0)),
-            int(item.get("char_start", 0)),
-            int(item.get("char_end", 0)),
-        )
-        grouped.setdefault(key, []).append(item)
-
-    steps: list[dict[str, Any]] = []
-    for index, ((line, start, end), items) in enumerate(sorted(grouped.items()), 1):
-        wrong = any(not bool(item.get("ok")) for item in items)
-        steps.append(
-            {
-                "index": index,
-                "line": line,
-                "char_start": start,
-                "char_end": end,
-                "status": "wrong" if wrong else "correct",
-                "check_count": len(items),
-            }
-        )
-    return steps
-
-
-def _answer_span(text: str) -> tuple[int | None, int | None]:
+def _answer_body_and_span(text: str) -> tuple[str, int | None, int | None]:
     tagged = list(_ANSWER_TAG_RE.finditer(text))
     if tagged:
         match = tagged[-1]
-        return match.start(), match.end()
+        return match.group(1).strip(), match.start(), match.end()
 
-    prefixed = list(
-        re.finditer(
-            r"(?:最终答案|答案|最终结果|结论|Final\\s+Answer|Answer)\\s*[:：][^\\r\\n]*",
-            text,
-            flags=re.IGNORECASE,
-        )
-    )
+    prefixed = list(_ANSWER_PREFIX_RE.finditer(text))
     if prefixed:
         match = prefixed[-1]
-        return match.start(), match.end()
+        return match.group(1).strip(), match.start(), match.end()
 
-    nonempty = list(re.finditer(r"(?m)^\\s*\\S.*$", text))
-    if nonempty:
-        match = nonempty[-1]
-        return match.start(), match.end()
-    return None, None
+    return "", None, None
+
+
+def _answer_span(text: str) -> tuple[int | None, int | None]:
+    _body, start, end = _answer_body_and_span(text)
+    return start, end
+
+
+def _numeric_mentions(text: str) -> list[set[Decimal]]:
+    normalized = unicodedata.normalize("NFKC", text)
+    mentions: list[set[Decimal]] = []
+    for match in _NUMBER_RE.finditer(normalized):
+        value = _decimal(match.group(0))
+        if value is None:
+            continue
+        aliases = {value}
+        tail = normalized[match.end() :].lstrip()
+        if tail.startswith("%") or tail.startswith("％"):
+            aliases.add(value / Decimal(100))
+        mentions.append(aliases)
+    return mentions
+
+
+def _decimal_equivalent(left: Decimal, right: Decimal) -> bool:
+    tolerance = max(
+        Decimal("1e-10"),
+        abs(left) * Decimal("1e-10"),
+        abs(right) * Decimal("1e-10"),
+    )
+    return abs(left - right) <= tolerance
+
+
+def _reasoning_terminal_support(text: str) -> float:
+    """Whether every numeric atom in the final answer already appears before it."""
+
+    answer_body, answer_start, _answer_end = _answer_body_and_span(text)
+    if answer_start is None:
+        return 0.0
+
+    answer_values = _numeric_mentions(answer_body)
+    reasoning_values = _numeric_mentions(text[:answer_start])
+    if not answer_values or not reasoning_values:
+        return 0.0
+
+    for answer_aliases in answer_values:
+        matched = any(
+            _decimal_equivalent(answer_value, reasoning_value)
+            for answer_value in answer_aliases
+            for reasoning_aliases in reasoning_values
+            for reasoning_value in reasoning_aliases
+        )
+        if not matched:
+            return 0.0
+    return 1.0
 
 
 def verify_reasoning_process(
@@ -659,51 +671,13 @@ def verify_reasoning_process(
     arithmetic_checks = _arithmetic_checks(text)
     fact_checks = _fact_checks(text, constraints)
     perception = _perception_metrics(text, constraints)
-    reasoning_steps = _reasoning_steps(arithmetic_checks)
+    terminal_support = _reasoning_terminal_support(text)
     checks = [*arithmetic_checks, *fact_checks]
     errors = [
         *[item for item in checks if not item.get("ok", False)],
         *list(perception.get("explicit_errors") or []),
     ]
 
-    # Map hard-verifier failures back to the earliest observable character
-    # position. The trainer uses this to preserve verified-good prefixes rather
-    # than broadcasting a negative outcome advantage over the whole CoT.
-    line_offsets: dict[int, int] = {}
-    offset = 0
-    for line_number, line in enumerate(text.splitlines(keepends=True), 1):
-        line_offsets[line_number] = offset
-        offset += len(line)
-    perception_starts = {
-        int(item["index"]): int(item["char_start"])
-        for item in perception.get("segments", [])
-        if "index" in item and "char_start" in item
-    }
-    for error in errors:
-        if "char_start" in error:
-            continue
-        if "line" in error:
-            error["char_start"] = line_offsets.get(int(error["line"]), 0)
-        elif "segment" in error:
-            segment_index = int(error["segment"])
-            error["char_start"] = perception_starts.get(segment_index, 0)
-            for segment in perception.get("segments", []):
-                if int(segment.get("index", -1)) == segment_index:
-                    error["char_end"] = int(segment.get("char_end", error["char_start"]))
-                    break
-
-    located_errors = [item for item in errors if "char_start" in item]
-    first_error = (
-        min(located_errors, key=lambda item: int(item["char_start"]))
-        if located_errors
-        else None
-    )
-    first_error_char = int(first_error["char_start"]) if first_error is not None else None
-    first_error_end_char = (
-        int(first_error.get("char_end", first_error_char))
-        if first_error is not None
-        else None
-    )
     answer_start_char, answer_end_char = _answer_span(text)
 
     integrity_errors: list[str] = []
@@ -716,6 +690,7 @@ def verify_reasoning_process(
         arithmetic_checks=arithmetic_checks,
         fact_checks=fact_checks,
         constraints=constraints,
+        terminal_support=terminal_support,
     )
 
     if errors:
@@ -733,9 +708,6 @@ def verify_reasoning_process(
         "format": format_result,
         "perception": perception,
         "criteria": criteria,
-        "reasoning_steps": reasoning_steps,
-        "first_error_char": first_error_char,
-        "first_error_end_char": first_error_end_char,
         "answer_start_char": answer_start_char,
         "answer_end_char": answer_end_char,
         "constraints": {
@@ -810,8 +782,23 @@ def _self_test() -> None:
     assert good_scaled["status"] == "pass", good_scaled
     assert bad_math["status"] == "fail", bad_math
     assert bad_visual["status"] == "fail", bad_visual
+    unsupported_terminal = verify_reasoning_process(
+        "2023营业收入=100亿元\n2024营业收入=120亿元\n(120-100)/120=16.67%\n答案：20%",
+        record,
+    )
+
     assert unknown["status"] == "unknown", unknown
-    print(json.dumps({"good": good, "good_scaled": good_scaled, "bad_math": bad_math, "bad_visual": bad_visual, "unknown": unknown}, ensure_ascii=False))
+    assert good["criteria"]["reasoning_terminal_support"] == 1.0, good
+    assert good_scaled["criteria"]["reasoning_terminal_support"] == 1.0, good_scaled
+    assert unsupported_terminal["criteria"]["reasoning_terminal_support"] == 0.0, unsupported_terminal
+    print(json.dumps({
+        "good": good,
+        "good_scaled": good_scaled,
+        "bad_math": bad_math,
+        "bad_visual": bad_visual,
+        "unknown": unknown,
+        "unsupported_terminal": unsupported_terminal,
+    }, ensure_ascii=False))
 
 
 def main() -> None:
