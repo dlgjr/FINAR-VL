@@ -536,10 +536,10 @@ def _get_per_token_multi_advantage(self, *args, **kwargs):
     reasoning_weights = reasoning_weights * reasoning_region_mask
 
     lambda_perception = float(
-        os.environ.get("GSPO_PERCEPTION_ADV_COEF", "0.35")
+        os.environ.get("GSPO_PERCEPTION_ADV_COEF", "0.25")
     )
     lambda_reasoning = float(
-        os.environ.get("GSPO_REASONING_ADV_COEF", "0.35")
+        os.environ.get("GSPO_REASONING_ADV_COEF", "0.25")
     )
     raw_aux = (
         lambda_perception
