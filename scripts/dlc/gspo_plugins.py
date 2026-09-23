@@ -66,8 +66,12 @@ wandb_plugin.TRAIN_WANDB_KEYS.update(
         "sampling/resample_rounds",
         "sampling/zero_resample_ratio",
         "multi_adv/visual_dependency_mean",
+        "multi_adv/answer_adv_abs_mean",
+        "multi_adv/process_offset_abs_mean",
         "multi_adv/perception_adv_abs_mean",
-        "multi_adv/reasoning_adv_abs_mean",
+        "multi_adv/prefix_rows",
+        "multi_adv/error_rows",
+        "multi_adv/process_active_rows",
     }
 )
 

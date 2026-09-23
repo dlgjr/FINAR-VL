@@ -649,13 +649,10 @@ class MixedReward:
                     if process_gate_enabled
                     else {"status": "not_checked", "checked": 0, "errors": [], "criteria": {}}
                 )
-                # Process verification is a one-way veto for outcome reward.
-                # Running it on every rollout supplies trajectory-level
-                # perception/reasoning criteria for group-normalized shaping;
-                # those auxiliary criteria never turn an incorrect outcome
-                # into a strict success.
-                if score >= 1.0 and process_result["status"] == "fail":
-                    score = 0.0
+                # Keep terminal correctness and process correctness decoupled.
+                # The final-answer score remains the primary GRPO outcome;
+                # process criteria are consumed separately by multi-advantage
+                # visual/reasoning credit assignment.
                 if isinstance(record, dict):
                     record["_process_result"] = process_result
                     record["_parser_result"] = {

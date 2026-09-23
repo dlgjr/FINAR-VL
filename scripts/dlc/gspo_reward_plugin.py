@@ -527,7 +527,7 @@ class GSPOReward(ORM):
             "gspo/rule_samples": route_counts["rule"],
             "gspo/judge_samples": route_counts["judge"],
             "gspo/process_checked_ratio": len(process_checked) / len(rewards) if rewards else 0.0,
-            "gspo/process_veto_ratio": len(process_failures) / len(rewards) if rewards else 0.0,
+            "gspo/process_fail_ratio": len(process_failures) / len(rewards) if rewards else 0.0,
             "gspo/process_unknown_ratio": len(process_unknown) / len(rewards) if rewards else 0.0,
             "generation/quality_mean": mean(quality_scores) if quality_scores else 0.0,
             "generation/accept_ratio": sum(accepted_flags) / len(accepted_flags) if accepted_flags else 0.0,

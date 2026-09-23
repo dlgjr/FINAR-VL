@@ -1,16 +1,17 @@
 """Deterministic process-grounding verifier for FINAR-VL Reasoning RL.
 
-The verifier is deliberately conservative. It only vetoes an outcome-correct
-numeric rollout when it can prove a contradiction from hard construction-time
-constraints:
+The verifier is deliberately conservative. It labels and localizes only
+process facts that can be proved from hard construction-time constraints:
 
 1. an explicit arithmetic equation is numerically inconsistent;
 2. an explicitly assigned evidence value contradicts a hidden verifier-only
    Finance World fact;
 3. an explicitly cited page for that fact contradicts the gold evidence page.
 
-Anything unsupported or ambiguous is UNKNOWN rather than a failure. The module
-can be used both from the GSPO reward path and as a standalone JSONL auditor.
+Anything unsupported or ambiguous is UNKNOWN rather than a failure. Terminal
+answer correctness is kept separate from these process labels so the trainer
+can assign answer and step credit independently. The module can be used both
+from the GSPO reward path and as a standalone JSONL auditor.
 """
 
 from __future__ import annotations
@@ -43,6 +44,10 @@ _PERCEPTION_RE = re.compile(
 )
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.IGNORECASE | re.DOTALL)
 _ANSWER_TAG_RE = re.compile(r"<answer>(.*?)</answer>", re.IGNORECASE | re.DOTALL)
+_ANSWER_PREFIX_RE = re.compile(
+    r"(?:最终答案|答案|最终结果|结论|Final\s+Answer|Answer)\s*[:：]\s*([^\r\n]*)",
+    re.IGNORECASE,
+)
 
 
 def _completion_text(completion: Any) -> str:
@@ -153,8 +158,13 @@ def _rhs_numeric(rhs: str) -> list[tuple[Decimal, Decimal]] | None:
 
 def _arithmetic_checks(text: str) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
-    for line_number, raw_line in enumerate(text.splitlines(), 1):
-        line = raw_line.replace("＝", "=")
+    char_offset = 0
+    for line_number, raw_line in enumerate(text.splitlines(keepends=True), 1):
+        visible_line = raw_line.rstrip("\r\n")
+        line = visible_line.replace("＝", "=")
+        line_start = char_offset
+        line_end = char_offset + len(visible_line)
+        char_offset += len(raw_line)
         if "=" not in line:
             continue
         parts = line.split("=")
@@ -170,6 +180,8 @@ def _arithmetic_checks(text: str) -> list[dict[str, Any]]:
                 {
                     "kind": "arithmetic",
                     "line": line_number,
+                    "char_start": line_start,
+                    "char_end": line_end,
                     "lhs": lhs,
                     "rhs": rhs,
                     "computed": str(computed),
@@ -457,8 +469,9 @@ def _criterion_scores(
     arithmetic_checks: Sequence[Mapping[str, Any]],
     fact_checks: Sequence[Mapping[str, Any]],
     constraints: Mapping[str, Any],
+    terminal_support: float,
 ) -> dict[str, float]:
-    """Expose trajectory-level criteria for group-normalized reward shaping."""
+    """Expose independent visual/reasoning criteria for group normalization."""
 
     criteria: dict[str, float] = {
         "format": float(bool(format_result.get("valid"))),
@@ -471,20 +484,13 @@ def _criterion_scores(
     for fact_id in perception.get("required_visual_fact_ids") or []:
         criteria[f"visual_fact:{fact_id}"] = float(fact_id in covered)
 
-    operation_count = constraints.get("operation_count")
-    try:
-        operation_count = int(operation_count) if operation_count is not None else 0
-    except (TypeError, ValueError):
-        operation_count = 0
     passed_arithmetic = sum(bool(item.get("ok")) for item in arithmetic_checks)
     criteria["reasoning_arithmetic_valid"] = float(
         bool(arithmetic_checks) and passed_arithmetic == len(arithmetic_checks)
     )
-    criteria["reasoning_step_coverage"] = (
-        min(1.0, passed_arithmetic / operation_count)
-        if operation_count > 0
-        else float(bool(arithmetic_checks))
-    )
+    # Keep this deliberately simple: the terminal answer must already appear,
+    # numerically normalized, somewhere before the final-answer span.
+    criteria["reasoning_terminal_support"] = float(terminal_support)
 
     grounded_checks = [
         item for item in fact_checks
@@ -494,7 +500,6 @@ def _criterion_scores(
         bool(grounded_checks) and all(bool(item.get("ok")) for item in grounded_checks)
     ) if constraints.get("vision_required") else 1.0
     return criteria
-
 
 def _fact_checks(text: str, constraints: Mapping[str, Any]) -> list[dict[str, Any]]:
     facts = [
@@ -506,8 +511,13 @@ def _fact_checks(text: str, constraints: Mapping[str, Any]) -> list[dict[str, An
         return []
 
     checks: list[dict[str, Any]] = []
-    for line_number, raw_line in enumerate(text.splitlines(), 1):
-        line = unicodedata.normalize("NFKC", raw_line)
+    char_offset = 0
+    for line_number, raw_line in enumerate(text.splitlines(keepends=True), 1):
+        visible_line = raw_line.rstrip("\r\n")
+        line = unicodedata.normalize("NFKC", visible_line)
+        line_start = char_offset
+        line_end = char_offset + len(visible_line)
+        char_offset += len(raw_line)
         for fact in facts:
             if not _line_matches_fact(line, fact, facts):
                 continue
@@ -525,6 +535,8 @@ def _fact_checks(text: str, constraints: Mapping[str, Any]) -> list[dict[str, An
                     {
                         "kind": "evidence_page",
                         "line": line_number,
+                        "char_start": line_start,
+                        "char_end": line_end,
                         "fact_id": fact_id,
                         "expected_page": page,
                         "claimed_pages": page_matches,
@@ -553,6 +565,8 @@ def _fact_checks(text: str, constraints: Mapping[str, Any]) -> list[dict[str, An
                 {
                     "kind": "evidence_value",
                     "line": line_number,
+                    "char_start": line_start,
+                    "char_end": line_end,
                     "fact_id": fact_id,
                     "entity": str(fact.get("entity") or ""),
                     "period": str(fact.get("period") or ""),
@@ -567,6 +581,76 @@ def _fact_checks(text: str, constraints: Mapping[str, Any]) -> list[dict[str, An
                 }
             )
     return checks
+
+
+def _answer_body_and_span(text: str) -> tuple[str, int | None, int | None]:
+    tagged = list(_ANSWER_TAG_RE.finditer(text))
+    if tagged:
+        match = tagged[-1]
+        return match.group(1).strip(), match.start(), match.end()
+
+    prefixed = list(_ANSWER_PREFIX_RE.finditer(text))
+    if prefixed:
+        match = prefixed[-1]
+        return match.group(1).strip(), match.start(), match.end()
+
+    return "", None, None
+
+
+def _answer_span(text: str) -> tuple[int | None, int | None]:
+    _body, start, end = _answer_body_and_span(text)
+    return start, end
+
+
+def _numeric_mentions(text: str) -> list[set[Decimal]]:
+    normalized = unicodedata.normalize("NFKC", text)
+    mentions: list[set[Decimal]] = []
+    for match in _NUMBER_RE.finditer(normalized):
+        value = _decimal(match.group(0))
+        if value is None:
+            continue
+        aliases = {value}
+        tail = normalized[match.end() :].lstrip()
+        if tail.startswith("%") or tail.startswith("％"):
+            aliases.add(value / Decimal(100))
+        mentions.append(aliases)
+    return mentions
+
+
+def _decimal_equivalent(left: Decimal, right: Decimal) -> bool:
+    tolerance = max(
+        Decimal("1e-10"),
+        abs(left) * Decimal("1e-10"),
+        abs(right) * Decimal("1e-10"),
+    )
+    return abs(left - right) <= tolerance
+
+
+def _reasoning_terminal_support(text: str) -> float:
+    """Whether every numeric atom in the final answer already appears before it."""
+
+    answer_body, answer_start, _answer_end = _answer_body_and_span(text)
+    if answer_start is None:
+        return 0.0
+
+    answer_values = _numeric_mentions(answer_body)
+    # Do not let a source value inside <perception> satisfy terminal support by
+    # coincidence; the final value must be stated in the actual reasoning text.
+    reasoning_text = _PERCEPTION_RE.sub("", text[:answer_start])
+    reasoning_values = _numeric_mentions(reasoning_text)
+    if not answer_values or not reasoning_values:
+        return 0.0
+
+    for answer_aliases in answer_values:
+        matched = any(
+            _decimal_equivalent(answer_value, reasoning_value)
+            for answer_value in answer_aliases
+            for reasoning_aliases in reasoning_values
+            for reasoning_value in reasoning_aliases
+        )
+        if not matched:
+            return 0.0
+    return 1.0
 
 
 def verify_reasoning_process(
@@ -590,39 +674,14 @@ def verify_reasoning_process(
     arithmetic_checks = _arithmetic_checks(text)
     fact_checks = _fact_checks(text, constraints)
     perception = _perception_metrics(text, constraints)
+    terminal_support = _reasoning_terminal_support(text)
     checks = [*arithmetic_checks, *fact_checks]
     errors = [
         *[item for item in checks if not item.get("ok", False)],
         *list(perception.get("explicit_errors") or []),
     ]
 
-    # Map hard-verifier failures back to the earliest observable character
-    # position. The trainer uses this to preserve verified-good prefixes rather
-    # than broadcasting a negative outcome advantage over the whole CoT.
-    line_offsets: dict[int, int] = {}
-    offset = 0
-    for line_number, line in enumerate(text.splitlines(keepends=True), 1):
-        line_offsets[line_number] = offset
-        offset += len(line)
-    perception_starts = {
-        int(item["index"]): int(item["char_start"])
-        for item in perception.get("segments", [])
-        if "index" in item and "char_start" in item
-    }
-    for error in errors:
-        if "char_start" in error:
-            continue
-        if "line" in error:
-            error["char_start"] = line_offsets.get(int(error["line"]), 0)
-        elif "segment" in error:
-            error["char_start"] = perception_starts.get(int(error["segment"]), 0)
-
-    first_error_char = min(
-        (int(item["char_start"]) for item in errors if "char_start" in item),
-        default=None,
-    )
-    answer_match = _ANSWER_TAG_RE.search(text)
-    answer_start_char = answer_match.start() if answer_match else None
+    answer_start_char, answer_end_char = _answer_span(text)
 
     integrity_errors: list[str] = []
     if constraints.get("vision_required") and not constraints.get("images_present"):
@@ -634,6 +693,7 @@ def verify_reasoning_process(
         arithmetic_checks=arithmetic_checks,
         fact_checks=fact_checks,
         constraints=constraints,
+        terminal_support=terminal_support,
     )
 
     if errors:
@@ -651,8 +711,8 @@ def verify_reasoning_process(
         "format": format_result,
         "perception": perception,
         "criteria": criteria,
-        "first_error_char": first_error_char,
         "answer_start_char": answer_start_char,
+        "answer_end_char": answer_end_char,
         "constraints": {
             "builder": constraints.get("builder"),
             "vision_required": constraints.get("vision_required"),
@@ -725,8 +785,23 @@ def _self_test() -> None:
     assert good_scaled["status"] == "pass", good_scaled
     assert bad_math["status"] == "fail", bad_math
     assert bad_visual["status"] == "fail", bad_visual
+    unsupported_terminal = verify_reasoning_process(
+        "2023营业收入=100亿元\n2024营业收入=120亿元\n(120-100)/120=16.67%\n答案：20%",
+        record,
+    )
+
     assert unknown["status"] == "unknown", unknown
-    print(json.dumps({"good": good, "good_scaled": good_scaled, "bad_math": bad_math, "bad_visual": bad_visual, "unknown": unknown}, ensure_ascii=False))
+    assert good["criteria"]["reasoning_terminal_support"] == 1.0, good
+    assert good_scaled["criteria"]["reasoning_terminal_support"] == 1.0, good_scaled
+    assert unsupported_terminal["criteria"]["reasoning_terminal_support"] == 0.0, unsupported_terminal
+    print(json.dumps({
+        "good": good,
+        "good_scaled": good_scaled,
+        "bad_math": bad_math,
+        "bad_visual": bad_visual,
+        "unknown": unknown,
+        "unsupported_terminal": unsupported_terminal,
+    }, ensure_ascii=False))
 
 
 def main() -> None:
