@@ -485,11 +485,22 @@ def _postprocess_batch_multi_advantage(self, samples, batch_encoded_inputs):
         batch_rows = rows[cursor : cursor + len(batch)]
         cursor += len(batch)
 
+        parent_advantages = grpo_batch.advantages.clone()
+        answer_values = []
+        for row_index, row in enumerate(batch_rows):
+            # Preserve the existing calibrated Pass@0 partial-answer channel,
+            # but route it only to the terminal answer span. Mixed groups use
+            # strict binary answer correctness; mastered k=8 groups stay zero.
+            if int(row.get("group_k", -1)) == 0:
+                value = float(parent_advantages[row_index, 0].detach().item())
+            else:
+                value = (
+                    float(row["outcome_advantage"])
+                    * float(row["answer_rl_weight"])
+                )
+            answer_values.append(value)
         answer_adv = torch.tensor(
-            [
-                float(row["outcome_advantage"]) * float(row["answer_rl_weight"])
-                for row in batch_rows
-            ],
+            answer_values,
             dtype=dtype,
             device=device,
         )
