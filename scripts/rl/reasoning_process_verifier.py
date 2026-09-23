@@ -503,26 +503,35 @@ def _criterion_scores(
 
 
 def _reasoning_step_spans(
+    text: str,
     arithmetic_checks: Sequence[Mapping[str, Any]],
     constraints: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
-    """Build hard-verifiable, relevance-gated mathematical step spans.
+    """Build a grounded arithmetic DAG and expose only useful math steps.
 
-    A correct but unrelated equation such as ``1+1=2`` must not earn process
-    credit. A step is eligible only when it consumes a gold evidence value or
-    the result of an earlier verified-correct eligible step. Legacy rows without
-    evidence metadata fall back to checking all explicit equations.
+    Positive credit is limited to steps on the chain that supports the emitted
+    final answer. Hard arithmetic errors are always exposed when their inputs
+    are grounded. If no arithmetic step produces the final answer (for example
+    a pure answer-transcription error), all grounded-correct steps remain
+    eligible as a verified prefix.
     """
 
-    known_values: list[Decimal] = []
+    known_evidence: list[Decimal] = []
     for fact in constraints.get("evidence_facts", []) or []:
         if not isinstance(fact, Mapping):
             continue
         value = _decimal(fact.get("value"))
         if value is not None:
-            known_values.append(value)
+            known_evidence.append(value)
 
-    fallback_all = not known_values
+    answer_body, _answer_start, _answer_end = _answer_body_and_span(text)
+    answer_aliases = [
+        value
+        for aliases in _numeric_mentions(answer_body)
+        for value in aliases
+    ]
+
+    fallback_all = not known_evidence
     grouped: dict[tuple[int, int], list[Mapping[str, Any]]] = {}
     for check in arithmetic_checks:
         if "char_start" not in check or "char_end" not in check:
@@ -530,45 +539,99 @@ def _reasoning_step_spans(
         key = (int(check["char_start"]), int(check["char_end"]))
         grouped.setdefault(key, []).append(check)
 
-    steps: list[dict[str, Any]] = []
+    nodes: list[dict[str, Any]] = []
+    prior_outputs: list[tuple[int, Decimal]] = []
     for (char_start, char_end), checks in sorted(grouped.items()):
         lhs_values: list[Decimal] = []
+        declared_outputs: list[Decimal] = []
         for check in checks:
             for match in _NUMBER_RE.finditer(str(check.get("lhs") or "")):
                 value = _decimal(match.group(0))
                 if value is not None:
                     lhs_values.append(value)
+            for candidate in check.get("expected_candidates", []) or []:
+                value = _decimal(candidate)
+                if value is not None:
+                    declared_outputs.append(value)
 
-        relevant = fallback_all or any(
-            _decimal_equivalent(value, known)
-            for value in lhs_values
-            for known in known_values
+        parents = sorted(
+            {
+                parent_index
+                for value in lhs_values
+                for parent_index, output in prior_outputs
+                if _decimal_equivalent(value, output)
+            }
         )
-        if not relevant:
-            continue
-
+        evidence_grounded = any(
+            _decimal_equivalent(value, evidence)
+            for value in lhs_values
+            for evidence in known_evidence
+        )
+        grounded = fallback_all or evidence_grounded or bool(parents)
         ok = all(bool(check.get("ok")) for check in checks)
+        terminal = bool(answer_aliases) and any(
+            _decimal_equivalent(output, answer_value)
+            for output in declared_outputs
+            for answer_value in answer_aliases
+        )
+
+        node = {
+            "index": len(nodes),
+            "char_start": char_start,
+            "char_end": char_end,
+            "line": int(checks[0].get("line", 0) or 0),
+            "ok": bool(ok),
+            "grounded": bool(grounded),
+            "terminal": bool(terminal),
+            "parents": parents,
+            "declared_outputs": declared_outputs,
+            "checks": len(checks),
+        }
+        nodes.append(node)
+
+        if grounded:
+            for output in declared_outputs:
+                prior_outputs.append((int(node["index"]), output))
+
+    terminal_ids = {
+        int(node["index"])
+        for node in nodes
+        if bool(node["grounded"]) and bool(node["terminal"])
+    }
+    chain_ids = set(terminal_ids)
+    frontier = list(terminal_ids)
+    while frontier:
+        current = frontier.pop()
+        for parent in nodes[current]["parents"]:
+            if parent not in chain_ids:
+                chain_ids.add(parent)
+                frontier.append(parent)
+
+    steps: list[dict[str, Any]] = []
+    for node in nodes:
+        if not bool(node["grounded"]):
+            continue
+        ok = bool(node["ok"])
+        on_terminal_chain = (
+            int(node["index"]) in chain_ids
+            if terminal_ids
+            else True
+        )
+        if ok and not on_terminal_chain:
+            continue
         steps.append(
             {
                 "kind": "reasoning_step",
-                "char_start": char_start,
-                "char_end": char_end,
+                "char_start": int(node["char_start"]),
+                "char_end": int(node["char_end"]),
                 "score": 1.0 if ok else 0.0,
-                "ok": bool(ok),
-                "line": int(checks[0].get("line", 0) or 0),
-                "checks": len(checks),
+                "ok": ok,
+                "terminal": bool(node["terminal"]),
+                "on_terminal_chain": bool(on_terminal_chain),
+                "line": int(node["line"]),
+                "checks": int(node["checks"]),
             }
         )
-
-        if ok:
-            for check in checks:
-                computed = _decimal(check.get("computed"))
-                if computed is not None:
-                    known_values.append(computed)
-                for candidate in check.get("expected_candidates", []) or []:
-                    value = _decimal(candidate)
-                    if value is not None:
-                        known_values.append(value)
 
     return steps
 
@@ -747,7 +810,7 @@ def verify_reasoning_process(
     fact_checks = _fact_checks(text, constraints)
     perception = _perception_metrics(text, constraints)
     terminal_support = _reasoning_terminal_support(text)
-    reasoning_steps = _reasoning_step_spans(arithmetic_checks, constraints)
+    reasoning_steps = _reasoning_step_spans(text, arithmetic_checks, constraints)
     checks = [*arithmetic_checks, *fact_checks]
     errors = [
         *[item for item in checks if not item.get("ok", False)],
