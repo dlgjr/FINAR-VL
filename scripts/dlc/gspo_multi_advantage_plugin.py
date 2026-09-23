@@ -454,7 +454,7 @@ def _process_offset_tensor(
         error_applied = True
 
     active_tokens = int((offset.abs() > 1e-12).sum().item())
-    return offset, bool(active_tokens), active_tokens, prefix_applied or error_applied
+    return offset, bool(active_tokens), active_tokens, prefix_applied, error_applied
 
 
 _original_postprocess_batch = GSPOGRPOTrainer._postprocess_batch
@@ -503,6 +503,7 @@ def _postprocess_batch_multi_advantage(self, samples, batch_encoded_inputs):
             dtype=dtype,
             device=device,
         )
+        outcome_mask = torch.zeros_like(answer_mask)
         process_offsets = torch.zeros_like(answer_mask)
         process_active = torch.zeros(len(batch), dtype=torch.bool, device=device)
         prefix_rows = 0
@@ -518,8 +519,28 @@ def _postprocess_batch_multi_advantage(self, samples, batch_encoded_inputs):
                 row.get("answer_end_char"),
             )
             answer_mask[row_index, a_start:a_end] = 1.0
+            outcome_mask[row_index, a_start:a_end] = 1.0
 
-            local_offset, active, _active_tokens, shaped = _process_offset_tensor(
+            # Positive outcome credit is routed only to reasoning spans that
+            # the deterministic verifier can prove correct. Negative outcome
+            # credit stays on the final answer span, so an incorrect answer
+            # cannot erase a verified-good reasoning prefix.
+            if float(row["outcome_advantage"]) > 0:
+                first_error = row.get("first_error_char")
+                for step in row.get("reasoning_steps") or []:
+                    if str(step.get("status") or "") != "correct":
+                        continue
+                    if first_error is not None and int(step.get("char_start", 0)) >= int(first_error):
+                        continue
+                    s_start, s_end = _token_span_for_chars(
+                        self,
+                        sample,
+                        int(step.get("char_start", 0)),
+                        int(step.get("char_end", 0)),
+                    )
+                    outcome_mask[row_index, s_start:s_end] = 1.0
+
+            local_offset, active, _active_tokens, prefix_applied, error_applied = _process_offset_tensor(
                 self,
                 sample,
                 row,
@@ -529,13 +550,14 @@ def _postprocess_batch_multi_advantage(self, samples, batch_encoded_inputs):
             )
             process_offsets[row_index] = local_offset
             process_active[row_index] = active
-            if shaped and not bool(row.get("answer_correct")):
+            if prefix_applied:
                 prefix_rows += 1
-            if row.get("first_error_char") is not None:
+            if error_applied:
                 error_rows += 1
 
         grpo_batch.gspo_answer_advantages = answer_adv
         grpo_batch.gspo_answer_mask = answer_mask
+        grpo_batch.gspo_outcome_mask = outcome_mask
         grpo_batch.gspo_process_offsets = process_offsets
         grpo_batch.gspo_perception_advantages = perception_adv
 
@@ -636,9 +658,10 @@ def _get_per_token_multi_advantage(self, *args, **kwargs):
 
     answer_adv = getattr(grpo_batch, "gspo_answer_advantages", None)
     answer_mask = getattr(grpo_batch, "gspo_answer_mask", None)
+    outcome_mask = getattr(grpo_batch, "gspo_outcome_mask", None)
     process_offsets = getattr(grpo_batch, "gspo_process_offsets", None)
     perception_adv = getattr(grpo_batch, "gspo_perception_advantages", None)
-    if any(value is None for value in (answer_adv, answer_mask, process_offsets, perception_adv)):
+    if any(value is None for value in (answer_adv, answer_mask, outcome_mask, process_offsets, perception_adv)):
         return per_token_logps, entropies
 
     completion_mask = grpo_batch.completion_mask.to(dtype=per_token_logps.dtype)
@@ -652,7 +675,7 @@ def _get_per_token_multi_advantage(self, *args, **kwargs):
     perception_coef = float(os.environ.get("GSPO_PERCEPTION_ADV_COEF", "0.25"))
 
     combined = (
-        answer_adv.view(-1, 1) * answer_mask
+        answer_adv.view(-1, 1) * outcome_mask
         + process_offsets
         + perception_coef * perception_adv.view(-1, 1) * visual_weights
     )
