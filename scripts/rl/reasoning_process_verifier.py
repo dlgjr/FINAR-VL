@@ -45,7 +45,7 @@ _PERCEPTION_RE = re.compile(
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.IGNORECASE | re.DOTALL)
 _ANSWER_TAG_RE = re.compile(r"<answer>(.*?)</answer>", re.IGNORECASE | re.DOTALL)
 _ANSWER_PREFIX_RE = re.compile(
-    r"(?:最终答案|答案|最终结果|结论|Final\\s+Answer|Answer)\\s*[:：]\\s*([^\\r\\n]*)",
+    r"(?:最终答案|答案|最终结果|结论|Final\s+Answer|Answer)\s*[:：]\s*([^\r\n]*)",
     re.IGNORECASE,
 )
 
@@ -634,7 +634,10 @@ def _reasoning_terminal_support(text: str) -> float:
         return 0.0
 
     answer_values = _numeric_mentions(answer_body)
-    reasoning_values = _numeric_mentions(text[:answer_start])
+    # Do not let a source value inside <perception> satisfy terminal support by
+    # coincidence; the final value must be stated in the actual reasoning text.
+    reasoning_text = _PERCEPTION_RE.sub("", text[:answer_start])
+    reasoning_values = _numeric_mentions(reasoning_text)
     if not answer_values or not reasoning_values:
         return 0.0
 
