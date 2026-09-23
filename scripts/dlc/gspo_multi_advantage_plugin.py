@@ -1,19 +1,18 @@
-"""Decoupled answer/process/perception credit assignment for Reasoning RL.
+"""Outcome-anchored multi-advantage credit assignment for Reasoning RL.
 
-The two target failure modes are handled explicitly:
+Final-answer GRPO advantage is the primary signal over the whole completion.
+Visual and reasoning advantages are auxiliary, answer-conditioned residuals:
 
-1. correct final answer + wrong process:
-   the answer span keeps positive outcome advantage while the first verifiable
-   process error receives a local negative offset;
-2. wrong final answer + mostly correct process:
-   only the answer span receives negative outcome advantage, while verified
-   good-prefix steps receive positive process credit and the first hard error
-   receives a local penalty.
+    A_token = A_answer
+              + lambda_v * w_visual(token) * DeltaA_visual
+              + lambda_r * w_reason(token) * DeltaA_reason
 
-The design combines the decoupled step-wise advantage idea from SRaR with the
-verified-good-prefix idea from Verifiable Prefix Policy Optimization (VPPO).
-Perception remains a separate soft token channel based on image-counterfactual
-log-probability sensitivity.
+DeltaA_visual and DeltaA_reason are normalized separately inside the
+answer-correct and answer-wrong rollout buckets.  On rows where A_answer is
+non-zero, auxiliary residuals are capped so they cannot reverse the final
+outcome direction.  When the group has no usable outcome advantage (for
+example all-correct/all-wrong), process/visual variation can still provide
+learning signal.
 """
 
 from __future__ import annotations
@@ -40,6 +39,11 @@ _PERCEPTION_WEIGHTS = {
     "grounding_consistency": 2.0,
 }
 
+_REASONING_WEIGHTS = {
+    "reasoning_arithmetic_valid": 2.0,
+    "reasoning_terminal_support": 2.0,
+}
+
 
 def _completion_text(sample: Any) -> str:
     messages = getattr(sample, "messages", None) or []
@@ -62,7 +66,10 @@ def _has_image(sample: Any) -> bool:
             continue
         content = message.get("content")
         if isinstance(content, Sequence) and not isinstance(content, (str, bytes)):
-            if any(isinstance(item, Mapping) and item.get("type") == "image" for item in content):
+            if any(
+                isinstance(item, Mapping) and item.get("type") == "image"
+                for item in content
+            ):
                 return True
     return bool((getattr(sample, "extra", {}) or {}).get("images"))
 
@@ -104,116 +111,116 @@ def _record_from_sample(sample: Any) -> dict[str, Any]:
     }
 
 
-def _outcome_signal(rows: Sequence[dict[str, Any]], eps: float) -> dict[int, float]:
-    """Standard GRPO normalization on final-answer correctness only."""
-
-    values = [1.0 if row["answer_correct"] else 0.0 for row in rows]
-    mean_value = sum(values) / len(values)
-    variance = sum((value - mean_value) ** 2 for value in values) / len(values)
-    if variance <= eps:
-        return {int(row["global_index"]): 0.0 for row in rows}
-    std = math.sqrt(variance + eps)
-    return {
-        int(row["global_index"]): (value - mean_value) / std
-        for row, value in zip(rows, values)
-    }
+def _criterion_weight(name: str, channel: str) -> float:
+    if channel == "perception":
+        if name.startswith("visual_fact:"):
+            return 2.0
+        return float(_PERCEPTION_WEIGHTS.get(name, 0.0))
+    return float(_REASONING_WEIGHTS.get(name, 0.0))
 
 
-def _perception_signal(rows: Sequence[dict[str, Any]], eps: float) -> dict[int, float]:
-    """Group-normalized perception criteria; zero-variance criteria are silent."""
+def _bucket_channel_signal(
+    rows: Sequence[dict[str, Any]],
+    *,
+    channel: str,
+    eps: float,
+) -> dict[int, float]:
+    """Normalize one auxiliary channel inside answer-correct/wrong buckets."""
 
     signal = {int(row["global_index"]): 0.0 for row in rows}
-    usable = [row for row in rows if not row.get("gold_injected")]
-    if len(usable) <= 1:
-        return signal
+    for answer_correct in (False, True):
+        bucket = [
+            row
+            for row in rows
+            if bool(row.get("answer_correct")) is answer_correct
+            and not bool(row.get("gold_injected"))
+        ]
+        if len(bucket) <= 1:
+            continue
 
-    names = sorted(
-        {
-            str(name)
-            for row in usable
-            for name in (row.get("criteria") or {})
-            if name.startswith("visual_fact:") or name in _PERCEPTION_WEIGHTS
+        names = sorted(
+            {
+                str(name)
+                for row in bucket
+                for name in (row.get("criteria") or {})
+                if _criterion_weight(str(name), channel) > 0
+            }
+        )
+        bucket_signal = {int(row["global_index"]): 0.0 for row in bucket}
+        total_weight = 0.0
+
+        for name in names:
+            values: list[float] = []
+            valid = True
+            for row in bucket:
+                value = (row.get("criteria") or {}).get(name)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    valid = False
+                    break
+                value = float(value)
+                if not math.isfinite(value):
+                    valid = False
+                    break
+                values.append(value)
+            if not valid or len(values) != len(bucket):
+                continue
+
+            mean_value = sum(values) / len(values)
+            variance = sum(
+                (value - mean_value) ** 2 for value in values
+            ) / len(values)
+            learnability = min(1.0, 4.0 * variance)
+            weight = _criterion_weight(name, channel) * learnability
+            if weight <= eps:
+                continue
+
+            std = math.sqrt(variance + eps)
+            total_weight += weight
+            for row, value in zip(bucket, values):
+                bucket_signal[int(row["global_index"])] += (
+                    weight * ((value - mean_value) / std)
+                )
+
+        if total_weight <= eps:
+            continue
+
+        bucket_signal = {
+            key: value / total_weight
+            for key, value in bucket_signal.items()
         }
-    )
-    total_weight = 0.0
-    for name in names:
-        values: list[float] = []
-        valid_rows: list[dict[str, Any]] = []
-        for row in usable:
-            value = (row.get("criteria") or {}).get(name)
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                continue
-            value = float(value)
-            if not math.isfinite(value):
-                continue
-            values.append(value)
-            valid_rows.append(row)
-        if len(values) <= 1:
+        max_abs = max((abs(value) for value in bucket_signal.values()), default=0.0)
+        if max_abs <= eps:
             continue
 
-        mean_value = sum(values) / len(values)
-        variance = sum((value - mean_value) ** 2 for value in values) / len(values)
-        learnability = min(1.0, 4.0 * variance)
-        static_weight = 2.0 if name.startswith("visual_fact:") else float(_PERCEPTION_WEIGHTS[name])
-        weight = static_weight * learnability
-        if weight <= eps:
-            continue
+        for key, value in bucket_signal.items():
+            signal[key] = max(-1.0, min(1.0, value / max_abs))
 
-        std = math.sqrt(variance + eps)
-        total_weight += weight
-        for row, value in zip(valid_rows, values):
-            signal[int(row["global_index"])] += weight * ((value - mean_value) / std)
-
-    if total_weight <= eps:
-        return signal
-
-    signal = {key: value / total_weight for key, value in signal.items()}
-    max_abs = max((abs(value) for value in signal.values()), default=0.0)
-    if max_abs <= eps:
-        return {key: 0.0 for key in signal}
-    return {key: max(-1.0, min(1.0, value / max_abs)) for key, value in signal.items()}
+    return signal
 
 
-def _step_relative_offsets(
-    rows: Sequence[dict[str, Any]],
-    eps: float,
-) -> dict[tuple[int, int], float]:
-    """SRaR-style cross-rollout normalization for aligned reasoning-step ordinals."""
+def _token_index_for_char(self, sample: Any, char_pos: int | None) -> int:
+    ids = list(getattr(sample, "response_token_ids", None) or [])
+    if char_pos is None:
+        return len(ids)
+    if char_pos <= 0 or not ids:
+        return 0
 
-    by_step: dict[int, list[tuple[int, float]]] = {}
-    for row in rows:
-        if row.get("gold_injected"):
-            continue
-        first_error = row.get("first_error_char")
-        for step in row.get("reasoning_steps") or []:
-            # Downstream arithmetic after a hard error may be locally valid but
-            # semantically conditioned on a corrupted state. Do not reinforce it.
-            if first_error is not None and int(step.get("char_start", 0)) > int(first_error):
-                continue
-            status = str(step.get("status") or "")
-            if status not in {"correct", "wrong"}:
-                continue
-            raw = 1.0 if status == "correct" else -1.0
-            by_step.setdefault(int(step.get("index", 0)), []).append(
-                (int(row["global_index"]), raw)
-            )
+    tokenizer = getattr(getattr(self, "template", None), "tokenizer", None)
+    if tokenizer is None:
+        text = _completion_text(sample)
+        if not text:
+            return 0
+        return min(len(ids), max(0, round(len(ids) * char_pos / len(text))))
 
-    offsets: dict[tuple[int, int], float] = {}
-    for step_index, items in by_step.items():
-        if len(items) <= 1:
-            continue
-        values = [value for _, value in items]
-        mean_value = sum(values) / len(values)
-        variance = sum((value - mean_value) ** 2 for value in values) / len(values)
-        if variance <= eps:
-            continue
-        std = math.sqrt(variance + eps)
-        for global_index, value in items:
-            offsets[(global_index, step_index)] = max(
-                -2.0,
-                min(2.0, (value - mean_value) / std),
-            )
-    return offsets
+    lo, hi = 0, len(ids)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        decoded = tokenizer.decode(ids[:mid], skip_special_tokens=False)
+        if len(decoded) >= char_pos:
+            hi = mid
+        else:
+            lo = mid + 1
+    return min(len(ids), lo)
 
 
 def _local_rows(self, samples: Sequence[Any]) -> list[dict[str, Any]]:
@@ -242,20 +249,10 @@ def _local_rows(self, samples: Sequence[Any]) -> list[dict[str, Any]]:
                     or getattr(sample, "prompt_id", "")
                     or f"{rank}:{local_index // max(1, int(self.num_generations))}"
                 ),
-                # Gold CE rows replace a failed on-policy row. Treat them as
-                # outcome-failures for group statistics and exclude them from
-                # process/perception normalization.
                 "answer_correct": bool(raw_score >= 1.0 and not gold_injected),
                 "gold_injected": gold_injected,
                 "criteria": dict(process.get("criteria") or {}),
-                "reasoning_steps": list(process.get("reasoning_steps") or []),
-                "process_status": str(process.get("status") or ""),
-                "first_error_char": process.get("first_error_char"),
-                "first_error_end_char": process.get("first_error_end_char"),
                 "answer_start_char": process.get("answer_start_char"),
-                "answer_end_char": process.get("answer_end_char"),
-                "group_k": int(extra.get("_gspo_group_k", -1)),
-                "answer_rl_weight": float(extra.get("_gspo_rl_weight", 1.0)),
             }
         )
     return rows
@@ -269,20 +266,29 @@ def _compute_local_channels(self, samples: Sequence[Any]) -> list[dict[str, Any]
     for global_index, row in enumerate(all_rows):
         row["global_index"] = global_index
 
-    eps = float(os.environ.get("GSPO_MULTI_ADV_EPS", "1e-6"))
     groups: dict[str, list[dict[str, Any]]] = {}
     for row in all_rows:
         groups.setdefault(str(row["group_id"]), []).append(row)
 
-    outcome: dict[int, float] = {}
+    eps = float(os.environ.get("GSPO_MULTI_ADV_EPS", "1e-6"))
+    expected = int(self.num_generations)
     perception: dict[int, float] = {}
-    step_offsets: dict[tuple[int, int], float] = {}
+    reasoning: dict[int, float] = {}
 
     for rows in groups.values():
         rows.sort(key=lambda row: int(row["global_index"]))
-        outcome.update(_outcome_signal(rows, eps))
-        perception.update(_perception_signal(rows, eps))
-        step_offsets.update(_step_relative_offsets(rows, eps))
+        if len(rows) != expected:
+            for row in rows:
+                idx = int(row["global_index"])
+                perception[idx] = 0.0
+                reasoning[idx] = 0.0
+            continue
+        perception.update(
+            _bucket_channel_signal(rows, channel="perception", eps=eps)
+        )
+        reasoning.update(
+            _bucket_channel_signal(rows, channel="reasoning", eps=eps)
+        )
 
     rank = int(getattr(self.accelerator, "process_index", 0))
     local_output: list[dict[str, Any]] = []
@@ -290,171 +296,21 @@ def _compute_local_channels(self, samples: Sequence[Any]) -> list[dict[str, Any]
         if int(row["rank"]) != rank:
             continue
         idx = int(row["global_index"])
-        row_steps = []
-        for step in row.get("reasoning_steps") or []:
-            copied = dict(step)
-            copied["relative_offset"] = float(
-                step_offsets.get((idx, int(step.get("index", 0))), 0.0)
-            )
-            row_steps.append(copied)
         local_output.append(
             {
                 **row,
-                "reasoning_steps": row_steps,
-                "outcome_advantage": float(outcome.get(idx, 0.0)),
                 "perception_advantage": float(perception.get(idx, 0.0)),
+                "reasoning_advantage": float(reasoning.get(idx, 0.0)),
             }
         )
 
     local_output.sort(key=lambda row: int(row["local_index"]))
     if len(local_output) != len(samples):
         raise RuntimeError(
-            f"multi-advantage gather mismatch: local={len(samples)} recovered={len(local_output)}"
+            f"multi-advantage gather mismatch: local={len(samples)} "
+            f"recovered={len(local_output)}"
         )
     return local_output
-
-
-def _token_span_for_chars(
-    self,
-    sample: Any,
-    start_char: int | None,
-    end_char: int | None,
-) -> tuple[int, int]:
-    """Map verifier character spans to the generated-token axis.
-
-    This follows SRaR's offset-mapping approach and falls back to a monotone
-    character-ratio mapping when tokenizer offsets do not align one-to-one with
-    the sampled response token ids.
-    """
-
-    ids = list(getattr(sample, "response_token_ids", None) or [])
-    total_tokens = len(ids)
-    if total_tokens == 0:
-        return 0, 0
-
-    text = _completion_text(sample)
-    total_chars = len(text)
-    if start_char is None:
-        return max(0, total_tokens - 1), total_tokens
-    start_char = max(0, int(start_char))
-    end_char = max(start_char, int(end_char if end_char is not None else start_char + 1))
-
-    def linear() -> tuple[int, int]:
-        if total_chars <= 0:
-            return 0, total_tokens
-        start = min(total_tokens, int(start_char / total_chars * total_tokens))
-        end = min(
-            total_tokens,
-            max(start + 1, math.ceil(end_char / total_chars * total_tokens)),
-        )
-        return start, end
-
-    tokenizer = getattr(getattr(self, "template", None), "tokenizer", None)
-    if tokenizer is None or not getattr(tokenizer, "is_fast", False):
-        return linear()
-
-    try:
-        encoded = tokenizer(
-            text,
-            add_special_tokens=False,
-            return_offsets_mapping=True,
-        )
-        offsets = encoded["offset_mapping"]
-    except Exception:
-        return linear()
-    if len(offsets) != total_tokens:
-        return linear()
-
-    import bisect
-
-    token_ends = [int(end) for _start, end in offsets]
-    start = bisect.bisect_right(token_ends, start_char)
-    if end_char > start_char:
-        end = bisect.bisect_right(token_ends, max(end_char - 1, start_char)) + 1
-    else:
-        end = start + 1
-    start = max(0, min(start, total_tokens))
-    end = max(start + 1, min(end, total_tokens))
-    return start, end
-
-
-def _process_offset_tensor(
-    self,
-    sample: Any,
-    row: Mapping[str, Any],
-    seq_len: int,
-    *,
-    device,
-    dtype,
-):
-    import torch
-
-    offset = torch.zeros(seq_len, device=device, dtype=dtype)
-    if row.get("gold_injected"):
-        return offset, False, 0, False
-
-    step_coef = float(os.environ.get("GSPO_STEP_ADV_COEF", "0.30"))
-    prefix_coef = float(os.environ.get("GSPO_PREFIX_ADV_COEF", "0.35"))
-    error_coef = float(os.environ.get("GSPO_ERROR_ADV_COEF", "0.50"))
-
-    first_error = row.get("first_error_char")
-    eligible_steps = []
-    good_prefix_steps = []
-    for step in row.get("reasoning_steps") or []:
-        start_char = int(step.get("char_start", 0))
-        if first_error is not None and start_char > int(first_error):
-            continue
-        eligible_steps.append(step)
-        if str(step.get("status") or "") == "correct":
-            if first_error is None or int(step.get("char_end", start_char)) <= int(first_error):
-                good_prefix_steps.append(step)
-
-    # SRaR-style step-relative offset. It is decoupled from the answer baseline
-    # and only touches the tokens belonging to that verified arithmetic step.
-    for step in eligible_steps:
-        relative = float(step.get("relative_offset", 0.0))
-        if abs(relative) <= 1e-12:
-            continue
-        start, end = _token_span_for_chars(
-            self,
-            sample,
-            int(step.get("char_start", 0)),
-            int(step.get("char_end", 0)),
-        )
-        offset[start:end] += step_coef * relative
-
-    # VPPO-style good-prefix preservation. When the final answer is wrong,
-    # verified correct steps before the first error receive an absolute positive
-    # bonus even if every rollout shares the same prefix and group variance is 0.
-    prefix_applied = False
-    if not bool(row.get("answer_correct")) and good_prefix_steps and prefix_coef > 0:
-        per_step = prefix_coef / len(good_prefix_steps)
-        for step in good_prefix_steps:
-            start, end = _token_span_for_chars(
-                self,
-                sample,
-                int(step.get("char_start", 0)),
-                int(step.get("char_end", 0)),
-            )
-            offset[start:end] += per_step
-        prefix_applied = True
-
-    # Hard first-error penalty. This is what fixes the "answer is correct but
-    # process is wrong" case: the answer keeps its positive outcome advantage,
-    # while the localized bad process span is pushed down independently.
-    error_applied = False
-    if first_error is not None and error_coef > 0:
-        start, end = _token_span_for_chars(
-            self,
-            sample,
-            int(first_error),
-            row.get("first_error_end_char"),
-        )
-        offset[start:end] -= error_coef
-        error_applied = True
-
-    active_tokens = int((offset.abs() > 1e-12).sum().item())
-    return offset, bool(active_tokens), active_tokens, prefix_applied, error_applied
 
 
 _original_postprocess_batch = GSPOGRPOTrainer._postprocess_batch
@@ -474,7 +330,8 @@ def _postprocess_batch_multi_advantage(self, samples, batch_encoded_inputs):
     cursor = 0
     if len(gas_chunks) != len(batch_encoded_inputs):
         raise RuntimeError(
-            f"multi-advantage batch mismatch: {len(gas_chunks)} vs {len(batch_encoded_inputs)}"
+            f"multi-advantage batch mismatch: {len(gas_chunks)} "
+            f"vs {len(batch_encoded_inputs)}"
         )
 
     for batch, batch_encoded in zip(gas_chunks, batch_encoded_inputs):
@@ -485,124 +342,66 @@ def _postprocess_batch_multi_advantage(self, samples, batch_encoded_inputs):
         batch_rows = rows[cursor : cursor + len(batch)]
         cursor += len(batch)
 
-        parent_advantages = grpo_batch.advantages.clone()
-        answer_values = []
-        for row_index, row in enumerate(batch_rows):
-            # Preserve the existing calibrated Pass@0 partial-answer channel,
-            # but route it only to the terminal answer span. Mixed groups use
-            # strict binary answer correctness; mastered k=8 groups stay zero.
-            if int(row.get("group_k", -1)) == 0:
-                value = float(parent_advantages[row_index, 0].detach().item())
-            else:
-                value = (
-                    float(row["outcome_advantage"])
-                    * float(row["answer_rl_weight"])
-                )
-            answer_values.append(value)
-        answer_adv = torch.tensor(
-            answer_values,
-            dtype=dtype,
-            device=device,
-        )
         perception_adv = torch.tensor(
             [float(row["perception_advantage"]) for row in batch_rows],
             dtype=dtype,
             device=device,
         )
-        answer_mask = torch.zeros(
-            (len(batch), seq_len),
+        reasoning_adv = torch.tensor(
+            [float(row["reasoning_advantage"]) for row in batch_rows],
             dtype=dtype,
             device=device,
         )
-        outcome_mask = torch.zeros_like(answer_mask)
-        process_offsets = torch.zeros_like(answer_mask)
-        process_active = torch.zeros(len(batch), dtype=torch.bool, device=device)
-        prefix_rows = 0
-        error_rows = 0
 
-        for row_index, (sample, row) in enumerate(zip(batch, batch_rows)):
-            if row.get("gold_injected"):
-                continue
-            a_start, a_end = _token_span_for_chars(
-                self,
-                sample,
-                row.get("answer_start_char"),
-                row.get("answer_end_char"),
-            )
-            answer_mask[row_index, a_start:a_end] = 1.0
-            outcome_mask[row_index, a_start:a_end] = 1.0
+        token_index = torch.arange(seq_len, device=device).view(1, -1)
+        answer_start_tokens = torch.tensor(
+            [
+                _token_index_for_char(
+                    self,
+                    sample,
+                    row.get("answer_start_char"),
+                )
+                for sample, row in zip(batch, batch_rows)
+            ],
+            dtype=torch.long,
+            device=device,
+        )
+        reasoning_region_mask = (
+            token_index < answer_start_tokens.view(-1, 1)
+        ).to(dtype=dtype)
 
-            # Positive outcome credit is routed only to reasoning spans that
-            # the deterministic verifier can prove correct. Negative outcome
-            # credit stays on the final answer span, so an incorrect answer
-            # cannot erase a verified-good reasoning prefix.
-            if float(row["outcome_advantage"]) > 0:
-                first_error = row.get("first_error_char")
-                for step in row.get("reasoning_steps") or []:
-                    if str(step.get("status") or "") != "correct":
-                        continue
-                    if first_error is not None and int(step.get("char_start", 0)) >= int(first_error):
-                        continue
-                    s_start, s_end = _token_span_for_chars(
-                        self,
-                        sample,
-                        int(step.get("char_start", 0)),
-                        int(step.get("char_end", 0)),
-                    )
-                    outcome_mask[row_index, s_start:s_end] = 1.0
-
-            local_offset, active, _active_tokens, prefix_applied, error_applied = _process_offset_tensor(
-                self,
-                sample,
-                row,
-                seq_len,
-                device=device,
-                dtype=dtype,
-            )
-            process_offsets[row_index] = local_offset
-            process_active[row_index] = active
-            if prefix_applied:
-                prefix_rows += 1
-            if error_applied:
-                error_rows += 1
-
-        grpo_batch.gspo_answer_advantages = answer_adv
-        grpo_batch.gspo_answer_mask = answer_mask
-        grpo_batch.gspo_outcome_mask = outcome_mask
-        grpo_batch.gspo_process_offsets = process_offsets
+        grpo_batch.gspo_base_answer_advantages = grpo_batch.advantages.clone()
         grpo_batch.gspo_perception_advantages = perception_adv
+        grpo_batch.gspo_reasoning_advantages = reasoning_adv
+        grpo_batch.gspo_reasoning_region_mask = reasoning_region_mask
 
-        # The curriculum may mark k=0 / k=8 rows as RL-skipped. Re-enable only
-        # rows that now carry independently verified process/perception credit.
+        # k=0/k=8 are normally skipped by the curriculum.  If answer-conditioned
+        # process/visual criteria still distinguish rollouts, allow those rows to
+        # train on the auxiliary residual while the outcome baseline stays zero.
         base_row_weights = getattr(grpo_batch, "gspo_rl_row_weights", None)
         if base_row_weights is None:
-            base_row_weights = torch.ones(len(batch), dtype=torch.float32, device=device)
+            base_row_weights = torch.ones(
+                len(batch), dtype=torch.float32, device=device
+            )
         else:
-            base_row_weights = base_row_weights.to(device=device, dtype=torch.float32)
+            base_row_weights = base_row_weights.to(
+                device=device, dtype=torch.float32
+            )
 
-        perception_active = perception_adv.abs() > 1e-12
         gold_rows = torch.tensor(
             [bool(row.get("gold_injected")) for row in batch_rows],
             dtype=torch.bool,
             device=device,
         )
-        auxiliary_active = (process_active | perception_active) & (~gold_rows)
+        auxiliary_active = (
+            (perception_adv.abs() > 1e-12)
+            | (reasoning_adv.abs() > 1e-12)
+        ) & (~gold_rows)
         grpo_batch.gspo_rl_row_weights = torch.where(
             auxiliary_active,
             torch.ones_like(base_row_weights),
             base_row_weights,
         )
-
-        # Parent advantages are no longer the Reasoning objective. Set a neutral
-        # placeholder; the per-token tensor is assembled after log-probs are
-        # available, immediately before the parent loss consumes it.
-        grpo_batch.advantages = torch.zeros_like(grpo_batch.advantages)
-
-        grpo_batch.gspo_credit_meta = {
-            "prefix_rows": prefix_rows,
-            "error_rows": error_rows,
-            "process_active_rows": int(process_active.sum().item()),
-        }
 
 
 GSPOGRPOTrainer._postprocess_batch = _postprocess_batch_multi_advantage
@@ -611,10 +410,18 @@ GSPOGRPOTrainer._postprocess_batch = _postprocess_batch_multi_advantage
 _original_get_per_token = GSPOGRPOTrainer._get_per_token_logps_and_entropies
 
 
-def _counterfactual_visual_weights(self, model, model_inputs, grpo_batch, per_token_logps):
+def _counterfactual_visual_weights(
+    self,
+    model,
+    model_inputs,
+    grpo_batch,
+    per_token_logps,
+):
     import torch
 
-    completion_mask = grpo_batch.completion_mask.to(dtype=per_token_logps.dtype)
+    completion_mask = grpo_batch.completion_mask.to(
+        dtype=per_token_logps.dtype
+    )
     if GRPOTrainer is None:
         return torch.zeros_like(per_token_logps)
 
@@ -636,22 +443,45 @@ def _counterfactual_visual_weights(self, model, model_inputs, grpo_batch, per_to
             compute_entropy=False,
         )
 
-    delta = (per_token_logps.detach().float() - masked_logps.detach().float()).abs()
+    delta = (
+        per_token_logps.detach().float()
+        - masked_logps.detach().float()
+    ).abs()
     delta = delta * completion_mask.float()
-    denom = completion_mask.float().sum(dim=-1, keepdim=True).clamp(min=1.0)
+    denom = completion_mask.float().sum(
+        dim=-1, keepdim=True
+    ).clamp(min=1.0)
     mean_delta = delta.sum(dim=-1, keepdim=True) / denom
     weights = torch.where(
         mean_delta > 1e-8,
-        (delta / (2.0 * mean_delta.clamp(min=1e-8))).clamp(min=0.0, max=1.0),
+        (
+            delta / (2.0 * mean_delta.clamp(min=1e-8))
+        ).clamp(min=0.0, max=1.0),
         torch.zeros_like(delta),
     )
-    return weights.to(dtype=per_token_logps.dtype)
+
+    # Keep the existing VGPO-style temporal compensation: later generated
+    # tokens receive slightly more visual credit at equal dependency strength.
+    length = weights.shape[-1]
+    position = torch.linspace(
+        0.0,
+        1.0,
+        steps=max(length, 1),
+        device=weights.device,
+        dtype=weights.dtype,
+    ).view(1, -1)
+    temporal = 0.75 + 0.5 * position
+    return (weights * temporal).clamp(max=1.0).to(
+        dtype=per_token_logps.dtype
+    )
 
 
 def _get_per_token_multi_advantage(self, *args, **kwargs):
     import torch
 
-    per_token_logps, entropies = _original_get_per_token(self, *args, **kwargs)
+    per_token_logps, entropies = _original_get_per_token(
+        self, *args, **kwargs
+    )
 
     if os.environ.get("GSPO_ROUTE_MODE", "mixed") != "reasoning":
         return per_token_logps, entropies
@@ -667,15 +497,32 @@ def _get_per_token_multi_advantage(self, *args, **kwargs):
     if model is None or model_inputs is None or grpo_batch is None:
         return per_token_logps, entropies
 
-    answer_adv = getattr(grpo_batch, "gspo_answer_advantages", None)
-    answer_mask = getattr(grpo_batch, "gspo_answer_mask", None)
-    outcome_mask = getattr(grpo_batch, "gspo_outcome_mask", None)
-    process_offsets = getattr(grpo_batch, "gspo_process_offsets", None)
-    perception_adv = getattr(grpo_batch, "gspo_perception_advantages", None)
-    if any(value is None for value in (answer_adv, answer_mask, outcome_mask, process_offsets, perception_adv)):
+    base_adv = getattr(
+        grpo_batch, "gspo_base_answer_advantages", None
+    )
+    perception_adv = getattr(
+        grpo_batch, "gspo_perception_advantages", None
+    )
+    reasoning_adv = getattr(
+        grpo_batch, "gspo_reasoning_advantages", None
+    )
+    reasoning_region_mask = getattr(
+        grpo_batch, "gspo_reasoning_region_mask", None
+    )
+    if any(
+        value is None
+        for value in (
+            base_adv,
+            perception_adv,
+            reasoning_adv,
+            reasoning_region_mask,
+        )
+    ):
         return per_token_logps, entropies
 
-    completion_mask = grpo_batch.completion_mask.to(dtype=per_token_logps.dtype)
+    completion_mask = grpo_batch.completion_mask.to(
+        dtype=per_token_logps.dtype
+    )
     visual_weights = _counterfactual_visual_weights(
         self,
         model,
@@ -683,36 +530,90 @@ def _get_per_token_multi_advantage(self, *args, **kwargs):
         grpo_batch,
         per_token_logps,
     )
-    perception_coef = float(os.environ.get("GSPO_PERCEPTION_ADV_COEF", "0.25"))
+    reasoning_weights = (
+        1.0 - 0.75 * visual_weights
+    ).clamp(min=0.25, max=1.0)
+    reasoning_weights = reasoning_weights * reasoning_region_mask
 
-    combined = (
-        answer_adv.view(-1, 1) * outcome_mask
-        + process_offsets
-        + perception_coef * perception_adv.view(-1, 1) * visual_weights
+    lambda_perception = float(
+        os.environ.get("GSPO_PERCEPTION_ADV_COEF", "0.35")
     )
+    lambda_reasoning = float(
+        os.environ.get("GSPO_REASONING_ADV_COEF", "0.35")
+    )
+    raw_aux = (
+        lambda_perception
+        * perception_adv.view(-1, 1)
+        * visual_weights
+        + lambda_reasoning
+        * reasoning_adv.view(-1, 1)
+        * reasoning_weights
+    )
+
+    # Outcome remains the anchor.  Where a non-zero final-answer advantage
+    # exists, auxiliary process signals may strengthen/weaken it but cannot
+    # flip its sign.  If outcome advantage is zero, retain the auxiliary signal
+    # so all-correct/all-wrong groups can still learn from process variation.
+    cap_ratio = max(
+        0.0,
+        min(
+            0.99,
+            float(
+                os.environ.get(
+                    "GSPO_AUX_TO_OUTCOME_CAP",
+                    "0.75",
+                )
+            ),
+        ),
+    )
+    base_abs = base_adv.abs()
+    limit = cap_ratio * base_abs
+    capped_aux = torch.maximum(
+        torch.minimum(raw_aux, limit),
+        -limit,
+    )
+    aux = torch.where(base_abs > 1e-8, capped_aux, raw_aux)
+
+    combined = base_adv + aux
     grpo_batch.advantages = combined * completion_mask
 
     active = completion_mask.sum().clamp(min=1.0)
-    credit_meta = getattr(grpo_batch, "gspo_credit_meta", {}) or {}
+    zero_outcome_rows = (
+        base_abs.max(dim=-1).values <= 1e-8
+    ).to(dtype=torch.float32)
+    aux_active_rows = (
+        raw_aux.abs().max(dim=-1).values > 1e-8
+    ).to(dtype=torch.float32)
+
     self._gspo_multi_adv_metrics = {
         "visual_dependency_mean": float(
             (visual_weights * completion_mask).sum().detach().item()
             / active.detach().item()
         ),
-        "answer_adv_abs_mean": float(answer_adv.abs().mean().detach().item()),
-        "process_offset_abs_mean": float(
-            (process_offsets.abs() * completion_mask).sum().detach().item()
+        "answer_adv_abs_mean": float(
+            (base_abs * completion_mask).sum().detach().item()
             / active.detach().item()
         ),
-        "perception_adv_abs_mean": float(perception_adv.abs().mean().detach().item()),
-        "prefix_rows": float(credit_meta.get("prefix_rows", 0)),
-        "error_rows": float(credit_meta.get("error_rows", 0)),
-        "process_active_rows": float(credit_meta.get("process_active_rows", 0)),
+        "perception_adv_abs_mean": float(
+            perception_adv.abs().mean().detach().item()
+        ),
+        "reasoning_adv_abs_mean": float(
+            reasoning_adv.abs().mean().detach().item()
+        ),
+        "aux_token_abs_mean": float(
+            (aux.abs() * completion_mask).sum().detach().item()
+            / active.detach().item()
+        ),
+        "zero_outcome_aux_row_ratio": float(
+            (zero_outcome_rows * aux_active_rows).mean().detach().item()
+        ),
     }
     return per_token_logps, entropies
 
 
-GSPOGRPOTrainer._get_per_token_logps_and_entropies = _get_per_token_multi_advantage
+GSPOGRPOTrainer._get_per_token_logps_and_entropies = (
+    _get_per_token_multi_advantage
+)
 
 
 _original_update_metrics = GSPOGRPOTrainer._update_metrics
@@ -725,7 +626,9 @@ def _update_metrics_multi_advantage(self, metrics_data):
         return
     mode = metrics_data["mode"]
     for key, value in values.items():
-        self._metrics[mode][f"multi_adv/{key}"].append(float(value))
+        self._metrics[mode][f"multi_adv/{key}"].append(
+            float(value)
+        )
 
 
 GSPOGRPOTrainer._update_metrics = _update_metrics_multi_advantage
