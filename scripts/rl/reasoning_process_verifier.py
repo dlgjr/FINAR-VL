@@ -153,8 +153,13 @@ def _rhs_numeric(rhs: str) -> list[tuple[Decimal, Decimal]] | None:
 
 def _arithmetic_checks(text: str) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
-    for line_number, raw_line in enumerate(text.splitlines(), 1):
-        line = raw_line.replace("＝", "=")
+    char_offset = 0
+    for line_number, raw_line in enumerate(text.splitlines(keepends=True), 1):
+        visible_line = raw_line.rstrip("\r\n")
+        line = visible_line.replace("＝", "=")
+        line_start = char_offset
+        line_end = char_offset + len(visible_line)
+        char_offset += len(raw_line)
         if "=" not in line:
             continue
         parts = line.split("=")
@@ -170,6 +175,8 @@ def _arithmetic_checks(text: str) -> list[dict[str, Any]]:
                 {
                     "kind": "arithmetic",
                     "line": line_number,
+                    "char_start": line_start,
+                    "char_end": line_end,
                     "lhs": lhs,
                     "rhs": rhs,
                     "computed": str(computed),
@@ -506,8 +513,13 @@ def _fact_checks(text: str, constraints: Mapping[str, Any]) -> list[dict[str, An
         return []
 
     checks: list[dict[str, Any]] = []
-    for line_number, raw_line in enumerate(text.splitlines(), 1):
-        line = unicodedata.normalize("NFKC", raw_line)
+    char_offset = 0
+    for line_number, raw_line in enumerate(text.splitlines(keepends=True), 1):
+        visible_line = raw_line.rstrip("\r\n")
+        line = unicodedata.normalize("NFKC", visible_line)
+        line_start = char_offset
+        line_end = char_offset + len(visible_line)
+        char_offset += len(raw_line)
         for fact in facts:
             if not _line_matches_fact(line, fact, facts):
                 continue
@@ -525,6 +537,8 @@ def _fact_checks(text: str, constraints: Mapping[str, Any]) -> list[dict[str, An
                     {
                         "kind": "evidence_page",
                         "line": line_number,
+                        "char_start": line_start,
+                        "char_end": line_end,
                         "fact_id": fact_id,
                         "expected_page": page,
                         "claimed_pages": page_matches,
@@ -553,6 +567,8 @@ def _fact_checks(text: str, constraints: Mapping[str, Any]) -> list[dict[str, An
                 {
                     "kind": "evidence_value",
                     "line": line_number,
+                    "char_start": line_start,
+                    "char_end": line_end,
                     "fact_id": fact_id,
                     "entity": str(fact.get("entity") or ""),
                     "period": str(fact.get("period") or ""),
@@ -567,6 +583,58 @@ def _fact_checks(text: str, constraints: Mapping[str, Any]) -> list[dict[str, An
                 }
             )
     return checks
+
+
+def _reasoning_steps(arithmetic_checks: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse executable equations on the same line into one verifiable step."""
+
+    grouped: dict[tuple[int, int, int], list[Mapping[str, Any]]] = {}
+    for item in arithmetic_checks:
+        key = (
+            int(item.get("line", 0)),
+            int(item.get("char_start", 0)),
+            int(item.get("char_end", 0)),
+        )
+        grouped.setdefault(key, []).append(item)
+
+    steps: list[dict[str, Any]] = []
+    for index, ((line, start, end), items) in enumerate(sorted(grouped.items()), 1):
+        wrong = any(not bool(item.get("ok")) for item in items)
+        steps.append(
+            {
+                "index": index,
+                "line": line,
+                "char_start": start,
+                "char_end": end,
+                "status": "wrong" if wrong else "correct",
+                "check_count": len(items),
+            }
+        )
+    return steps
+
+
+def _answer_span(text: str) -> tuple[int | None, int | None]:
+    tagged = list(_ANSWER_TAG_RE.finditer(text))
+    if tagged:
+        match = tagged[-1]
+        return match.start(), match.end()
+
+    prefixed = list(
+        re.finditer(
+            r"(?:最终答案|答案|最终结果|结论|Final\\s+Answer|Answer)\\s*[:：][^\\r\\n]*",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+    if prefixed:
+        match = prefixed[-1]
+        return match.start(), match.end()
+
+    nonempty = list(re.finditer(r"(?m)^\\s*\\S.*$", text))
+    if nonempty:
+        match = nonempty[-1]
+        return match.start(), match.end()
+    return None, None
 
 
 def verify_reasoning_process(
@@ -590,6 +658,7 @@ def verify_reasoning_process(
     arithmetic_checks = _arithmetic_checks(text)
     fact_checks = _fact_checks(text, constraints)
     perception = _perception_metrics(text, constraints)
+    reasoning_steps = _reasoning_steps(arithmetic_checks)
     checks = [*arithmetic_checks, *fact_checks]
     errors = [
         *[item for item in checks if not item.get("ok", False)],
@@ -621,8 +690,7 @@ def verify_reasoning_process(
         (int(item["char_start"]) for item in errors if "char_start" in item),
         default=None,
     )
-    answer_match = _ANSWER_TAG_RE.search(text)
-    answer_start_char = answer_match.start() if answer_match else None
+    answer_start_char, answer_end_char = _answer_span(text)
 
     integrity_errors: list[str] = []
     if constraints.get("vision_required") and not constraints.get("images_present"):
@@ -651,8 +719,10 @@ def verify_reasoning_process(
         "format": format_result,
         "perception": perception,
         "criteria": criteria,
+        "reasoning_steps": reasoning_steps,
         "first_error_char": first_error_char,
         "answer_start_char": answer_start_char,
+        "answer_end_char": answer_end_char,
         "constraints": {
             "builder": constraints.get("builder"),
             "vision_required": constraints.get("vision_required"),
