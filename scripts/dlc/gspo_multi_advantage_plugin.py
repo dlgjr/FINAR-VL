@@ -245,6 +245,10 @@ def _step_advantages(
             continue
         for step in row.get("reasoning_steps") or []:
             score = step.get("score")
+            if bool(step.get("terminal")) and not bool(row.get("answer_correct")):
+                # A self-consistent formula that produces a wrong final answer
+                # is not a correct terminal reasoning step.
+                score = 0.0
             if isinstance(score, bool) or not isinstance(score, (int, float)):
                 continue
             score = float(score)
@@ -318,6 +322,22 @@ def _local_rows(self, samples: Sequence[Any]) -> list[dict[str, Any]]:
         )
         extra = getattr(sample, "extra", {}) or {}
         gold_injected = bool(extra.get("_gold_injected"))
+        answer_correct = bool(raw_score >= 1.0 and not gold_injected)
+        reasoning_steps = list(process.get("reasoning_steps") or [])
+        first_error_char = process.get("first_error_char")
+        if not answer_correct:
+            terminal_starts = [
+                int(step["char_start"])
+                for step in reasoning_steps
+                if bool(step.get("terminal")) and step.get("char_start") is not None
+            ]
+            if terminal_starts:
+                terminal_error = min(terminal_starts)
+                first_error_char = (
+                    terminal_error
+                    if first_error_char is None
+                    else min(int(first_error_char), terminal_error)
+                )
 
         rows.append(
             {
@@ -328,11 +348,11 @@ def _local_rows(self, samples: Sequence[Any]) -> list[dict[str, Any]]:
                     or getattr(sample, "prompt_id", "")
                     or f"{rank}:{local_index // max(1, int(self.num_generations))}"
                 ),
-                "answer_correct": bool(raw_score >= 1.0 and not gold_injected),
+                "answer_correct": answer_correct,
                 "gold_injected": gold_injected,
                 "criteria": dict(process.get("criteria") or {}),
-                "reasoning_steps": list(process.get("reasoning_steps") or []),
-                "first_error_char": process.get("first_error_char"),
+                "reasoning_steps": reasoning_steps,
+                "first_error_char": first_error_char,
                 "answer_start_char": process.get("answer_start_char"),
                 "answer_end_char": process.get("answer_end_char"),
             }
