@@ -649,10 +649,10 @@ class MixedReward:
                     if process_gate_enabled
                     else {"status": "not_checked", "checked": 0, "errors": [], "criteria": {}}
                 )
-                # Keep terminal correctness and process correctness
-                # decoupled. A correct final answer must retain its outcome
-                # signal even when an intermediate step is wrong; the trainer
-                # assigns process penalties to the offending step span.
+                # Keep terminal correctness and process correctness decoupled.
+                # The final-answer score remains the primary GRPO outcome;
+                # process criteria are consumed separately by multi-advantage
+                # visual/reasoning credit assignment.
                 if isinstance(record, dict):
                     record["_process_result"] = process_result
                     record["_parser_result"] = {
