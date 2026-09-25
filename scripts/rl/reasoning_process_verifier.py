@@ -395,6 +395,8 @@ def _perception_metrics(text: str, constraints: Mapping[str, Any]) -> dict[str, 
                                 {
                                     "kind": "perception_value",
                                     "segment": index,
+                                    "char_start": match.start(),
+                                    "char_end": match.end(),
                                     "fact_id": fact_id,
                                     "expected": str(gold),
                                     "claimed": claimed_value,
@@ -411,6 +413,8 @@ def _perception_metrics(text: str, constraints: Mapping[str, Any]) -> dict[str, 
                         {
                             "kind": "perception_page",
                             "segment": index,
+                            "char_start": match.start(),
+                            "char_end": match.end(),
                             "fact_id": fact_id,
                             "expected_page": gold_page,
                             "claimed_page": tag_page,
@@ -500,6 +504,141 @@ def _criterion_scores(
         bool(grounded_checks) and all(bool(item.get("ok")) for item in grounded_checks)
     ) if constraints.get("vision_required") else 1.0
     return criteria
+
+
+def _reasoning_step_spans(
+    text: str,
+    arithmetic_checks: Sequence[Mapping[str, Any]],
+    constraints: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Build a grounded arithmetic DAG and expose only useful math steps.
+
+    Positive credit is limited to steps on the chain that supports the emitted
+    final answer. Hard arithmetic errors are always exposed when their inputs
+    are grounded. If no arithmetic step produces the final answer (for example
+    a pure answer-transcription error), all grounded-correct steps remain
+    eligible as a verified prefix.
+    """
+
+    known_evidence: list[Decimal] = []
+    for fact in constraints.get("evidence_facts", []) or []:
+        if not isinstance(fact, Mapping):
+            continue
+        value = _decimal(fact.get("value"))
+        if value is not None:
+            known_evidence.append(value)
+
+    answer_body, _answer_start, _answer_end = _answer_body_and_span(text)
+    answer_aliases = [
+        value
+        for aliases in _numeric_mentions(answer_body)
+        for value in aliases
+    ]
+
+    fallback_all = not known_evidence
+    grouped: dict[tuple[int, int], list[Mapping[str, Any]]] = {}
+    for check in arithmetic_checks:
+        if "char_start" not in check or "char_end" not in check:
+            continue
+        key = (int(check["char_start"]), int(check["char_end"]))
+        grouped.setdefault(key, []).append(check)
+
+    nodes: list[dict[str, Any]] = []
+    prior_outputs: list[tuple[int, Decimal]] = []
+    for (char_start, char_end), checks in sorted(grouped.items()):
+        lhs_values: list[Decimal] = []
+        declared_outputs: list[Decimal] = []
+        for check in checks:
+            for match in _NUMBER_RE.finditer(str(check.get("lhs") or "")):
+                value = _decimal(match.group(0))
+                if value is not None:
+                    lhs_values.append(value)
+            for candidate in check.get("expected_candidates", []) or []:
+                value = _decimal(candidate)
+                if value is not None:
+                    declared_outputs.append(value)
+
+        parents = sorted(
+            {
+                parent_index
+                for value in lhs_values
+                for parent_index, output in prior_outputs
+                if _decimal_equivalent(value, output)
+            }
+        )
+        evidence_grounded = any(
+            _decimal_equivalent(value, evidence)
+            for value in lhs_values
+            for evidence in known_evidence
+        )
+        grounded = fallback_all or evidence_grounded or bool(parents)
+        ok = all(bool(check.get("ok")) for check in checks)
+        terminal = bool(answer_aliases) and any(
+            _decimal_equivalent(output, answer_value)
+            for output in declared_outputs
+            for answer_value in answer_aliases
+        )
+
+        node = {
+            "index": len(nodes),
+            "char_start": char_start,
+            "char_end": char_end,
+            "line": int(checks[0].get("line", 0) or 0),
+            "ok": bool(ok),
+            "grounded": bool(grounded),
+            "terminal": bool(terminal),
+            "parents": parents,
+            "declared_outputs": declared_outputs,
+            "checks": len(checks),
+        }
+        nodes.append(node)
+
+        if grounded:
+            for output in declared_outputs:
+                prior_outputs.append((int(node["index"]), output))
+
+    terminal_ids = {
+        int(node["index"])
+        for node in nodes
+        if bool(node["grounded"]) and bool(node["terminal"])
+    }
+    chain_ids = set(terminal_ids)
+    frontier = list(terminal_ids)
+    while frontier:
+        current = frontier.pop()
+        for parent in nodes[current]["parents"]:
+            if parent not in chain_ids:
+                chain_ids.add(parent)
+                frontier.append(parent)
+
+    steps: list[dict[str, Any]] = []
+    for node in nodes:
+        if not bool(node["grounded"]):
+            continue
+        ok = bool(node["ok"])
+        on_terminal_chain = (
+            int(node["index"]) in chain_ids
+            if terminal_ids
+            else True
+        )
+        if ok and not on_terminal_chain:
+            continue
+        steps.append(
+            {
+                "kind": "reasoning_step",
+                "char_start": int(node["char_start"]),
+                "char_end": int(node["char_end"]),
+                "score": 1.0 if ok else 0.0,
+                "ok": ok,
+                "terminal": bool(node["terminal"]),
+                "on_terminal_chain": bool(on_terminal_chain),
+                "line": int(node["line"]),
+                "checks": int(node["checks"]),
+            }
+        )
+
+    return steps
+
 
 def _fact_checks(text: str, constraints: Mapping[str, Any]) -> list[dict[str, Any]]:
     facts = [
@@ -675,6 +814,7 @@ def verify_reasoning_process(
     fact_checks = _fact_checks(text, constraints)
     perception = _perception_metrics(text, constraints)
     terminal_support = _reasoning_terminal_support(text)
+    reasoning_steps = _reasoning_step_spans(text, arithmetic_checks, constraints)
     checks = [*arithmetic_checks, *fact_checks]
     errors = [
         *[item for item in checks if not item.get("ok", False)],
@@ -682,6 +822,28 @@ def verify_reasoning_process(
     ]
 
     answer_start_char, answer_end_char = _answer_span(text)
+    first_error_char = min(
+        (
+            int(item["char_start"])
+            for item in errors
+            if item.get("char_start") is not None
+        ),
+        default=None,
+    )
+    wrong_step_start = min(
+        (
+            int(item["char_start"])
+            for item in reasoning_steps
+            if not bool(item.get("ok"))
+        ),
+        default=None,
+    )
+    if wrong_step_start is not None:
+        first_error_char = (
+            wrong_step_start
+            if first_error_char is None
+            else min(first_error_char, wrong_step_start)
+        )
 
     integrity_errors: list[str] = []
     if constraints.get("vision_required") and not constraints.get("images_present"):
@@ -711,6 +873,8 @@ def verify_reasoning_process(
         "format": format_result,
         "perception": perception,
         "criteria": criteria,
+        "reasoning_steps": reasoning_steps,
+        "first_error_char": first_error_char,
         "answer_start_char": answer_start_char,
         "answer_end_char": answer_end_char,
         "constraints": {
@@ -794,6 +958,9 @@ def _self_test() -> None:
     assert good["criteria"]["reasoning_terminal_support"] == 1.0, good
     assert good_scaled["criteria"]["reasoning_terminal_support"] == 1.0, good_scaled
     assert unsupported_terminal["criteria"]["reasoning_terminal_support"] == 0.0, unsupported_terminal
+    assert good["reasoning_steps"] and all(step["ok"] for step in good["reasoning_steps"]), good
+    assert bad_math["first_error_char"] is not None, bad_math
+    assert any(not step["ok"] for step in bad_math["reasoning_steps"]), bad_math
     print(json.dumps({
         "good": good,
         "good_scaled": good_scaled,
